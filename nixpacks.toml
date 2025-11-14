@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ['python39', 'python39Packages.pip', 'python39Packages.virtualenv']
+nixPkgs = ['python311', 'python311Packages.pip']
 
 [phases.install]
 cmds = ['python -m pip install --upgrade pip setuptools wheel', 'python -m pip install -r requirements.txt']
