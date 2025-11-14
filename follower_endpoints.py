@@ -348,7 +348,28 @@ async def register_user(
         # Check if email already exists
         existing = db.query(User).filter(User.email == registration.email).first()
         if existing:
-            # If already exists but not verified, resend verification email
+            # If already exists and verified, offer to resend API key via email
+            if existing.verified:
+                # Send API key to their email
+                from email_service import send_api_key_email
+                email_sent = send_api_key_email(existing.email, existing.api_key)
+                
+                if email_sent:
+                    return {
+                        "status": "key_resent",
+                        "message": "Your account already exists! We've sent your API key to your email.",
+                        "email": existing.email
+                    }
+                else:
+                    # Email service not configured - show them the key in dev mode
+                    return {
+                        "status": "already_verified",
+                        "message": "Email already registered. Email service not configured.",
+                        "api_key": existing.api_key,
+                        "note": "Save this key! In production, it would be emailed to you."
+                    }
+            
+            # If exists but not verified, resend verification email
             if not existing.verified:
                 # Generate new verification token
                 verification_token = secrets.token_urlsafe(32)
