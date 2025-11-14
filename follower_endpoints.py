@@ -341,6 +341,314 @@ async def register_user(
     
     Called by: Your signup form/website
     Auth: Requires MASTER_API_KEY
+    
+    Flow: User registers → Verification email sent → User clicks link → API key shown
+    """
+    try:
+        # Check if email already exists
+        existing = db.query(User).filter(User.email == registration.email).first()
+        if existing:
+            # If already exists but not verified, resend verification email
+            if not existing.verified:
+                # Generate new verification token
+                verification_token = secrets.token_urlsafe(32)
+                existing.verification_token = verification_token
+                existing.verification_expires = datetime.utcnow() + timedelta(hours=1)
+                db.commit()
+                
+                # Send verification email
+                from email_service import send_verification_email
+                email_sent = send_verification_email(existing.email, verification_token)
+                
+                if email_sent:
+                    print(f"📧 Verification email resent to: {registration.email}")
+                    return {
+                        "status": "verification_sent",
+                        "message": "Verification email sent! Check your inbox."
+                    }
+                else:
+                    # If email service not configured, show token in response (development only)
+                    print(f"⚠️ Email service not configured - showing verification link")
+                    return {
+                        "status": "verification_required",
+                        "message": "Email service not configured",
+                        "verification_link": f"/verify/{verification_token}"
+                    }
+            else:
+                raise HTTPException(status_code=400, detail="Email already registered and verified. Please login or contact support.")
+        
+        # Create new user
+        api_key = User.generate_api_key()
+        verification_token = secrets.token_urlsafe(32)
+        
+        user = User(
+            email=registration.email,
+            api_key=api_key,
+            kraken_account_id=registration.kraken_account_id,
+            verified=False,
+            verification_token=verification_token,
+            verification_expires=datetime.utcnow() + timedelta(hours=1),
+            access_granted=False  # Only grant after verification
+        )
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        # Send verification email
+        from email_service import send_verification_email
+        email_sent = send_verification_email(user.email, verification_token)
+        
+        if email_sent:
+            print(f"✅ New user registered: {registration.email}")
+            print(f"📧 Verification email sent")
+            
+            return {
+                "status": "verification_sent",
+                "email": user.email,
+                "message": "Verification email sent! Check your inbox to get your API key."
+            }
+        else:
+            # If email service not configured, show token in response (development only)
+            print(f"✅ New user registered: {registration.email}")
+            print(f"⚠️ Email service not configured - showing verification link")
+            
+            return {
+                "status": "verification_required",
+                "email": user.email,
+                "message": "Email service not configured. Use the verification link below:",
+                "verification_link": f"/verify/{verification_token}"
+            }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error registering user: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/verify/{token}", response_class=HTMLResponse)
+async def verify_email(
+    token: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Verify user email and show API key
+    
+    Called by: User clicking link in verification email
+    Auth: Token-based (secure)
+    """
+    try:
+        # Find user by token
+        user = db.query(User).filter(
+            User.verification_token == token,
+            User.verification_expires > datetime.utcnow()
+        ).first()
+        
+        if not user:
+            # Token invalid or expired
+            return HTMLResponse(
+                content="""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Verification Failed</title>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            min-height: 100vh;
+                            margin: 0;
+                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        }
+                        .container {
+                            background: white;
+                            border-radius: 20px;
+                            padding: 40px;
+                            max-width: 500px;
+                            text-align: center;
+                            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                        }
+                        h1 { color: #ef4444; }
+                        a {
+                            display: inline-block;
+                            margin-top: 20px;
+                            padding: 12px 24px;
+                            background: #667eea;
+                            color: white;
+                            text-decoration: none;
+                            border-radius: 8px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="container">
+                        <h1>❌ Verification Failed</h1>
+                        <p>This verification link is invalid or has expired.</p>
+                        <p>Verification links expire after 1 hour.</p>
+                        <a href="/signup">Sign Up Again</a>
+                    </div>
+                </body>
+                </html>
+                """,
+                status_code=400
+            )
+        
+        # Mark user as verified
+        user.verified = True
+        user.access_granted = True
+        user.verification_token = None
+        user.verification_expires = None
+        db.commit()
+        
+        # Optionally send API key via email for extra security
+        from email_service import send_api_key_email
+        send_api_key_email(user.email, user.api_key)
+        
+        print(f"✅ User verified: {user.email}")
+        
+        # Show API key on page
+        return HTMLResponse(
+            content=f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Email Verified!</title>
+                <style>
+                    body {{
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        min-height: 100vh;
+                        margin: 0;
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        padding: 20px;
+                    }}
+                    .container {{
+                        background: white;
+                        border-radius: 20px;
+                        padding: 40px;
+                        max-width: 600px;
+                        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                    }}
+                    h1 {{ color: #10b981; text-align: center; }}
+                    .warning {{
+                        background: #fee2e2;
+                        border-left: 4px solid #ef4444;
+                        padding: 15px;
+                        border-radius: 4px;
+                        margin: 20px 0;
+                    }}
+                    .api-key {{
+                        background: #f0f7ff;
+                        border: 2px dashed #667eea;
+                        padding: 15px;
+                        border-radius: 8px;
+                        font-family: 'Courier New', monospace;
+                        font-size: 16px;
+                        word-break: break-all;
+                        margin: 20px 0;
+                    }}
+                    .btn {{
+                        display: inline-block;
+                        padding: 12px 24px;
+                        background: #667eea;
+                        color: white;
+                        text-decoration: none;
+                        border-radius: 8px;
+                        margin: 5px;
+                    }}
+                    .btn-success {{
+                        background: #10b981;
+                    }}
+                    .steps {{
+                        background: #f9fafb;
+                        padding: 20px;
+                        border-radius: 8px;
+                        margin: 20px 0;
+                    }}
+                    .steps ol {{
+                        margin: 10px 0;
+                        padding-left: 20px;
+                    }}
+                    .steps li {{
+                        margin: 10px 0;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>✅ Email Verified!</h1>
+                    
+                    <div class="warning">
+                        <strong>⚠️ IMPORTANT:</strong> Save your API key NOW! This is the only time you'll see it on screen. 
+                        We've also sent it to your email for safekeeping.
+                    </div>
+                    
+                    <p><strong>Your API Key:</strong></p>
+                    <div class="api-key" id="api-key">{user.api_key}</div>
+                    
+                    <button class="btn btn-success" onclick="copyKey()">📋 Copy API Key</button>
+                    
+                    <div class="steps">
+                        <h3>🎯 Next Steps:</h3>
+                        <ol>
+                            <li>Copy your API key above (or check your email)</li>
+                            <li>Click "Deploy to Render" below</li>
+                            <li>Paste your API key when prompted</li>
+                            <li>Enter your Kraken API credentials</li>
+                            <li>Start receiving trading signals!</li>
+                        </ol>
+                        <div style="text-align: center; margin-top: 20px;">
+                            <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="btn btn-success">
+                                Deploy to Render →
+                            </a>
+                        </div>
+                    </div>
+                </div>
+                
+                <script>
+                    function copyKey() {{
+                        const apiKey = document.getElementById('api-key').textContent;
+                        navigator.clipboard.writeText(apiKey).then(() => {{
+                            const btn = event.target;
+                            btn.textContent = '✓ Copied!';
+                            btn.style.background = '#10b981';
+                            setTimeout(() => {{
+                                btn.textContent = '📋 Copy API Key';
+                                btn.style.background = '#10b981';
+                            }}, 2000);
+                        }});
+                    }}
+                </script>
+            </body>
+            </html>
+            """,
+            status_code=200
+        )
+    
+    except Exception as e:
+        print(f"❌ Error verifying email: {e}")
+        return HTMLResponse(
+            content=f"<h1>Error</h1><p>{str(e)}</p>",
+            status_code=500
+        )
+
+
+@router.post("/api/users/register")
+async def register_user(
+    registration: UserRegistration,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_master_key)
+):
+    """
+    Register new follower user
+    
+    Called by: Your signup form/website
+    Auth: Requires MASTER_API_KEY
     """
     try:
         # Check if email already exists
