@@ -681,19 +681,18 @@
                     resultSection.classList.add('show');
                     document.querySelector('.form-section').style.display = 'none';
                     
-                } else if (response.ok && data.status === 'already_verified' && data.api_key) {
-                    // Dev mode - show API key directly
+                } else if (response.ok && data.status === 'already_verified') {
+                    // Account already exists - API key sent to email (PRODUCTION/MAINNET)
                     resultSection.innerHTML = `
-                        <h3>✅ Account Found!</h3>
-                        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444; margin-bottom: 15px;">
-                            ⚠️ <strong>IMPORTANT:</strong> Save your API key NOW!
+                        <h3>✅ Account Already Exists!</h3>
+                        <p style="color: #666; margin: 20px 0;">
+                            Your account is already verified. We've sent your API key to <strong>${email}</strong>
+                        </p>
+                        <div style="background: #f0f7ff; border-left: 4px solid #667eea; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                            <p style="margin: 0; color: #333;">
+                                📧 Check your email for your API key!
+                            </p>
                         </div>
-                        <p style="margin-bottom: 10px; color: #666;">Your API Key:</p>
-                        <div class="api-key-box" id="api-key-box">
-                            <span id="api-key-text">${data.api_key}</span>
-                        </div>
-                        <button class="copy-btn" id="copy-btn" onclick="copyApiKey()">Copy API Key</button>
-                        
                         <div class="warning-box" style="margin: 20px 0;">
                             ⚠️ <strong>Before deploying:</strong> Scroll down and complete the accordion steps:
                             <ul style="margin: 10px 0 0 20px;">
@@ -708,7 +707,7 @@
                         </a>
                         
                         <p style="font-size: 14px; color: #666; margin-top: 15px;">
-                            Note: In production, this would be emailed to you for security.
+                            Don't see the email? Check your spam folder or contact support.
                         </p>
                     `;
                     resultSection.classList.add('show');
