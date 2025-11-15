@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Nike Rocket - Sign Up</title>
+    <meta name="description" content="Nike Rocket - Automated Kraken Futures Trading with Live Execution. 10% profit sharing, no monthly fees. Start with $500+.">
+    <title>Nike Rocket - Sign Up for Live Trading</title>
     <style>
         * {
             margin: 0;
@@ -350,6 +351,10 @@
             <p>Automated Kraken Futures Trading</p>
         </div>
 
+        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444; margin-bottom: 30px;">
+            ⚠️ <strong>LIVE TRADING ONLY:</strong> This system trades real money from day one. No practice mode. Start with $500-$1,000 you can afford to lose.
+        </div>
+
         <div class="form-section">
             <h2>Sign Up</h2>
             
@@ -382,12 +387,17 @@
             <div class="instructions">
                 <h4>🎯 Next Steps:</h4>
                 <ol>
-                    <li>Copy your API key above (keep it safe!)</li>
-                    <li>Click "Deploy to Render" button below</li>
-                    <li>Paste your API key when prompted</li>
-                    <li>Enter your Kraken API credentials</li>
-                    <li>Start receiving trading signals!</li>
+                    <li>✅ <strong>Copy your API key above</strong> (keep it safe!)</li>
+                    <li>🔐 <strong>Activate Kraken Futures</strong> (see accordion below - CRITICAL!)</li>
+                    <li>🔑 <strong>Create Kraken Futures API keys</strong></li>
+                    <li>💰 <strong>Fund your Futures wallet</strong> ($500+ recommended)</li>
+                    <li>🚀 <strong>Deploy to Render</strong> (button below)</li>
+                    <li>📊 <strong>Start receiving trading signals!</strong></li>
                 </ol>
+                
+                <div class="warning-box" style="margin: 15px 0;">
+                    ⚠️ <strong>IMPORTANT:</strong> Scroll down to the accordion section below for detailed instructions on activating Kraken Futures and creating API keys!
+                </div>
                 
                 <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="deploy-btn" target="_blank">
                     Deploy to Render →
@@ -396,10 +406,12 @@
         </div>
 
         <div class="features">
-            <div class="feature-item">24/7 automated trading</div>
-            <div class="feature-item">Professional signals</div>
-            <div class="feature-item">10% profit sharing model</div>
+            <div class="feature-item">24/7 automated trading (LIVE)</div>
+            <div class="feature-item">2% max risk per trade</div>
+            <div class="feature-item">10% profit sharing only</div>
             <div class="feature-item">No monthly fees</div>
+            <div class="feature-item">Auto stop-loss protection</div>
+            <div class="feature-item">Non-custodial (your funds stay on Kraken)</div>
         </div>
 
         <div class="help-section">
@@ -408,53 +420,97 @@
             <div class="accordion">
                 <div class="accordion-item">
                     <div class="accordion-header" onclick="toggleAccordion(0)">
-                        <span>🔑 How to get Kraken API Keys</span>
+                        <span>🚨 STEP 1: Activate Kraken Futures (REQUIRED!)</span>
                         <span class="accordion-icon">▼</span>
                     </div>
                     <div class="accordion-content">
+                        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444;">
+                            ⚠️ <strong>CRITICAL:</strong> You MUST unlock Futures BEFORE creating API keys, or they won't work!
+                        </div>
+                        <p style="color: #666; margin: 15px 0;"><strong>First, check your verification level:</strong></p>
                         <ol class="steps-list">
                             <li><strong>1.</strong> Log into <a href="https://pro.kraken.com" target="_blank">Kraken Pro</a></li>
-                            <li><strong>2.</strong> Click your name (top right) → <strong>Settings</strong></li>
-                            <li><strong>3.</strong> Click <strong>Connections & API</strong> tab</li>
-                            <li><strong>4.</strong> Scroll to <strong>"Futures trading API"</strong> section</li>
-                            <li><strong>5.</strong> Click <strong>"Create API key"</strong> purple button (on the right)</li>
-                            <li><strong>6.</strong> A modal will appear. Set these:
-                                <ul style="margin-left: 20px; margin-top: 5px;">
-                                    <li><strong>General API:</strong> Select "<strong>Full access</strong>" (purple dot)</li>
-                                    <li><strong>Withdrawal API:</strong> Select "<strong>No access</strong>" (purple dot)</li>
-                                    <li><strong>IP address restriction:</strong> Leave toggle <strong>Off</strong></li>
-                                </ul>
-                            </li>
-                            <li><strong>7.</strong> Click <strong>"Generate key"</strong> button at bottom</li>
-                            <li><strong>8.</strong> Copy your <strong>API Key</strong> and <strong>API Secret</strong> immediately</li>
+                            <li><strong>2.</strong> Click your profile icon → <strong>Get Verified</strong></li>
+                            <li><strong>3.</strong> You need <strong>"Intermediate"</strong> or <strong>"Pro"</strong> level (not "Starter")</li>
+                            <li><strong>4.</strong> If Starter, upgrade by providing: ID, address proof, selfie</li>
+                        </ol>
+                        <p style="color: #666; margin: 15px 0;"><strong>Once verified to Intermediate, unlock Futures:</strong></p>
+                        <ol class="steps-list">
+                            <li><strong>1.</strong> Click <strong>"Trade"</strong> tab (top of page)</li>
+                            <li><strong>2.</strong> Click <strong>"Market"</strong> dropdown → Select any <strong>Futures market</strong></li>
+                            <li><strong>3.</strong> Click purple <strong>"Unlock Futures"</strong> button that appears</li>
+                            <li><strong>4.</strong> Accept the Terms of Service</li>
+                            <li><strong>5.</strong> Accept the Risk Disclosure</li>
+                            <li><strong>6.</strong> You'll see "Futures Unlocked! ✅"</li>
                         </ol>
                         <div class="warning-box">
-                            ⚠️ <strong>Important:</strong> Your API Secret is shown only once! Save it securely immediately.
+                            ✅ <strong>Now</strong> you can create Futures API keys below!
                         </div>
                     </div>
                 </div>
 
                 <div class="accordion-item">
                     <div class="accordion-header" onclick="toggleAccordion(1)">
-                        <span>🧪 Should I use Testnet first?</span>
+                        <span>🔑 STEP 2: Create Futures API Keys</span>
                         <span class="accordion-icon">▼</span>
                     </div>
                     <div class="accordion-content">
-                        <p style="color: #666; margin: 10px 0;"><strong>Yes, highly recommended!</strong></p>
-                        <p style="color: #666; margin: 10px 0;">Kraken Demo (Testnet) lets you practice with fake money:</p>
+                        <div class="warning-box">
+                            ⚠️ Only do this AFTER unlocking Futures above!
+                        </div>
                         <ol class="steps-list">
-                            <li>Go to <a href="https://demo-futures.kraken.com" target="_blank">demo-futures.kraken.com</a></li>
-                            <li>Create a free demo account</li>
-                            <li>Get $100,000 fake USD to practice</li>
-                            <li>Generate testnet API keys</li>
-                            <li>Use those in Render deployment (USE_TESTNET=true)</li>
-                            <li>Once comfortable, switch to live trading!</li>
+                            <li><strong>1.</strong> In <a href="https://pro.kraken.com" target="_blank">Kraken Pro</a>, click profile icon → <strong>Settings</strong></li>
+                            <li><strong>2.</strong> Click <strong>"API"</strong> tab on the left</li>
+                            <li><strong>3.</strong> Scroll to <strong>"Futures"</strong> section</li>
+                            <li><strong>4.</strong> Click purple <strong>"+ Generate Key"</strong> button</li>
+                            <li><strong>5.</strong> In the modal, set permissions:
+                                <ul style="margin-left: 20px; margin-top: 5px;">
+                                    <li><strong>General:</strong> Select "<strong>Full access</strong>" ✅</li>
+                                    <li><strong>Transfers:</strong> Select "<strong>No access</strong>" ❌ <em>(CRITICAL - prevents withdrawals!)</em></li>
+                                </ul>
+                            </li>
+                            <li><strong>6.</strong> Click <strong>"Generate Key"</strong> button</li>
+                            <li><strong>7.</strong> Copy BOTH:
+                                <ul style="margin-left: 20px; margin-top: 5px;">
+                                    <li><strong>Public Key</strong> (shorter)</li>
+                                    <li><strong>Private Key</strong> (longer) - <em>Shown only once!</em></li>
+                                </ul>
+                            </li>
+                            <li><strong>8.</strong> Save both keys in a password manager</li>
                         </ol>
+                        <div class="warning-box">
+                            ⚠️ <strong>CRITICAL:</strong> Private Key is shown only once! If you close the window without copying, you'll need to create new keys.
+                        </div>
                     </div>
                 </div>
 
                 <div class="accordion-item">
                     <div class="accordion-header" onclick="toggleAccordion(2)">
+                        <span>💰 STEP 3: Fund Your Futures Wallet</span>
+                        <span class="accordion-icon">▼</span>
+                    </div>
+                    <div class="accordion-content">
+                        <p style="color: #666; margin: 10px 0;"><strong>Before deploying, make sure you have funds!</strong></p>
+                        <ol class="steps-list">
+                            <li><strong>1.</strong> In Kraken, click <strong>"Futures"</strong> tab</li>
+                            <li><strong>2.</strong> Click <strong>"Funding"</strong></li>
+                            <li><strong>3.</strong> Transfer from Spot to Futures:
+                                <ul style="margin-left: 20px; margin-top: 5px;">
+                                    <li><strong>Minimum:</strong> $500 USD recommended</li>
+                                    <li><strong>Comfortable:</strong> $1,000 - $2,000 USD</li>
+                                    <li><strong>Confident:</strong> $5,000+ USD</li>
+                                </ul>
+                            </li>
+                            <li><strong>4.</strong> Wait 1 minute for transfer to complete</li>
+                        </ol>
+                        <div class="warning-box">
+                            ⚠️ Agent won't work with $0 balance! Make sure you have funds in Futures wallet.
+                        </div>
+                    </div>
+                </div>
+
+                <div class="accordion-item">
+                    <div class="accordion-header" onclick="toggleAccordion(3)">
                         <span>💰 How does billing work?</span>
                         <span class="accordion-icon">▼</span>
                     </div>
@@ -471,7 +527,7 @@
                 </div>
 
                 <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(3)">
+                    <div class="accordion-header" onclick="toggleAccordion(4)">
                         <span>🔒 Is my money safe?</span>
                         <span class="accordion-icon">▼</span>
                     </div>
@@ -479,14 +535,50 @@
                         <ul class="steps-list">
                             <li><strong>Your funds NEVER leave Kraken</strong> - This is non-custodial</li>
                             <li>We only execute trades on YOUR Kraken account</li>
-                            <li>API keys cannot withdraw funds (you disable that permission)</li>
-                            <li>You can revoke access anytime</li>
-                            <li>All trades have automatic stop-loss protection</li>
+                            <li>API keys cannot withdraw funds (you disabled "Transfers" permission)</li>
+                            <li>You can revoke access anytime by deleting API keys</li>
+                            <li>All trades have automatic stop-loss protection (max 2% risk)</li>
                             <li>You maintain full control of your account</li>
                         </ul>
                     </div>
                 </div>
+
+                <div class="accordion-item">
+                    <div class="accordion-header" onclick="toggleAccordion(5)">
+                        <span>⚠️ Is this live trading?</span>
+                        <span class="accordion-icon">▼</span>
+                    </div>
+                    <div class="accordion-content">
+                        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444;">
+                            ⚠️ <strong>YES - This is LIVE TRADING with REAL MONEY!</strong>
+                        </div>
+                        <ul class="steps-list">
+                            <li>There is <strong>NO testnet</strong> or practice mode</li>
+                            <li>All trades execute on your real Kraken account</li>
+                            <li>You can <strong>lose money</strong> - only risk what you can afford to lose</li>
+                            <li><strong>Start small:</strong> $500-$1,000 recommended for beginners</li>
+                            <li>Every trade has 2% max risk with stop-loss protection</li>
+                            <li>Past performance does not guarantee future results</li>
+                        </ul>
+                        <p style="color: #666; margin: 15px 0; font-size: 14px;">
+                            This is <strong>not financial advice</strong>. Cryptocurrency trading is risky. You are responsible for your trading decisions.
+                        </p>
+                    </div>
+                </div>
             </div>
+        </div>
+
+        <div style="margin-top: 30px; padding: 20px; background: #f9fafb; border-radius: 10px; border: 1px solid #e5e7eb; font-size: 12px; color: #666; line-height: 1.6;">
+            <h4 style="color: #333; margin-bottom: 10px; font-size: 14px;">⚠️ Risk Disclosure</h4>
+            <p style="margin-bottom: 8px;">
+                <strong>Cryptocurrency futures trading involves substantial risk of loss and is not suitable for all investors.</strong> You could lose your entire investment. Leverage amplifies both gains and losses. Past performance does not guarantee future results.
+            </p>
+            <p style="margin-bottom: 8px;">
+                Nike Rocket is not a financial advisor and does not provide investment advice. This service executes automated trades based on algorithmic signals. You are solely responsible for your trading decisions and any resulting profits or losses.
+            </p>
+            <p style="margin-bottom: 0;">
+                By signing up, you acknowledge that you understand these risks and agree to the terms of service. Only trade with capital you can afford to lose completely.
+            </p>
         </div>
     </div>
 
@@ -552,6 +644,9 @@
                                 📧 Click the verification link in your email to get your API key!
                             </p>
                         </div>
+                        <div class="warning-box" style="margin: 20px 0;">
+                            ⚠️ <strong>While you wait:</strong> Scroll down to the accordion section below and complete STEPS 1-3 (Activate Futures, Create API Keys, Fund Wallet). You'll need this before deploying!
+                        </div>
                         <p style="font-size: 14px; color: #666;">
                             Don't see the email? Check your spam folder or wait a minute and try again.
                         </p>
@@ -570,6 +665,14 @@
                             <p style="margin: 0; color: #333;">
                                 📧 Check your email for your API key and deployment instructions!
                             </p>
+                        </div>
+                        <div class="warning-box" style="margin: 20px 0;">
+                            ⚠️ <strong>Before deploying:</strong> Scroll down and complete the accordion steps below:
+                            <ul style="margin: 10px 0 0 20px;">
+                                <li>STEP 1: Activate Kraken Futures</li>
+                                <li>STEP 2: Create Futures API Keys</li>
+                                <li>STEP 3: Fund Your Futures Wallet</li>
+                            </ul>
                         </div>
                         <p style="font-size: 14px; color: #666;">
                             Don't see the email? Check your spam folder.
@@ -590,6 +693,20 @@
                             <span id="api-key-text">${data.api_key}</span>
                         </div>
                         <button class="copy-btn" id="copy-btn" onclick="copyApiKey()">Copy API Key</button>
+                        
+                        <div class="warning-box" style="margin: 20px 0;">
+                            ⚠️ <strong>Before deploying:</strong> Scroll down and complete the accordion steps:
+                            <ul style="margin: 10px 0 0 20px;">
+                                <li>STEP 1: Activate Kraken Futures (REQUIRED!)</li>
+                                <li>STEP 2: Create Futures API Keys</li>
+                                <li>STEP 3: Fund Your Futures Wallet ($500+ minimum)</li>
+                            </ul>
+                        </div>
+                        
+                        <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="deploy-btn" target="_blank" style="margin-top: 15px; display: inline-block;">
+                            Deploy to Render →
+                        </a>
+                        
                         <p style="font-size: 14px; color: #666; margin-top: 15px;">
                             Note: In production, this would be emailed to you for security.
                         </p>
