@@ -241,17 +241,38 @@ def send_api_key_email(to_email: str, api_key: str) -> bool:
                 We recommend using a password manager like 1Password, LastPass, or Bitwarden.
             </div>
             
+            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 4px; margin: 20px 0; text-align: left;">
+                <strong style="color: #92400e;">⚠️ BEFORE YOU DEPLOY:</strong>
+                <p style="margin: 10px 0 5px 0; color: #92400e;">Complete these steps first (see signup page for details):</p>
+                <ol style="margin: 5px 0 0 20px; color: #92400e; line-height: 1.8;">
+                    <li><strong>Activate Kraken Futures</strong> (one-time setup)</li>
+                    <li><strong>Create Futures API Keys</strong> (with correct permissions)</li>
+                    <li><strong>Fund Your Futures Wallet</strong> ($500+ recommended)</li>
+                </ol>
+                <p style="margin: 10px 0 0 0; color: #92400e; font-size: 14px;">
+                    📖 Need help? Visit the signup page for step-by-step instructions.
+                </p>
+            </div>
+            
             <h3>Next Steps:</h3>
             <ol style="text-align: left;">
-                <li>Save your API key in a secure location</li>
-                <li>Visit our deployment page</li>
-                <li>Click "Deploy to Render"</li>
-                <li>Enter your API key when prompted</li>
-                <li>Start receiving trading signals!</li>
+                <li>Save your API key in a secure location ✅</li>
+                <li>Complete Kraken setup (Steps 1-3 on <a href="{BASE_URL}/signup" style="color: #667eea;">signup page</a>)</li>
+                <li>Click "Deploy to Render" button below</li>
+                <li>Enter your Nike Rocket API key when prompted</li>
+                <li>Enter your Kraken API credentials</li>
+                <li>Start receiving trading signals! 🚀</li>
             </ol>
             
-            <p style="margin-top: 30px;">
-                <a href="{BASE_URL}/signup" style="color: #667eea; text-decoration: none;">
+            <p style="margin-top: 30px; text-align: center;">
+                <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" 
+                   style="display: inline-block; padding: 15px 30px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+                    🚀 Deploy to Render
+                </a>
+            </p>
+            
+            <p style="margin-top: 20px; text-align: center;">
+                <a href="{BASE_URL}/signup" style="color: #667eea; text-decoration: none; font-size: 14px;">
                     Back to Nike Rocket →
                 </a>
             </p>
@@ -269,12 +290,19 @@ def send_api_key_email(to_email: str, api_key: str) -> bool:
     
     IMPORTANT: Save this key securely! You won't be able to retrieve it later.
     
+    ⚠️ BEFORE YOU DEPLOY:
+    Complete these steps first (see signup page for details):
+    1. Activate Kraken Futures (one-time setup)
+    2. Create Futures API Keys (with correct permissions)
+    3. Fund Your Futures Wallet ($500+ recommended)
+    
     Next Steps:
-    1. Save your API key
-    2. Visit: {BASE_URL}/signup
-    3. Click "Deploy to Render"
-    4. Enter your API key
-    5. Start receiving signals!
+    1. Save your API key ✅
+    2. Complete Kraken setup (Steps 1-3 on signup page: {BASE_URL}/signup)
+    3. Deploy to Render: https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent
+    4. Enter your Nike Rocket API key
+    5. Enter your Kraken API credentials
+    6. Start receiving signals! 🚀
     """
     
     try:
