@@ -42,6 +42,9 @@ MASTER_API_KEY = os.getenv("MASTER_API_KEY", "your-master-key-here")
 COINBASE_WEBHOOK_SECRET = os.getenv("COINBASE_WEBHOOK_SECRET", "")
 COINBASE_API_KEY = os.getenv("COINBASE_COMMERCE_API_KEY", "")
 
+# Signal expiration settings
+SIGNAL_EXPIRATION_MINUTES = 15  # Signals expire after 15 minutes
+
 
 # ==================== REQUEST MODELS ====================
 
@@ -187,11 +190,13 @@ async def broadcast_signal(
         
         print(f"📡 Signal broadcast: {signal.action} on {signal.symbol}")
         print(f"   Delivered to {len(active_users)} active followers")
+        print(f"   ⏰ Expires in {SIGNAL_EXPIRATION_MINUTES} minutes")
         
         return {
             "status": "success",
             "signal_id": signal_id,
             "delivered_to": len(active_users),
+            "expires_in_minutes": SIGNAL_EXPIRATION_MINUTES,
             "timestamp": datetime.utcnow().isoformat()
         }
     
@@ -234,12 +239,41 @@ async def get_latest_signal(
                 "message": "No new signals"
             }
         
-        # Mark as acknowledged
+        # Check if signal is expired (older than 15 minutes)
+        signal_age_seconds = (datetime.utcnow() - delivery.signal.created_at).total_seconds()
+        signal_age_minutes = signal_age_seconds / 60
+        
+        if signal_age_minutes > SIGNAL_EXPIRATION_MINUTES:
+            # Signal is too old - mark as acknowledged to prevent execution
+            delivery.acknowledged = True
+            db.commit()
+            
+            print(f"⚠️ Signal expired and skipped:")
+            print(f"   Signal ID: {delivery.signal.signal_id}")
+            print(f"   Symbol: {delivery.signal.symbol}")
+            print(f"   Action: {delivery.signal.action}")
+            print(f"   Age: {signal_age_minutes:.1f} minutes (limit: {SIGNAL_EXPIRATION_MINUTES})")
+            print(f"   Entry price may no longer be valid - SKIPPED FOR SAFETY")
+            
+            return {
+                "access_granted": True,
+                "signal": None,
+                "message": f"Signal expired ({signal_age_minutes:.0f} minutes old)",
+                "expired_signal_id": delivery.signal.signal_id,
+                "expiration_limit_minutes": SIGNAL_EXPIRATION_MINUTES
+            }
+        
+        # Signal is fresh - mark as acknowledged
         delivery.acknowledged = True
         db.commit()
         
         # Return signal details
         signal = delivery.signal
+        
+        print(f"✅ Signal delivered to {user.email}:")
+        print(f"   Signal ID: {signal.signal_id}")
+        print(f"   Age: {signal_age_minutes:.1f} minutes (fresh)")
+        
         return {
             "access_granted": True,
             "signal": {
@@ -251,7 +285,8 @@ async def get_latest_signal(
                 "take_profit": signal.take_profit,
                 "leverage": signal.leverage,
                 "timeframe": signal.timeframe,
-                "created_at": signal.created_at.isoformat()
+                "created_at": signal.created_at.isoformat(),
+                "age_minutes": round(signal_age_minutes, 1)
             }
         }
     
