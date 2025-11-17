@@ -5,6 +5,8 @@ Nike Rocket Follower System - Database Models
 Database models for managing followers, signals, and profit tracking.
 Designed for Railway PostgreSQL database.
 
+Updated: Added acknowledged_at field for two-phase acknowledgment
+
 Author: Nike Rocket Team
 """
 
@@ -131,7 +133,12 @@ class SignalDelivery(Base):
     """
     Tracks which users received which signals
     
-    Used for verification and debugging
+    Used for verification and debugging.
+    
+    Two-phase acknowledgment:
+    - acknowledged=False: Signal delivered but not yet executed
+    - acknowledged=True: Signal executed and confirmed
+    - acknowledged_at: Timestamp of confirmation
     """
     __tablename__ = "signal_deliveries"
     
@@ -142,6 +149,7 @@ class SignalDelivery(Base):
     
     delivered_at = Column(DateTime, default=datetime.utcnow)
     acknowledged = Column(Boolean, default=False)  # Did follower agent confirm receipt?
+    acknowledged_at = Column(DateTime, nullable=True)  # NEW: When was execution confirmed?
     
     # Relationships
     signal = relationship("Signal", back_populates="deliveries")
@@ -273,11 +281,11 @@ def init_db(engine):
     Base.metadata.create_all(bind=engine)
     print("✅ Database tables created successfully")
     
-    # Run migration to add verification columns if they don't exist
+    # Run migrations
     try:
         from sqlalchemy import text
         with engine.connect() as conn:
-            # Check if verified column exists
+            # Migration 1: Add email verification columns
             result = conn.execute(text("""
                 SELECT column_name 
                 FROM information_schema.columns 
@@ -287,7 +295,6 @@ def init_db(engine):
             if not result.fetchone():
                 print("🔄 Running migration: Adding email verification columns...")
                 
-                # Add new columns
                 conn.execute(text("""
                     ALTER TABLE users 
                     ADD COLUMN verified BOOLEAN DEFAULT FALSE,
@@ -295,7 +302,6 @@ def init_db(engine):
                     ADD COLUMN verification_expires TIMESTAMP
                 """))
                 
-                # Set existing users as verified and grant access
                 conn.execute(text("""
                     UPDATE users 
                     SET verified = TRUE, access_granted = TRUE
@@ -304,9 +310,26 @@ def init_db(engine):
                 
                 conn.commit()
                 print("✅ Migration completed: Email verification columns added")
-                print("✅ All existing users marked as verified")
-            else:
-                print("✅ Database schema up to date")
+            
+            # Migration 2: Add acknowledged_at column for two-phase acknowledgment
+            result = conn.execute(text("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'signal_deliveries' AND column_name = 'acknowledged_at'
+            """))
+            
+            if not result.fetchone():
+                print("🔄 Running migration: Adding acknowledged_at column...")
+                
+                conn.execute(text("""
+                    ALTER TABLE signal_deliveries 
+                    ADD COLUMN acknowledged_at TIMESTAMP NULL
+                """))
+                
+                conn.commit()
+                print("✅ Migration completed: acknowledged_at column added")
+            
+            print("✅ Database schema up to date")
                 
     except Exception as migration_error:
         print(f"⚠️ Migration note: {migration_error}")
@@ -327,7 +350,7 @@ if __name__ == "__main__":
     print("\nModels defined:")
     print("  ✅ User - Follower accounts")
     print("  ✅ Signal - Master signals")
-    print("  ✅ SignalDelivery - Delivery tracking")
+    print("  ✅ SignalDelivery - Delivery tracking (with two-phase acknowledgment)")
     print("  ✅ Trade - Completed trades")
     print("  ✅ Payment - Payment records")
     print("  ✅ SystemStats - System metrics")
