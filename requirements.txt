@@ -20,3 +20,6 @@ passlib[bcrypt]==1.7.4
 
 # Environment
 python-dotenv==1.0.0
+
+# Math/Stats (for portfolio tracking)
+numpy==1.26.2
