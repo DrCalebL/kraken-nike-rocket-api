@@ -417,6 +417,60 @@ async def portfolio_dashboard(request: Request):
                 <div class="hero-profit" id="total-profit">$0</div>
                 <div class="hero-label" id="profit-label">Total Profit</div>
                 <div class="hero-subtext" id="time-tracking">Trading since...</div>
+                
+                <!-- Social Sharing Buttons (NEW!) -->
+                <div style="margin: 30px 0; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
+                    <button onclick="shareToTwitter()" style="
+                        padding: 12px 24px;
+                        background: #1DA1F2;
+                        color: white;
+                        border: none;
+                        border-radius: 8px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        font-size: 14px;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        box-shadow: 0 4px 12px rgba(29, 161, 242, 0.3);
+                    ">
+                        <span>𝕏</span> Share to X/Twitter
+                    </button>
+                    
+                    <button onclick="copyShareLink()" style="
+                        padding: 12px 24px;
+                        background: #10b981;
+                        color: white;
+                        border: none;
+                        border-radius: 8px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        font-size: 14px;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+                    " id="copy-link-btn">
+                        <span>🔗</span> Copy Share Link
+                    </button>
+                    
+                    <button onclick="downloadPerformanceCard()" style="
+                        padding: 12px 24px;
+                        background: #8b5cf6;
+                        color: white;
+                        border: none;
+                        border-radius: 8px;
+                        font-weight: 600;
+                        cursor: pointer;
+                        font-size: 14px;
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+                    ">
+                        <span>📸</span> Download Image
+                    </button>
+                </div>
             </div>
             
             <div class="stats-grid">
@@ -633,6 +687,126 @@ async def portfolio_dashboard(request: Request):
             }} catch (error) {{
                 console.error('Error loading stats:', error);
             }}
+        }}
+        
+        // ==================== SOCIAL SHARING FUNCTIONS (NEW!) ====================
+        
+        function shareToTwitter() {{
+            const profit = document.getElementById('total-profit').textContent;
+            const roi = document.getElementById('roi').textContent;
+            const period = document.getElementById('period-selector').value;
+            const trades = document.getElementById('total-trades').textContent;
+            
+            const periodLabels = {{
+                '7d': 'Last 7 Days',
+                '30d': 'Last 30 Days',
+                '90d': 'Last 90 Days',
+                'all': 'All-Time'
+            }};
+            
+            const text = `🚀 Nike Rocket Trading Results (${{periodLabels[period]}})
+
+💰 Profit: ${{profit}}
+📈 ROI: ${{roi}}
+📊 Trades: ${{trades}}
+
+Automated crypto futures trading with Nike Rocket! 🎯
+
+#CryptoTrading #NikeRocket #AutomatedTrading`;
+            
+            const twitterUrl = `https://twitter.com/intent/tweet?text=${{encodeURIComponent(text)}}`;
+            window.open(twitterUrl, '_blank', 'width=600,height=400');
+        }}
+        
+        function copyShareLink() {{
+            const shareUrl = `${{window.location.origin}}/dashboard?key=${{currentApiKey}}`;
+            
+            navigator.clipboard.writeText(shareUrl).then(() => {{
+                const btn = document.getElementById('copy-link-btn');
+                const originalHTML = btn.innerHTML;
+                btn.innerHTML = '<span>✅</span> Link Copied!';
+                btn.style.background = '#10b981';
+                
+                setTimeout(() => {{
+                    btn.innerHTML = originalHTML;
+                    btn.style.background = '#10b981';
+                }}, 2000);
+            }}).catch(() => {{
+                alert('Share link: ' + shareUrl);
+            }});
+        }}
+        
+        function downloadPerformanceCard() {{
+            // Create a simple text-based shareable card
+            const profit = document.getElementById('total-profit').textContent;
+            const roi = document.getElementById('roi').textContent;
+            const period = document.getElementById('period-selector').value;
+            const trades = document.getElementById('total-trades').textContent;
+            const profitFactor = document.getElementById('profit-factor').textContent;
+            const sharpe = document.getElementById('sharpe').textContent;
+            
+            const periodLabels = {{
+                '7d': 'Last 7 Days',
+                '30d': 'Last 30 Days',
+                '90d': 'Last 90 Days',
+                'all': 'All-Time'
+            }};
+            
+            // Create canvas for image
+            const canvas = document.createElement('canvas');
+            canvas.width = 1200;
+            canvas.height = 630;
+            const ctx = canvas.getContext('2d');
+            
+            // Gradient background
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            gradient.addColorStop(0, '#667eea');
+            gradient.addColorStop(1, '#764ba2');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Title
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 60px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('🚀 NIKE ROCKET PERFORMANCE', canvas.width / 2, 100);
+            
+            // Period
+            ctx.font = '30px Arial';
+            ctx.fillText(periodLabels[period], canvas.width / 2, 160);
+            
+            // Main profit
+            ctx.font = 'bold 100px Arial';
+            ctx.fillText(profit, canvas.width / 2, 280);
+            
+            // Stats grid
+            ctx.font = 'bold 40px Arial';
+            ctx.textAlign = 'left';
+            const leftX = 150;
+            const rightX = 650;
+            let y = 380;
+            
+            ctx.fillText(`ROI: ${{roi}}`, leftX, y);
+            ctx.fillText(`Trades: ${{trades}}`, rightX, y);
+            
+            y += 70;
+            ctx.fillText(`Profit Factor: ${{profitFactor}}`, leftX, y);
+            ctx.fillText(`Sharpe: ${{sharpe}}`, rightX, y);
+            
+            // Footer
+            ctx.textAlign = 'center';
+            ctx.font = '25px Arial';
+            ctx.fillText('Automated Crypto Trading', canvas.width / 2, 570);
+            
+            // Download
+            canvas.toBlob((blob) => {{
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'nike-rocket-performance.png';
+                a.click();
+                URL.revokeObjectURL(url);
+            }});
         }}
         
         function showError(elementId, message) {{
