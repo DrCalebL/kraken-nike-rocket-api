@@ -1,7 +1,7 @@
 """
-Nike Rocket - Portfolio Tracking API
-====================================
-API endpoints for portfolio performance tracking.
+Nike Rocket - Portfolio Tracking API (FIXED)
+============================================
+Auto-creates portfolio users from follower system API keys.
 
 Author: Nike Rocket Team
 Updated: November 20, 2025
@@ -16,6 +16,8 @@ import numpy as np
 import os
 
 from portfolio_models import User, Trade, DepositEvent, WithdrawalEvent, Base
+# Import from follower system to check API keys
+from follower_models import User as FollowerUser
 
 # Router
 router = APIRouter(prefix="/api/portfolio")
@@ -37,16 +39,44 @@ def get_db():
     finally:
         db.close()
 
-# Authentication
+# Authentication with auto-create
 async def get_current_user(
     x_api_key: str = Header(..., alias="X-API-Key"),
     db: Session = Depends(get_db)
 ) -> User:
-    """Authenticate user by API key"""
+    """
+    Authenticate user by API key and auto-create portfolio user if needed
+    
+    This checks:
+    1. If portfolio user exists → use it
+    2. If not, check if API key exists in follower system → auto-create portfolio user
+    3. If neither → reject with 401
+    """
+    # First check if portfolio user exists
     user = db.query(User).filter(User.api_key == x_api_key).first()
-    if not user:
+    if user:
+        return user
+    
+    # Portfolio user doesn't exist, check follower system
+    follower_user = db.query(FollowerUser).filter(FollowerUser.api_key == x_api_key).first()
+    if not follower_user:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return user
+    
+    # Valid follower API key! Auto-create portfolio user
+    new_portfolio_user = User(
+        api_key=x_api_key,
+        initial_capital=0.0,  # Will be set when they initialize
+        current_balance=0.0,
+        total_deposits=0.0,
+        total_withdrawals=0.0,
+        started_tracking_at=None  # Will be set when they initialize
+    )
+    
+    db.add(new_portfolio_user)
+    db.commit()
+    db.refresh(new_portfolio_user)
+    
+    return new_portfolio_user
 
 # Pydantic models
 class InitializePortfolioRequest(BaseModel):
@@ -227,17 +257,16 @@ async def get_performance_stats(
     Get performance statistics (SAFE from deposits/withdrawals)
     
     All metrics calculated from trade P&L only, not account balance.
-    
-    Period options:
-    - "7d" or "7": Last 7 days
-    - "30d" or "30": Last 30 days (default)
-    - "90d" or "90": Last 90 days
-    - "all": All-time (all trades since tracking started)
-    - Custom: Any number (e.g., "60" for 60 days)
     """
+    # Check if portfolio is initialized
+    if not user.started_tracking_at:
+        return {
+            "status": "not_initialized",
+            "message": "Portfolio not initialized yet. Please initialize with starting capital."
+        }
+    
     # Parse period parameter
     if period.lower() == "all":
-        # All-time: get all trades
         trades = db.query(Trade).filter(
             Trade.user_id == user.id,
             Trade.status.in_(['WIN', 'LOSS'])
@@ -245,7 +274,6 @@ async def get_performance_stats(
         period_label = "All-Time"
         days_value = None
     else:
-        # Extract number from period (e.g., "30d" -> 30, "90" -> 90)
         days_value = int(period.replace("d", "").replace("D", ""))
         since_date = datetime.utcnow() - timedelta(days=days_value)
         trades = db.query(Trade).filter(
@@ -259,44 +287,43 @@ async def get_performance_stats(
         return {
             "status": "no_data",
             "message": "No closed trades in this period",
-            "period": period_label
+            "period": period_label,
+            "initialized": True
         }
     
     # Separate wins and losses
     wins = [t for t in trades if t.status == 'WIN']
     losses = [t for t in trades if t.status == 'LOSS']
     
-    # ✅ SAFE: Total Profit (trade P&L only) for this period
+    # Total Profit
     period_profit = sum(t.pnl_usd for t in trades)
     
-    # ✅ SAFE: Profit Factor
+    # Profit Factor
     total_wins_amount = sum(t.pnl_usd for t in wins)
     total_losses_amount = abs(sum(t.pnl_usd for t in losses))
     profit_factor = (total_wins_amount / total_losses_amount) if total_losses_amount > 0 else 0
     
-    # ✅ SAFE: Best trade in this period
+    # Best trade
     best_trade = max((t.pnl_usd for t in wins), default=0)
     
-    # ✅ SAFE: Average monthly profit (based on period trades)
+    # Average monthly profit
     if period.lower() == "all":
-        # For all-time, calculate from start date
         months_active = (datetime.utcnow() - user.started_tracking_at).days / 30.44 if user.started_tracking_at else 1
     else:
-        # For period, use period months
         months_active = days_value / 30.44 if days_value else 1
     avg_monthly_profit = period_profit / months_active if months_active > 0 else 0
     
-    # ✅ SAFE: Win rate (for reference)
+    # Win rate
     win_rate = (len(wins) / len(trades) * 100) if trades else 0
     
-    # ✅ ROI on INITIAL capital (for all-time data)
+    # ROI on INITIAL capital
     roi_on_initial = (period_profit / user.initial_capital * 100) if user.initial_capital > 0 else 0
     
-    # ℹ️ TRANSPARENT: ROI adjusted for deposits
+    # ROI adjusted for deposits
     total_capital_deployed = user.initial_capital + user.total_deposits
     roi_adjusted = (period_profit / total_capital_deployed * 100) if total_capital_deployed > 0 else 0
     
-    # ✅ SAFE: Sharpe Ratio (from trade returns in this period)
+    # Sharpe Ratio
     if len(trades) > 1:
         returns = [t.pnl_percent for t in trades if t.pnl_percent is not None]
         if returns:
@@ -306,7 +333,7 @@ async def get_performance_stats(
     else:
         sharpe_ratio = 0
     
-    # ✅ SAFE: Max Drawdown (from trade P&L equity curve in this period)
+    # Max Drawdown
     equity_curve = []
     equity = 0
     peak = 0
@@ -336,7 +363,7 @@ async def get_performance_stats(
         "period": period_label,
         "period_param": period,
         
-        # Primary metrics (prominently displayed)
+        # Primary metrics
         "total_profit": round(period_profit, 2),
         "roi_on_initial": round(roi_on_initial, 1),
         "profit_factor": round(profit_factor, 2),
@@ -354,9 +381,9 @@ async def get_performance_stats(
         "avg_rr_ratio": round(avg_rr, 2),
         "avg_win": round(avg_win, 2),
         "avg_loss": round(avg_loss, 2),
-        "risk_per_trade": 2.0,  # Fixed
+        "risk_per_trade": 2.0,
         
-        # Transparent capital tracking (always all-time)
+        # Capital tracking
         "roi_adjusted_for_deposits": round(roi_adjusted, 1),
         "initial_capital": user.initial_capital,
         "current_balance": round(user.current_balance, 2),
@@ -364,7 +391,7 @@ async def get_performance_stats(
         "total_withdrawals": user.total_withdrawals,
         "total_capital_deployed": total_capital_deployed,
         
-        # Breakdown for transparency
+        # Breakdown
         "gross_wins": round(total_wins_amount, 2),
         "gross_losses": round(total_losses_amount, 2),
         
