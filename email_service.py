@@ -221,28 +221,28 @@ You're receiving this email because you signed up at {BASE_URL}
     try:
         response = requests.post(
             RESEND_API_URL,
-            headers={{
-                "Authorization": f"Bearer {{RESEND_API_KEY}}",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
                 "Content-Type": "application/json"
-            }},
-            json={{
+            },
+            json={
                 "from": FROM_EMAIL,
                 "to": [to_email],
                 "subject": "🚀 Welcome to Nike Rocket - Your API Key Inside",
                 "html": html_content,
                 "text": text_content
-            }}
+            }
         )
         
         if response.status_code == 200:
-            print(f"✅ Welcome email sent to {{to_email}}")
+            print(f"✅ Welcome email sent to {to_email}")
             return True
         else:
-            print(f"❌ Failed to send email: {{response.status_code}} - {{response.text}}")
+            print(f"❌ Failed to send email: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:
-        print(f"❌ Error sending email: {{e}}")
+        print(f"❌ Error sending email: {e}")
         return False
 
 
@@ -369,28 +369,28 @@ If you didn't request this email, please ignore it or contact support.
     try:
         response = requests.post(
             RESEND_API_URL,
-            headers={{
-                "Authorization": f"Bearer {{RESEND_API_KEY}}",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
                 "Content-Type": "application/json"
-            }},
-            json={{
+            },
+            json={
                 "from": FROM_EMAIL,
                 "to": [to_email],
                 "subject": "Your Nike Rocket API Key",
                 "html": html_content,
                 "text": text_content
-            }}
+            }
         )
         
         if response.status_code == 200:
-            print(f"✅ API key resend email sent to {{to_email}}")
+            print(f"✅ API key resend email sent to {to_email}")
             return True
         else:
-            print(f"❌ Failed to send email: {{response.status_code}}")
+            print(f"❌ Failed to send email: {response.status_code}")
             return False
             
     except Exception as e:
-        print(f"❌ Error sending email: {{e}}")
+        print(f"❌ Error sending email: {e}")
         return False
 
 
