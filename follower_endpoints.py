@@ -11,10 +11,14 @@ Endpoints:
 - POST /api/users/register - New user signup
 - GET /api/users/verify - Verify user access
 - GET /api/users/stats - Get user statistics
+- POST /api/setup-agent - Setup hosted trading agent (NEW!)
+- GET /api/agent-status - Get agent status (NEW!)
+- POST /api/stop-agent - Stop trading agent (NEW!)
 - POST /api/payments/create - Create payment link
 - POST /api/payments/webhook - Coinbase Commerce webhook
 
 Author: Nike Rocket Team
+Updated: November 21, 2025
 """
 
 from fastapi import APIRouter, HTTPException, Header, Depends, BackgroundTasks
@@ -27,12 +31,17 @@ import secrets
 import hashlib
 import hmac
 import json
+import logging
 from pydantic import BaseModel, EmailStr
 
 from follower_models import (
     User, Signal, SignalDelivery, Trade, Payment, SystemStats,
     get_db_session
 )
+
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize router
 router = APIRouter()
@@ -99,6 +108,12 @@ class PaymentCreate(BaseModel):
 class ExecutionConfirmation(BaseModel):
     """Confirm signal execution"""
     delivery_id: int
+
+
+class SetupAgentRequest(BaseModel):
+    """Request to setup trading agent with Kraken credentials (NEW!)"""
+    kraken_api_key: str
+    kraken_api_secret: str
 
 
 # ==================== DEPENDENCY INJECTION ====================
@@ -193,9 +208,9 @@ async def broadcast_signal(
         
         db.commit()
         
-        print(f"📡 Signal broadcast: {signal.action} on {signal.symbol}")
-        print(f"   Delivered to {len(active_users)} active followers")
-        print(f"   ⏰ Expires in {SIGNAL_EXPIRATION_MINUTES} minutes")
+        logger.info(f"📡 Signal broadcast: {signal.action} on {signal.symbol}")
+        logger.info(f"   Delivered to {len(active_users)} active followers")
+        logger.info(f"   ⏰ Expires in {SIGNAL_EXPIRATION_MINUTES} minutes")
         
         return {
             "status": "success",
@@ -206,7 +221,7 @@ async def broadcast_signal(
         }
     
     except Exception as e:
-        print(f"❌ Error broadcasting signal: {e}")
+        logger.error(f"❌ Error broadcasting signal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -253,104 +268,80 @@ async def get_latest_signal(
             delivery.acknowledged = True
             db.commit()
             
-            print(f"⚠️ Signal expired and skipped:")
-            print(f"   Signal ID: {delivery.signal.signal_id}")
-            print(f"   Symbol: {delivery.signal.symbol}")
-            print(f"   Action: {delivery.signal.action}")
-            print(f"   Age: {signal_age_minutes:.1f} minutes (limit: {SIGNAL_EXPIRATION_MINUTES})")
-            print(f"   Entry price may no longer be valid - SKIPPED FOR SAFETY")
+            logger.info(f"⚠️ Signal expired and skipped:")
+            logger.info(f"   Signal ID: {delivery.signal.signal_id}")
+            logger.info(f"   Symbol: {delivery.signal.symbol}")
+            logger.info(f"   Age: {signal_age_minutes:.1f} minutes")
             
             return {
                 "access_granted": True,
                 "signal": None,
-                "message": f"Signal expired ({signal_age_minutes:.0f} minutes old)",
-                "expired_signal_id": delivery.signal.signal_id,
-                "expiration_limit_minutes": SIGNAL_EXPIRATION_MINUTES
+                "message": f"Signal expired ({signal_age_minutes:.0f} min old)"
             }
         
-        # Signal is fresh - deliver it WITHOUT marking as acknowledged yet
-        # Follower will confirm after successful execution
-        signal = delivery.signal
-        
-        print(f"📤 Signal delivered to {user.email} (awaiting execution confirmation):")
-        print(f"   Signal ID: {signal.signal_id}")
-        print(f"   Age: {signal_age_minutes:.1f} minutes (fresh)")
-        
+        # Return signal for execution
         return {
             "access_granted": True,
             "signal": {
-                "signal_id": signal.signal_id,
-                "delivery_id": delivery.id,  # NEW: Need this to confirm later
-                "action": signal.action,
-                "symbol": signal.symbol,
-                "entry_price": signal.entry_price,
-                "stop_loss": signal.stop_loss,
-                "take_profit": signal.take_profit,
-                "leverage": signal.leverage,
-                "timeframe": signal.timeframe,
-                "created_at": signal.created_at.isoformat(),
-                "age_minutes": round(signal_age_minutes, 1)
+                "signal_id": delivery.signal.signal_id,
+                "delivery_id": delivery.id,
+                "action": delivery.signal.action,
+                "symbol": delivery.signal.symbol,
+                "entry_price": delivery.signal.entry_price,
+                "stop_loss": delivery.signal.stop_loss,
+                "take_profit": delivery.signal.take_profit,
+                "leverage": delivery.signal.leverage,
+                "timeframe": delivery.signal.timeframe,
+                "trend_strength": delivery.signal.trend_strength,
+                "volatility": delivery.signal.volatility,
+                "notes": delivery.signal.notes,
+                "created_at": delivery.signal.created_at.isoformat(),
+                "age_seconds": int(signal_age_seconds)
             }
         }
     
     except Exception as e:
-        print(f"❌ Error fetching signal: {e}")
+        logger.error(f"❌ Error fetching signal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/confirm-execution")
-async def confirm_execution(
-    confirmation: ExecutionConfirmation,
+@router.post("/api/acknowledge-signal")
+async def acknowledge_signal(
+    data: ExecutionConfirmation,
     user: User = Depends(verify_user_key),
     db: Session = Depends(get_db)
 ):
     """
-    Confirm signal execution (two-phase acknowledgment)
+    Acknowledge signal receipt/execution
     
-    Called by: Follower agent AFTER successful trade execution
+    Called by: Follower agent after executing signal
     Auth: Requires user API key
-    
-    This marks the signal as acknowledged only after the trade executes successfully.
-    If trade fails, signal remains unacknowledged and will retry on next poll.
     """
     try:
-        # Find the delivery record
+        # Find delivery
         delivery = db.query(SignalDelivery).filter(
-            SignalDelivery.id == confirmation.delivery_id,
+            SignalDelivery.id == data.delivery_id,
             SignalDelivery.user_id == user.id
         ).first()
         
         if not delivery:
             raise HTTPException(status_code=404, detail="Delivery not found")
         
-        if delivery.acknowledged:
-            # Already acknowledged - idempotent operation
-            return {
-                "status": "already_confirmed",
-                "message": "Signal already acknowledged"
-            }
-        
         # Mark as acknowledged
         delivery.acknowledged = True
         delivery.acknowledged_at = datetime.utcnow()
+        
         db.commit()
         
-        signal = delivery.signal
-        print(f"✅ Execution confirmed by {user.email}:")
-        print(f"   Signal ID: {signal.signal_id}")
-        print(f"   Symbol: {signal.symbol}")
-        print(f"   Action: {signal.action}")
+        logger.info(f"✓ Signal acknowledged by {user.email}")
         
         return {
-            "status": "confirmed",
-            "signal_id": signal.signal_id,
-            "message": "Execution confirmed successfully"
+            "status": "success",
+            "message": "Signal acknowledged"
         }
     
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"❌ Error confirming execution: {e}")
+        logger.error(f"❌ Error acknowledging signal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -363,20 +354,26 @@ async def report_pnl(
     db: Session = Depends(get_db)
 ):
     """
-    Receive trade result from follower
+    Report trade result from follower
     
-    Called by: Follower agent after position closes
+    Called by: Follower agent after closing trade
     Auth: Requires user API key
     """
     try:
-        # Create trade record
+        # Parse timestamps
+        opened_at = datetime.fromisoformat(trade.opened_at.replace('Z', '+00:00'))
+        closed_at = datetime.fromisoformat(trade.closed_at.replace('Z', '+00:00'))
+        
+        # Calculate 10% fee on profitable trades
+        fee_charged = max(0, trade.profit_usd * 0.10) if trade.profit_usd > 0 else 0.0
+        
+        # Store trade record
         db_trade = Trade(
             user_id=user.id,
-            signal_id=trade.signal_id,
             trade_id=trade.trade_id,
             kraken_order_id=trade.kraken_order_id,
-            opened_at=datetime.fromisoformat(trade.opened_at),
-            closed_at=datetime.fromisoformat(trade.closed_at),
+            opened_at=opened_at,
+            closed_at=closed_at,
             symbol=trade.symbol,
             side=trade.side,
             entry_price=trade.entry_price,
@@ -385,11 +382,9 @@ async def report_pnl(
             leverage=trade.leverage,
             profit_usd=trade.profit_usd,
             profit_percent=trade.profit_percent,
+            fee_charged=fee_charged,
             notes=trade.notes
         )
-        
-        # Calculate fee (10% of profit if positive)
-        fee = db_trade.calculate_fee()
         db.add(db_trade)
         
         # Update user stats
@@ -398,27 +393,28 @@ async def report_pnl(
         user.total_profit += trade.profit_usd
         user.total_trades += 1
         
-        # Calculate new monthly fee
-        user.calculate_monthly_fee()
+        # Calculate fee due (10% of profits)
+        if trade.profit_usd > 0:
+            user.monthly_fee_due += fee_charged
         
         db.commit()
         
-        print(f"💰 P&L reported by {user.email}")
-        print(f"   Trade profit: ${trade.profit_usd:.2f}")
-        print(f"   Fee charged: ${fee:.2f}")
-        print(f"   Monthly total: ${user.monthly_profit:.2f}")
+        logger.info(f"💰 Trade reported by {user.email}:")
+        logger.info(f"   Symbol: {trade.symbol}")
+        logger.info(f"   Profit: ${trade.profit_usd:.2f}")
+        logger.info(f"   Fee: ${fee_charged:.2f}")
         
         return {
-            "status": "recorded",
-            "trade_id": trade.trade_id,
-            "profit": trade.profit_usd,
-            "fee_charged": fee,
+            "status": "success",
+            "trade_id": db_trade.id,
+            "profit_usd": trade.profit_usd,
+            "fee_charged": fee_charged,
             "monthly_profit": user.monthly_profit,
             "monthly_fee_due": user.monthly_fee_due
         }
     
     except Exception as e:
-        print(f"❌ Error recording trade: {e}")
+        logger.error(f"❌ Error reporting trade: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -426,377 +422,51 @@ async def report_pnl(
 
 @router.post("/api/users/register")
 async def register_user(
-    registration: UserRegistration,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_master_key)
-):
-    """
-    Register new follower user
-    
-    Called by: Your signup form/website
-    Auth: Requires MASTER_API_KEY
-    
-    Flow: User registers → Verification email sent → User clicks link → API key shown
-    """
-    try:
-        # Check if email already exists
-        existing = db.query(User).filter(User.email == registration.email).first()
-        if existing:
-            # If already exists and verified, offer to resend API key via email
-            if existing.verified:
-                # Send API key to their email
-                from email_service import send_api_key_email
-                email_sent = send_api_key_email(existing.email, existing.api_key)
-                
-                if email_sent:
-                    return {
-                        "status": "key_resent",
-                        "message": "Your account already exists! We've sent your API key to your email.",
-                        "email": existing.email
-                    }
-                else:
-                    # Email service not configured - show them the key in dev mode
-                    return {
-                        "status": "already_verified",
-                        "message": "Email already registered. Email service not configured.",
-                        "api_key": existing.api_key,
-                        "note": "Save this key! In production, it would be emailed to you."
-                    }
-            
-            # If exists but not verified, resend verification email
-            if not existing.verified:
-                # Generate new verification token
-                verification_token = secrets.token_urlsafe(32)
-                existing.verification_token = verification_token
-                existing.verification_expires = datetime.utcnow() + timedelta(hours=1)
-                db.commit()
-                
-                # Send verification email
-                from email_service import send_verification_email
-                email_sent = send_verification_email(existing.email, verification_token)
-                
-                if email_sent:
-                    print(f"📧 Verification email resent to: {registration.email}")
-                    return {
-                        "status": "verification_sent",
-                        "message": "Verification email sent! Check your inbox."
-                    }
-                else:
-                    # If email service not configured, show token in response (development only)
-                    print(f"⚠️ Email service not configured - showing verification link")
-                    return {
-                        "status": "verification_required",
-                        "message": "Email service not configured",
-                        "verification_link": f"/verify/{verification_token}"
-                    }
-            else:
-                raise HTTPException(status_code=400, detail="Email already registered and verified. Please login or contact support.")
-        
-        # Create new user
-        api_key = User.generate_api_key()
-        verification_token = secrets.token_urlsafe(32)
-        
-        user = User(
-            email=registration.email,
-            api_key=api_key,
-            kraken_account_id=registration.kraken_account_id,
-            verified=False,
-            verification_token=verification_token,
-            verification_expires=datetime.utcnow() + timedelta(hours=1),
-            access_granted=False  # Only grant after verification
-        )
-        
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        
-        # Send verification email
-        from email_service import send_verification_email
-        email_sent = send_verification_email(user.email, verification_token)
-        
-        if email_sent:
-            print(f"✅ New user registered: {registration.email}")
-            print(f"📧 Verification email sent")
-            
-            return {
-                "status": "verification_sent",
-                "email": user.email,
-                "message": "Verification email sent! Check your inbox to get your API key."
-            }
-        else:
-            # If email service not configured, show token in response (development only)
-            print(f"✅ New user registered: {registration.email}")
-            print(f"⚠️ Email service not configured - showing verification link")
-            
-            return {
-                "status": "verification_required",
-                "email": user.email,
-                "message": "Email service not configured. Use the verification link below:",
-                "verification_link": f"/verify/{verification_token}"
-            }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error registering user: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/verify/{token}", response_class=HTMLResponse)
-async def verify_email(
-    token: str,
+    data: UserRegistration,
     db: Session = Depends(get_db)
 ):
     """
-    Verify user email and show API key
+    Register new user
     
-    Called by: User clicking link in verification email
-    Auth: Token-based (secure)
-    """
-    try:
-        # Find user by token
-        user = db.query(User).filter(
-            User.verification_token == token,
-            User.verification_expires > datetime.utcnow()
-        ).first()
-        
-        if not user:
-            # Token invalid or expired
-            return HTMLResponse(
-                content="""
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Verification Failed</title>
-                    <style>
-                        body {
-                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                            display: flex;
-                            align-items: center;
-                            justify-content: center;
-                            min-height: 100vh;
-                            margin: 0;
-                            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        }
-                        .container {
-                            background: white;
-                            border-radius: 20px;
-                            padding: 40px;
-                            max-width: 500px;
-                            text-align: center;
-                            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                        }
-                        h1 { color: #ef4444; }
-                        a {
-                            display: inline-block;
-                            margin-top: 20px;
-                            padding: 12px 24px;
-                            background: #667eea;
-                            color: white;
-                            text-decoration: none;
-                            border-radius: 8px;
-                        }
-                    </style>
-                </head>
-                <body>
-                    <div class="container">
-                        <h1>❌ Verification Failed</h1>
-                        <p>This verification link is invalid or has expired.</p>
-                        <p>Verification links expire after 1 hour.</p>
-                        <a href="/signup">Sign Up Again</a>
-                    </div>
-                </body>
-                </html>
-                """,
-                status_code=400
-            )
-        
-        # Mark user as verified
-        user.verified = True
-        user.access_granted = True
-        user.verification_token = None
-        user.verification_expires = None
-        db.commit()
-        
-        # Optionally send API key via email for extra security
-        from email_service import send_api_key_email
-        send_api_key_email(user.email, user.api_key)
-        
-        print(f"✅ User verified: {user.email}")
-        
-        # Show API key on page
-        return HTMLResponse(
-            content=f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Email Verified!</title>
-                <style>
-                    body {{
-                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        min-height: 100vh;
-                        margin: 0;
-                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                        padding: 20px;
-                    }}
-                    .container {{
-                        background: white;
-                        border-radius: 20px;
-                        padding: 40px;
-                        max-width: 600px;
-                        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                    }}
-                    h1 {{ color: #10b981; text-align: center; }}
-                    .warning {{
-                        background: #fee2e2;
-                        border-left: 4px solid #ef4444;
-                        padding: 15px;
-                        border-radius: 4px;
-                        margin: 20px 0;
-                    }}
-                    .api-key {{
-                        background: #f0f7ff;
-                        border: 2px dashed #667eea;
-                        padding: 15px;
-                        border-radius: 8px;
-                        font-family: 'Courier New', monospace;
-                        font-size: 16px;
-                        word-break: break-all;
-                        margin: 20px 0;
-                    }}
-                    .btn {{
-                        display: inline-block;
-                        padding: 12px 24px;
-                        background: #667eea;
-                        color: white;
-                        text-decoration: none;
-                        border-radius: 8px;
-                        margin: 5px;
-                    }}
-                    .btn-success {{
-                        background: #10b981;
-                    }}
-                    .steps {{
-                        background: #f9fafb;
-                        padding: 20px;
-                        border-radius: 8px;
-                        margin: 20px 0;
-                    }}
-                    .steps ol {{
-                        margin: 10px 0;
-                        padding-left: 20px;
-                    }}
-                    .steps li {{
-                        margin: 10px 0;
-                    }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>✅ Email Verified!</h1>
-                    
-                    <div class="warning">
-                        <strong>⚠️ IMPORTANT:</strong> Save your API key NOW! This is the only time you'll see it on screen. 
-                        We've also sent it to your email for safekeeping.
-                    </div>
-                    
-                    <p><strong>Your API Key:</strong></p>
-                    <div class="api-key" id="api-key">{user.api_key}</div>
-                    
-                    <button class="btn btn-success" onclick="copyKey()">📋 Copy API Key</button>
-                    
-                    <div class="steps">
-                        <h3>🎯 Next Steps:</h3>
-                        <ol>
-                            <li>Copy your API key above (or check your email)</li>
-                            <li>Click "Deploy to Render" below</li>
-                            <li>Paste your API key when prompted</li>
-                            <li>Enter your Kraken API credentials</li>
-                            <li>Start receiving trading signals!</li>
-                        </ol>
-                        <div style="text-align: center; margin-top: 20px;">
-                            <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="btn btn-success">
-                                Deploy to Render →
-                            </a>
-                        </div>
-                    </div>
-                </div>
-                
-                <script>
-                    function copyKey() {{
-                        const apiKey = document.getElementById('api-key').textContent;
-                        navigator.clipboard.writeText(apiKey).then(() => {{
-                            const btn = event.target;
-                            btn.textContent = '✓ Copied!';
-                            btn.style.background = '#10b981';
-                            setTimeout(() => {{
-                                btn.textContent = '📋 Copy API Key';
-                                btn.style.background = '#10b981';
-                            }}, 2000);
-                        }});
-                    }}
-                </script>
-            </body>
-            </html>
-            """,
-            status_code=200
-        )
-    
-    except Exception as e:
-        print(f"❌ Error verifying email: {e}")
-        return HTMLResponse(
-            content=f"<h1>Error</h1><p>{str(e)}</p>",
-            status_code=500
-        )
-
-
-@router.post("/api/users/register")
-async def register_user(
-    registration: UserRegistration,
-    db: Session = Depends(get_db),
-    _: bool = Depends(verify_master_key)
-):
-    """
-    Register new follower user
-    
-    Called by: Your signup form/website
-    Auth: Requires MASTER_API_KEY
+    Called by: Signup form
+    Public: No auth required
     """
     try:
         # Check if email already exists
-        existing = db.query(User).filter(User.email == registration.email).first()
+        existing = db.query(User).filter(User.email == data.email).first()
         if existing:
             raise HTTPException(status_code=400, detail="Email already registered")
         
-        # Create new user
-        api_key = User.generate_api_key()
+        # Generate API key
+        api_key = f"nk_{secrets.token_urlsafe(32)}"
+        
+        # Create user
         user = User(
-            email=registration.email,
+            email=data.email,
             api_key=api_key,
-            kraken_account_id=registration.kraken_account_id,
-            access_granted=True
+            kraken_account_id=data.kraken_account_id,
+            access_granted=True,  # Grant access immediately
+            monthly_fee_paid=True  # First month free
         )
         
         db.add(user)
         db.commit()
         db.refresh(user)
         
-        print(f"✅ New user registered: {registration.email}")
+        logger.info(f"✅ New user registered: {data.email}")
         
         return {
             "status": "success",
-            "email": user.email,
+            "message": "Account created successfully",
             "api_key": api_key,
-            "message": "User registered successfully"
+            "email": data.email,
+            "access_granted": True
         }
     
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error registering user: {e}")
+        logger.error(f"❌ Error registering user: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -820,7 +490,7 @@ async def verify_user(
         user.suspended_at = datetime.utcnow()
         user.suspension_reason = "Monthly fee overdue"
         db.commit()
-        print(f"⚠️ User suspended for non-payment: {user.email}")
+        logger.warning(f"⚠️ User suspended for non-payment: {user.email}")
     
     return {
         "access_granted": user.access_granted,
@@ -873,6 +543,146 @@ async def get_user_stats(
             }
             for trade in recent_trades
         ]
+    }
+
+
+# ==================== HOSTED AGENT SETUP (NEW!) ====================
+
+@router.post("/api/setup-agent")
+async def setup_agent(
+    data: SetupAgentRequest,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Setup customer's trading agent with Kraken credentials
+    
+    Called by: /setup page after customer enters credentials
+    Auth: Requires user API key
+    
+    This endpoint:
+    1. Encrypts and stores Kraken credentials
+    2. Marks user as ready for agent activation
+    3. Multi-agent manager will pick them up automatically
+    """
+    
+    # Find user
+    user = db.query(User).filter(User.api_key == x_api_key).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Validate Kraken credentials format
+    if not data.kraken_api_key or not data.kraken_api_secret:
+        raise HTTPException(status_code=400, detail="Both API key and secret required")
+    
+    if len(data.kraken_api_key) < 10:
+        raise HTTPException(status_code=400, detail="Invalid Kraken API key format")
+    
+    if len(data.kraken_api_secret) < 20:
+        raise HTTPException(status_code=400, detail="Invalid Kraken API secret format")
+    
+    try:
+        # Encrypt and store credentials
+        user.set_kraken_credentials(data.kraken_api_key, data.kraken_api_secret)
+        
+        # Mark as ready
+        user.credentials_set = True
+        
+        # Ensure access is granted
+        if not user.access_granted:
+            user.access_granted = True
+            user.suspended_at = None
+            user.suspension_reason = None
+        
+        db.commit()
+        
+        logger.info(f"✅ Credentials set for user: {user.email}")
+        logger.info(f"   Agent will start automatically within 5 minutes")
+        
+        return {
+            "status": "success",
+            "message": "Trading agent configured successfully",
+            "agent_status": "starting",
+            "note": "Your agent will start automatically within 5 minutes",
+            "email": user.email
+        }
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Error setting up agent: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to setup agent: {str(e)}")
+
+
+@router.get("/api/agent-status")
+async def get_agent_status(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get customer's agent status
+    
+    Called by: Dashboard to show if agent is running
+    Auth: Requires user API key
+    """
+    
+    # Find user
+    user = db.query(User).filter(User.api_key == x_api_key).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Check if credentials are set
+    if not user.credentials_set:
+        return {
+            "agent_configured": False,
+            "agent_active": False,
+            "message": "Agent not configured. Please set up your Kraken credentials.",
+            "setup_url": "/setup"
+        }
+    
+    # Check if agent is active
+    return {
+        "agent_configured": True,
+        "agent_active": user.agent_active,
+        "agent_started_at": user.agent_started_at.isoformat() if user.agent_started_at else None,
+        "agent_last_poll": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
+        "access_granted": user.access_granted,
+        "email": user.email
+    }
+
+
+@router.post("/api/stop-agent")
+async def stop_agent(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Stop customer's trading agent
+    
+    Called by: User dashboard when they want to pause trading
+    Auth: Requires user API key
+    """
+    
+    # Find user
+    user = db.query(User).filter(User.api_key == x_api_key).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Mark agent as inactive
+    user.agent_active = False
+    
+    # Clear credentials (for security)
+    user.kraken_api_key_encrypted = None
+    user.kraken_api_secret_encrypted = None
+    user.credentials_set = False
+    
+    db.commit()
+    
+    logger.info(f"🛑 Agent stopped for user: {user.email}")
+    
+    return {
+        "status": "success",
+        "message": "Trading agent stopped",
+        "agent_active": False
     }
 
 
@@ -956,7 +766,7 @@ async def create_payment_page(
             raise HTTPException(status_code=500, detail="Failed to create payment")
     
     except Exception as e:
-        print(f"❌ Error creating payment: {e}")
+        logger.error(f"❌ Error creating payment: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -996,13 +806,13 @@ async def coinbase_webhook(
             
             user_id = metadata.get("user_id")
             if not user_id:
-                print("⚠️ Payment webhook missing user_id")
+                logger.warning("⚠️ Payment webhook missing user_id")
                 return {"status": "ignored"}
             
             # Find user
             user = db.query(User).filter(User.id == int(user_id)).first()
             if not user:
-                print(f"⚠️ User not found: {user_id}")
+                logger.warning(f"⚠️ User not found: {user_id}")
                 return {"status": "user_not_found"}
             
             # Update payment record
@@ -1024,16 +834,16 @@ async def coinbase_webhook(
             
             db.commit()
             
-            print(f"✅ Payment confirmed for {user.email}")
-            print(f"   Amount: ${user.monthly_fee_due:.2f}")
-            print(f"   Access restored!")
+            logger.info(f"✅ Payment confirmed for {user.email}")
+            logger.info(f"   Amount: ${user.monthly_fee_due:.2f}")
+            logger.info(f"   Access restored!")
             
             return {"status": "processed"}
         
         return {"status": "ignored"}
     
     except Exception as e:
-        print(f"❌ Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -1050,6 +860,8 @@ async def get_system_stats(
     Called by: Admin dashboard
     Auth: Requires MASTER_API_KEY
     """
+    from sqlalchemy import func
+    
     total_users = db.query(User).count()
     active_users = db.query(User).filter(User.access_granted == True).count()
     suspended_users = db.query(User).filter(User.access_granted == False).count()
@@ -1075,9 +887,6 @@ async def get_system_stats(
         "updated_at": datetime.utcnow().isoformat()
     }
 
-
-# Import for func
-from sqlalchemy import func
 
 # Export router
 __all__ = ["router"]
