@@ -1,11 +1,10 @@
 """
 Nike Rocket Follower System - Main API
 =======================================
-Updated main.py with user-friendly dashboard.
-Add this to your Railway API project.
+Updated main.py with hosted agents system.
 
 Author: Nike Rocket Team
-Updated: November 20, 2025
+Updated: November 21, 2025
 """
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +62,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "signup": "/signup",
+            "setup": "/setup",
             "dashboard": "/dashboard",
             "broadcast": "/api/broadcast-signal",
             "latest_signal": "/api/latest-signal",
@@ -70,6 +70,9 @@ async def root():
             "register": "/api/users/register",
             "verify": "/api/users/verify",
             "stats": "/api/users/stats",
+            "agent_status": "/api/agent-status",
+            "setup_agent": "/api/setup-agent",
+            "stop_agent": "/api/stop-agent",
             "portfolio_stats": "/api/portfolio/stats",
             "portfolio_trades": "/api/portfolio/trades",
             "portfolio_deposit": "/api/portfolio/deposit",
@@ -94,6 +97,19 @@ async def signup_page():
     except FileNotFoundError:
         return HTMLResponse(
             content="<h1>Signup page not found</h1><p>Please contact support.</p>",
+            status_code=404
+        )
+
+# Setup page (NEW!)
+@app.get("/setup", response_class=HTMLResponse)
+async def setup_page():
+    """Setup page for configuring trading agent"""
+    try:
+        with open("setup.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        return HTMLResponse(
+            content="<h1>Setup page not found</h1><p>Please contact support.</p>",
             status_code=404
         )
 
@@ -636,6 +652,7 @@ async def startup_event():
     print("✅ Follower routes loaded")
     print("✅ Portfolio routes loaded")
     print("✅ Signup page available at /signup")
+    print("✅ Setup page available at /setup")
     print("✅ Dashboard available at /dashboard")
     print("✅ Ready to receive signals")
     print("=" * 60)
