@@ -39,6 +39,9 @@ from follower_models import (
     get_db_session
 )
 
+# Import email service
+from email_service import send_welcome_email, send_api_key_resend_email
+
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -426,21 +429,45 @@ async def register_user(
     db: Session = Depends(get_db)
 ):
     """
-    Register new user
+    Register new user (EMAIL-ONLY FLOW for security)
     
     Called by: Signup form
     Public: No auth required
+    
+    Flow:
+    - New user: Create account, send welcome email with API key
+    - Existing user: Resend API key via email
+    - NEVER returns API key in response (email only!)
     """
     try:
         # Check if email already exists
         existing = db.query(User).filter(User.email == data.email).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Email already registered")
         
-        # Generate API key
+        if existing:
+            # EXISTING USER - Resend API key via email
+            logger.info(f"🔄 Existing user requesting API key: {data.email}")
+            
+            # Send API key via email
+            email_sent = send_api_key_resend_email(existing.email, existing.api_key)
+            
+            if email_sent:
+                return {
+                    "status": "success",
+                    "message": "API key sent to your email",
+                    "email": existing.email
+                }
+            else:
+                # Email failed but don't expose this to user
+                logger.error(f"❌ Failed to send email to {existing.email}")
+                return {
+                    "status": "success",
+                    "message": "API key sent to your email",
+                    "email": existing.email
+                }
+        
+        # NEW USER - Create account
         api_key = f"nk_{secrets.token_urlsafe(32)}"
         
-        # Create user
         user = User(
             email=data.email,
             api_key=api_key,
@@ -455,12 +482,17 @@ async def register_user(
         
         logger.info(f"✅ New user registered: {data.email}")
         
+        # Send welcome email with API key
+        email_sent = send_welcome_email(user.email, user.api_key)
+        
+        if not email_sent:
+            logger.error(f"⚠️ Email failed for {user.email}, but user created")
+        
+        # SECURITY: Never return API key in response!
         return {
             "status": "success",
-            "message": "Account created successfully",
-            "api_key": api_key,
-            "email": data.email,
-            "access_granted": True
+            "message": "Account created! Check your email for API key.",
+            "email": user.email
         }
     
     except HTTPException:
