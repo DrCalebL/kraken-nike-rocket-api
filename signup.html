@@ -163,43 +163,44 @@
             background: #10b981;
         }
 
-        .instructions {
+        .setup-btn {
+            display: inline-block;
+            width: 100%;
+            text-align: center;
             margin-top: 20px;
-            padding: 15px;
-            background: white;
-            border-radius: 8px;
+            padding: 15px 30px;
+            background: #10b981;
+            color: white;
+            text-decoration: none;
+            border-radius: 10px;
+            font-size: 18px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
 
-        .instructions h4 {
+        .setup-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(16, 185, 129, 0.4);
+        }
+
+        .info-box {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .info-box h4 {
             color: #333;
             margin-bottom: 10px;
             font-size: 16px;
         }
 
-        .instructions ol {
-            padding-left: 20px;
+        .info-box p {
             color: #666;
-            line-height: 1.8;
-        }
-
-        .instructions ol li {
-            margin-bottom: 8px;
-        }
-
-        .deploy-btn {
-            display: inline-block;
-            margin-top: 15px;
-            padding: 12px 24px;
-            background: #10b981;
-            color: white;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 600;
-            transition: background 0.3s;
-        }
-
-        .deploy-btn:hover {
-            background: #059669;
+            font-size: 14px;
+            line-height: 1.6;
         }
 
         .error-message {
@@ -209,138 +210,51 @@
             border-radius: 8px;
             margin-top: 15px;
             display: none;
+            font-size: 14px;
+            border: 1px solid #fecaca;
         }
 
         .error-message.show {
             display: block;
         }
 
-        .loading {
-            display: inline-block;
+        .loading-spinner {
+            display: none;
             width: 20px;
             height: 20px;
-            border: 3px solid rgba(255,255,255,.3);
-            border-radius: 50%;
+            border: 3px solid rgba(255,255,255,0.3);
             border-top-color: white;
-            animation: spin 1s ease-in-out infinite;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
         }
 
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
 
-        .features {
-            margin-top: 30px;
-            padding-top: 30px;
-            border-top: 1px solid #e0e0e0;
-        }
-
-        .feature-item {
-            display: flex;
-            align-items: center;
-            margin-bottom: 15px;
-            color: #666;
-        }
-
-        .feature-item::before {
-            content: "✓";
-            display: inline-block;
-            width: 24px;
-            height: 24px;
-            background: #10b981;
-            color: white;
-            border-radius: 50%;
-            text-align: center;
-            line-height: 24px;
-            margin-right: 12px;
-            font-weight: bold;
-        }
-
-        .help-section {
+        .risk-disclosure {
             margin-top: 30px;
             padding: 20px;
             background: #f9fafb;
             border-radius: 10px;
             border: 1px solid #e5e7eb;
-        }
-
-        .help-section h3 {
-            color: #333;
-            margin-bottom: 15px;
-            font-size: 18px;
-        }
-
-        .accordion {
-            margin-top: 15px;
-        }
-
-        .accordion-item {
-            background: white;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            overflow: hidden;
-            border: 1px solid #e5e7eb;
-        }
-
-        .accordion-header {
-            padding: 15px;
-            cursor: pointer;
-            font-weight: 600;
-            color: #333;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            transition: background 0.2s;
-        }
-
-        .accordion-header:hover {
-            background: #f9fafb;
-        }
-
-        .accordion-icon {
-            transition: transform 0.3s;
-        }
-
-        .accordion-item.active .accordion-icon {
-            transform: rotate(180deg);
-        }
-
-        .accordion-content {
-            max-height: 0;
-            overflow: hidden;
-            transition: max-height 0.3s ease;
-            padding: 0 15px;
-        }
-
-        .accordion-item.active .accordion-content {
-            max-height: 1000px;
-            padding: 0 15px 15px 15px;
-        }
-
-        .steps-list {
-            list-style: none;
-            padding: 0;
-            margin: 10px 0;
-        }
-
-        .steps-list li {
-            padding: 8px 0;
+            font-size: 12px;
             color: #666;
             line-height: 1.6;
         }
 
-        .steps-list li strong {
+        .risk-disclosure h4 {
             color: #333;
+            margin-bottom: 10px;
+            font-size: 14px;
         }
 
-        .warning-box {
-            background: #fef3c7;
-            border-left: 4px solid #f59e0b;
-            padding: 12px;
-            margin: 10px 0;
-            border-radius: 4px;
-            color: #92400e;
-            font-size: 14px;
+        .risk-disclosure p {
+            margin-bottom: 8px;
+        }
+
+        .risk-disclosure p:last-child {
+            margin-bottom: 0;
         }
     </style>
 </head>
@@ -351,253 +265,39 @@
             <p>Automated Kraken Futures Trading</p>
         </div>
 
-        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444; margin-bottom: 30px;">
-            ⚠️ <strong>LIVE TRADING ONLY:</strong> This system trades real money from day one. No practice mode. Start with $500-$1,000 you can afford to lose.
-        </div>
-
         <div class="form-section">
-            <h2>Sign Up</h2>
+            <h2>Start Trading Today</h2>
             
             <div class="input-group">
                 <label for="email">Email Address</label>
-                <input type="email" id="email" placeholder="your.email@example.com" required>
+                <input type="email" id="email" placeholder="your@email.com" required>
             </div>
 
             <button class="btn" onclick="signup()">
-                <span id="btn-text">Create Account</span>
-                <span id="btn-loading" class="loading" style="display: none;"></span>
+                <span id="btn-text">Create Free Account</span>
+                <span id="btn-loading" class="loading-spinner"></span>
             </button>
 
-            <div class="error-message" id="error-message"></div>
+            <div id="error-message" class="error-message"></div>
         </div>
 
-        <div class="result-section" id="result-section">
-            <h3>✅ Account Created Successfully!</h3>
-            
-            <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444; margin-bottom: 15px;">
-                ⚠️ <strong>IMPORTANT:</strong> Save your API key NOW! You won't be able to retrieve it later. If you lose it, you'll need to contact support.
-            </div>
-            
-            <p style="margin-bottom: 10px; color: #666;">Your API Key:</p>
-            <div class="api-key-box" id="api-key-box">
-                <span id="api-key-text"></span>
-            </div>
-            <button class="copy-btn" id="copy-btn" onclick="copyApiKey()">Copy API Key</button>
+        <div id="result-section" class="result-section"></div>
 
-            <div class="instructions">
-                <h4>🎯 Next Steps:</h4>
-                <ol>
-                    <li>✅ <strong>Copy your API key above</strong> (keep it safe!)</li>
-                    <li>🔐 <strong>Activate Kraken Futures</strong> (see accordion below - CRITICAL!)</li>
-                    <li>🔑 <strong>Create Kraken Futures API keys</strong></li>
-                    <li>💰 <strong>Fund your Futures wallet</strong> ($500+ recommended)</li>
-                    <li>🚀 <strong>Deploy to Render</strong> (button below)</li>
-                    <li>📊 <strong>Start receiving trading signals!</strong></li>
-                </ol>
-                
-                <div class="warning-box" style="margin: 15px 0;">
-                    ⚠️ <strong>IMPORTANT:</strong> Scroll down to the accordion section below for detailed instructions on activating Kraken Futures and creating API keys!
-                </div>
-                
-                <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="deploy-btn" target="_blank">
-                    Deploy to Render →
-                </a>
-            </div>
-        </div>
-
-        <div class="features">
-            <div class="feature-item">24/7 automated trading (LIVE)</div>
-            <div class="feature-item">2% max risk per trade</div>
-            <div class="feature-item">10% profit sharing only</div>
-            <div class="feature-item">No monthly fees</div>
-            <div class="feature-item">Auto stop-loss protection</div>
-            <div class="feature-item">Non-custodial (your funds stay on Kraken)</div>
-        </div>
-
-        <div class="help-section">
-            <h3>📚 Need Help?</h3>
-            
-            <div class="accordion">
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(0)">
-                        <span>🚨 STEP 1: Activate Kraken Futures (REQUIRED!)</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444;">
-                            ⚠️ <strong>CRITICAL:</strong> You MUST unlock Futures BEFORE creating API keys, or they won't work!
-                        </div>
-                        <p style="color: #666; margin: 15px 0;"><strong>First, check your verification level:</strong></p>
-                        <ol class="steps-list">
-                            <li><strong>1.</strong> Log into <a href="https://pro.kraken.com" target="_blank">Kraken Pro</a></li>
-                            <li><strong>2.</strong> Click your profile icon → <strong>Get Verified</strong></li>
-                            <li><strong>3.</strong> You need <strong>"Intermediate"</strong> or <strong>"Pro"</strong> level (not "Starter")</li>
-                            <li><strong>4.</strong> If Starter, upgrade by providing: ID, address proof, selfie</li>
-                        </ol>
-                        <p style="color: #666; margin: 15px 0;"><strong>Once verified to Intermediate, unlock Futures:</strong></p>
-                        <ol class="steps-list">
-                            <li><strong>1.</strong> Click <strong>"Trade"</strong> tab (top of page)</li>
-                            <li><strong>2.</strong> Click <strong>"Market"</strong> dropdown → Select any <strong>Futures market</strong></li>
-                            <li><strong>3.</strong> Click purple <strong>"Unlock Futures"</strong> button that appears</li>
-                            <li><strong>4.</strong> Accept the Terms of Service</li>
-                            <li><strong>5.</strong> Accept the Risk Disclosure</li>
-                            <li><strong>6.</strong> You'll see "Futures Unlocked! ✅"</li>
-                        </ol>
-                        <div class="warning-box">
-                            ✅ <strong>Now</strong> you can create Futures API keys below!
-                        </div>
-                    </div>
-                </div>
-
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(1)">
-                        <span>🔑 STEP 2: Create Futures API Keys</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <div class="warning-box">
-                            ⚠️ Only do this AFTER unlocking Futures above!
-                        </div>
-                        <ol class="steps-list">
-                            <li><strong>1.</strong> In <a href="https://pro.kraken.com" target="_blank">Kraken Pro</a>, click profile icon → <strong>Settings</strong></li>
-                            <li><strong>2.</strong> Click <strong>"API"</strong> tab on the left</li>
-                            <li><strong>3.</strong> Scroll to <strong>"Futures"</strong> section</li>
-                            <li><strong>4.</strong> Click purple <strong>"+ Generate Key"</strong> button</li>
-                            <li><strong>5.</strong> In the modal, set permissions:
-                                <ul style="margin-left: 20px; margin-top: 5px;">
-                                    <li><strong>General:</strong> Select "<strong>Full access</strong>" ✅</li>
-                                    <li><strong>Transfers:</strong> Select "<strong>No access</strong>" ❌ <em>(CRITICAL - prevents withdrawals!)</em></li>
-                                </ul>
-                            </li>
-                            <li><strong>6.</strong> Click <strong>"Generate Key"</strong> button</li>
-                            <li><strong>7.</strong> Copy BOTH:
-                                <ul style="margin-left: 20px; margin-top: 5px;">
-                                    <li><strong>Public Key</strong> (shorter)</li>
-                                    <li><strong>Private Key</strong> (longer) - <em>Shown only once!</em></li>
-                                </ul>
-                            </li>
-                            <li><strong>8.</strong> Save both keys in a password manager</li>
-                        </ol>
-                        <div class="warning-box">
-                            ⚠️ <strong>CRITICAL:</strong> Private Key is shown only once! If you close the window without copying, you'll need to create new keys.
-                        </div>
-                    </div>
-                </div>
-
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(2)">
-                        <span>💰 STEP 3: Fund Your Futures Wallet</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <p style="color: #666; margin: 10px 0;"><strong>Before deploying, make sure you have funds!</strong></p>
-                        <ol class="steps-list">
-                            <li><strong>1.</strong> In Kraken, click <strong>"Futures"</strong> tab</li>
-                            <li><strong>2.</strong> Click <strong>"Funding"</strong></li>
-                            <li><strong>3.</strong> Transfer from Spot to Futures:
-                                <ul style="margin-left: 20px; margin-top: 5px;">
-                                    <li><strong>Minimum:</strong> $500 USD recommended</li>
-                                    <li><strong>Comfortable:</strong> $1,000 - $2,000 USD</li>
-                                    <li><strong>Confident:</strong> $5,000+ USD</li>
-                                </ul>
-                            </li>
-                            <li><strong>4.</strong> Wait 1 minute for transfer to complete</li>
-                        </ol>
-                        <div class="warning-box">
-                            ⚠️ Agent won't work with $0 balance! Make sure you have funds in Futures wallet.
-                        </div>
-                    </div>
-                </div>
-
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(3)">
-                        <span>💰 How does billing work?</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <ul class="steps-list">
-                            <li><strong>No subscription fees!</strong> You only pay 10% of monthly profits.</li>
-                            <li>If you make <strong>$1,000 profit</strong> → Pay <strong>$100</strong></li>
-                            <li>If you make <strong>$0 or lose money</strong> → Pay <strong>$0</strong></li>
-                            <li>Billing happens at the end of each month</li>
-                            <li>7-day grace period to make payment</li>
-                            <li>Payment via crypto (USDT/USDC accepted)</li>
-                        </ul>
-                    </div>
-                </div>
-
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(4)">
-                        <span>🔒 Is my money safe?</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <ul class="steps-list">
-                            <li><strong>Your funds NEVER leave Kraken</strong> - This is non-custodial</li>
-                            <li>We only execute trades on YOUR Kraken account</li>
-                            <li>API keys cannot withdraw funds (you disabled "Transfers" permission)</li>
-                            <li>You can revoke access anytime by deleting API keys</li>
-                            <li>All trades have automatic stop-loss protection (max 2% risk)</li>
-                            <li>You maintain full control of your account</li>
-                        </ul>
-                    </div>
-                </div>
-
-                <div class="accordion-item">
-                    <div class="accordion-header" onclick="toggleAccordion(5)">
-                        <span>⚠️ Is this live trading?</span>
-                        <span class="accordion-icon">▼</span>
-                    </div>
-                    <div class="accordion-content">
-                        <div class="warning-box" style="background: #fee2e2; border-left-color: #ef4444;">
-                            ⚠️ <strong>YES - This is LIVE TRADING with REAL MONEY!</strong>
-                        </div>
-                        <ul class="steps-list">
-                            <li>There is <strong>NO testnet</strong> or practice mode</li>
-                            <li>All trades execute on your real Kraken account</li>
-                            <li>You can <strong>lose money</strong> - only risk what you can afford to lose</li>
-                            <li><strong>Start small:</strong> $500-$1,000 recommended for beginners</li>
-                            <li>Every trade has 2% max risk with stop-loss protection</li>
-                            <li>Past performance does not guarantee future results</li>
-                        </ul>
-                        <p style="color: #666; margin: 15px 0; font-size: 14px;">
-                            This is <strong>not financial advice</strong>. Cryptocurrency trading is risky. You are responsible for your trading decisions.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div style="margin-top: 30px; padding: 20px; background: #f9fafb; border-radius: 10px; border: 1px solid #e5e7eb; font-size: 12px; color: #666; line-height: 1.6;">
-            <h4 style="color: #333; margin-bottom: 10px; font-size: 14px;">⚠️ Risk Disclosure</h4>
-            <p style="margin-bottom: 8px;">
+        <div class="risk-disclosure">
+            <h4>⚠️ Risk Disclosure</h4>
+            <p>
                 <strong>Cryptocurrency futures trading involves substantial risk of loss and is not suitable for all investors.</strong> You could lose your entire investment. Leverage amplifies both gains and losses. Past performance does not guarantee future results.
             </p>
-            <p style="margin-bottom: 8px;">
+            <p>
                 Nike Rocket is not a financial advisor and does not provide investment advice. This service executes automated trades based on algorithmic signals. You are solely responsible for your trading decisions and any resulting profits or losses.
             </p>
-            <p style="margin-bottom: 0;">
+            <p>
                 By signing up, you acknowledge that you understand these risks and agree to the terms of service. Only trade with capital you can afford to lose completely.
             </p>
         </div>
     </div>
 
     <script>
-        function toggleAccordion(index) {
-            const items = document.querySelectorAll('.accordion-item');
-            const item = items[index];
-            
-            // Close other accordions
-            items.forEach((otherItem, i) => {
-                if (i !== index && otherItem.classList.contains('active')) {
-                    otherItem.classList.remove('active');
-                }
-            });
-            
-            // Toggle current accordion
-            item.classList.toggle('active');
-        }
-
         async function signup() {
             const email = document.getElementById('email').value;
             const btn = document.querySelector('.btn');
@@ -624,115 +324,59 @@
                 const response = await fetch('/api/users/register', {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json',
-                        'X-Master-Key': 'nike-massive-rocket-railway-master'
+                        'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ email: email })
                 });
 
                 const data = await response.json();
 
-                if (response.ok && data.status === 'verification_sent') {
-                    // Show "check your email" message
-                    resultSection.innerHTML = `
-                        <h3>✅ Check Your Email!</h3>
-                        <p style="color: #666; margin: 20px 0;">
-                            We've sent a verification email to <strong>${email}</strong>
-                        </p>
-                        <div style="background: #f0f7ff; border-left: 4px solid #667eea; padding: 15px; border-radius: 4px; margin: 20px 0;">
-                            <p style="margin: 0; color: #333;">
-                                📧 Click the verification link in your email to get your API key!
-                            </p>
-                        </div>
-                        <div class="warning-box" style="margin: 20px 0;">
-                            ⚠️ <strong>While you wait:</strong> Scroll down to the accordion section below and complete STEPS 1-3 (Activate Futures, Create API Keys, Fund Wallet). You'll need this before deploying!
-                        </div>
-                        <p style="font-size: 14px; color: #666;">
-                            Don't see the email? Check your spam folder or wait a minute and try again.
-                        </p>
-                    `;
-                    resultSection.classList.add('show');
-                    document.querySelector('.form-section').style.display = 'none';
+                if (response.ok && data.status === 'success') {
+                    // NEW: Account created with API key returned directly
+                    const apiKey = data.api_key;
                     
-                } else if (response.ok && data.status === 'key_resent') {
-                    // Existing verified user - API key sent to email
                     resultSection.innerHTML = `
-                        <h3>✅ API Key Sent to Your Email!</h3>
-                        <p style="color: #666; margin: 20px 0;">
-                            Your account already exists! We've sent your API key to <strong>${email}</strong>
+                        <h3>✅ Account Created Successfully!</h3>
+                        <p style="color: #666; margin: 15px 0;">
+                            Welcome to Nike Rocket! Your account is ready.
                         </p>
-                        <div style="background: #f0f7ff; border-left: 4px solid #667eea; padding: 15px; border-radius: 4px; margin: 20px 0;">
-                            <p style="margin: 0; color: #333;">
-                                📧 Check your email for your API key and deployment instructions!
-                            </p>
-                        </div>
-                        <div class="warning-box" style="margin: 20px 0;">
-                            ⚠️ <strong>Before deploying:</strong> Scroll down and complete the accordion steps below:
-                            <ul style="margin: 10px 0 0 20px;">
-                                <li>STEP 1: Activate Kraken Futures</li>
-                                <li>STEP 2: Create Futures API Keys</li>
-                                <li>STEP 3: Fund Your Futures Wallet</li>
-                            </ul>
-                        </div>
-                        <p style="font-size: 14px; color: #666;">
-                            Don't see the email? Check your spam folder.
-                        </p>
-                    `;
-                    resultSection.classList.add('show');
-                    document.querySelector('.form-section').style.display = 'none';
-                    
-                } else if (response.ok && data.status === 'already_verified') {
-                    // Account already exists - API key sent to email (PRODUCTION/MAINNET)
-                    resultSection.innerHTML = `
-                        <h3>✅ Account Already Exists!</h3>
-                        <p style="color: #666; margin: 20px 0;">
-                            Your account is already verified. We've sent your API key to <strong>${email}</strong>
-                        </p>
-                        <div style="background: #f0f7ff; border-left: 4px solid #667eea; padding: 15px; border-radius: 4px; margin: 20px 0;">
-                            <p style="margin: 0; color: #333;">
-                                📧 Check your email for your API key!
-                            </p>
-                        </div>
-                        <div class="warning-box" style="margin: 20px 0;">
-                            ⚠️ <strong>Before deploying:</strong> Scroll down and complete the accordion steps:
-                            <ul style="margin: 10px 0 0 20px;">
-                                <li>STEP 1: Activate Kraken Futures (REQUIRED!)</li>
-                                <li>STEP 2: Create Futures API Keys</li>
-                                <li>STEP 3: Fund Your Futures Wallet ($500+ minimum)</li>
-                            </ul>
-                        </div>
                         
-                        <a href="https://render.com/deploy?repo=https://github.com/DrCalebL/kraken-follower-agent" class="deploy-btn" target="_blank" style="margin-top: 15px; display: inline-block;">
-                            Deploy to Render →
+                        <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                            <h4 style="color: #333; margin-bottom: 10px; font-size: 14px;">Your API Key:</h4>
+                            <div class="api-key-box" id="api-key-text">${apiKey}</div>
+                            <button class="copy-btn" id="copy-btn" onclick="copyApiKey()">Copy API Key</button>
+                        </div>
+
+                        <div class="info-box">
+                            <h4>📝 Important: Save Your API Key</h4>
+                            <p>
+                                You'll need this API key to set up your trading agent. Keep it safe and don't share it with anyone.
+                            </p>
+                        </div>
+
+                        <a href="/setup?key=${apiKey}" class="setup-btn" id="setup-link">
+                            🚀 Setup Your Trading Agent
                         </a>
-                        
-                        <p style="font-size: 14px; color: #666; margin-top: 15px;">
-                            Don't see the email? Check your spam folder or contact support.
-                        </p>
+
+                        <div style="margin-top: 15px; text-align: center; font-size: 14px; color: #666;">
+                            <p>Takes 2 minutes • No technical skills required</p>
+                        </div>
                     `;
                     resultSection.classList.add('show');
                     document.querySelector('.form-section').style.display = 'none';
                     
-                } else if (response.ok && data.status === 'verification_required') {
-                    // Development mode - email service not configured
-                    const link = data.verification_link;
-                    resultSection.innerHTML = `
-                        <h3>⚠️ Email Service Not Configured</h3>
-                        <p style="color: #666; margin: 20px 0;">
-                            For testing, click the link below to verify:
-                        </p>
-                        <a href="${link}" class="deploy-btn" style="background: #667eea;">
-                            Verify Email →
-                        </a>
-                    `;
-                    resultSection.classList.add('show');
-                    document.querySelector('.form-section').style.display = 'none';
+                } else if (response.status === 400 && data.detail === 'Email already registered') {
+                    // User already exists
+                    errorMessage.textContent = 'This email is already registered. Please use a different email or contact support to retrieve your API key.';
+                    errorMessage.classList.add('show');
+                    
                 } else {
                     // Show error
-                    errorMessage.textContent = data.detail || 'Signup failed. Please try again.';
+                    errorMessage.textContent = data.detail || data.message || 'Signup failed. Please try again.';
                     errorMessage.classList.add('show');
                 }
             } catch (error) {
+                console.error('Signup error:', error);
                 errorMessage.textContent = 'Network error. Please check your connection and try again.';
                 errorMessage.classList.add('show');
             } finally {
@@ -755,6 +399,9 @@
                     copyBtn.textContent = 'Copy API Key';
                     copyBtn.classList.remove('copied');
                 }, 2000);
+            }).catch(() => {
+                // Fallback for browsers that don't support clipboard API
+                alert('API Key: ' + apiKeyText);
             });
         }
 
