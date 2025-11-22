@@ -2,6 +2,7 @@
 Nike Rocket Follower System - Main API
 =======================================
 Updated main.py with hosted agents system + Admin Dashboard.
+Includes automatic deposit/withdrawal detection via balance_checker.
 
 Author: Nike Rocket Team
 Updated: November 22, 2025
@@ -11,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy import create_engine
 import os
+import asyncio
+import asyncpg
 
 # Import follower system
 from follower_models import init_db
@@ -19,6 +22,9 @@ from follower_endpoints import router as follower_router
 # Import portfolio system
 from portfolio_models import init_portfolio_db
 from portfolio_api import router as portfolio_router
+
+# Import balance checker for automatic deposit/withdrawal detection
+from balance_checker import BalanceCheckerScheduler
 
 # Import admin dashboard
 from admin_dashboard import (
@@ -871,6 +877,60 @@ async def portfolio_dashboard(request: Request):
         <div id="dashboard" style="display: none;">
             <button class="logout-btn" onclick="logout()">Change API Key</button>
             
+            <!-- Portfolio Overview Section (NEW!) -->
+            <div class="portfolio-overview" style="
+                background: white;
+                border-radius: 12px;
+                padding: 30px;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            ">
+                <h2 style="margin: 0 0 20px 0; color: #667eea; font-size: 24px;">
+                    💰 Portfolio Overview
+                </h2>
+                
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px;">
+                    <div class="overview-card">
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Current Value</div>
+                        <div id="current-value" style="font-size: 32px; font-weight: bold; color: #10b981;">$0</div>
+                    </div>
+                    
+                    <div class="overview-card">
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Initial Capital</div>
+                        <div id="initial-capital-display" style="font-size: 28px; font-weight: 600; color: #374151;">$0</div>
+                    </div>
+                    
+                    <div class="overview-card">
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Net Deposits</div>
+                        <div id="net-deposits" style="font-size: 28px; font-weight: 600; color: #3b82f6;">$0</div>
+                    </div>
+                    
+                    <div class="overview-card">
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Total Profit</div>
+                        <div id="total-profit-overview" style="font-size: 28px; font-weight: 600; color: #10b981;">$0</div>
+                    </div>
+                </div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; padding: 15px; background: #f9fafb; border-radius: 8px;">
+                    <div>
+                        <div style="font-size: 13px; color: #6b7280;">Total Deposits</div>
+                        <div id="total-deposits" style="font-size: 18px; font-weight: 600; color: #10b981;">+$0</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 13px; color: #6b7280;">Total Withdrawals</div>
+                        <div id="total-withdrawals" style="font-size: 18px; font-weight: 600; color: #ef4444;">-$0</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 13px; color: #6b7280;">Total Capital</div>
+                        <div id="total-capital" style="font-size: 18px; font-weight: 600; color: #374151;">$0</div>
+                    </div>
+                    <div>
+                        <div style="font-size: 13px; color: #6b7280;">Last Balance Check</div>
+                        <div id="last-check" style="font-size: 14px; color: #6b7280;">—</div>
+                    </div>
+                </div>
+            </div>
+            
             <div class="hero">
                 <h1>🚀 $NIKEPIG'S MASSIVE ROCKET PERFORMANCE</h1>
                 
@@ -1025,7 +1085,12 @@ async def portfolio_dashboard(request: Request):
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-label">ROI on Initial Capital</div>
-                    <div class="stat-value" id="roi">0%</div>
+                    <div class="stat-value" id="roi-initial">0%</div>
+                </div>
+                
+                <div class="stat-card">
+                    <div class="stat-label">ROI on Total Capital</div>
+                    <div class="stat-value" id="roi-total">0%</div>
                 </div>
                 
                 <div class="stat-card">
@@ -1063,6 +1128,39 @@ async def portfolio_dashboard(request: Request):
                 <div class="stat-card">
                     <div class="stat-label">Days Active</div>
                     <div class="stat-value" id="days-active">0</div>
+                </div>
+            </div>
+            
+            <!-- Transaction History Section (NEW!) -->
+            <div class="transaction-history" style="
+                background: white;
+                border-radius: 12px;
+                padding: 30px;
+                margin-top: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            ">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #667eea; font-size: 24px;">
+                        📜 Transaction History
+                    </h2>
+                    <button onclick="loadTransactionHistory()" style="
+                        background: #667eea;
+                        color: white;
+                        border: none;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 14px;
+                    ">
+                        🔄 Refresh
+                    </button>
+                </div>
+                
+                <div id="transaction-list" style="max-height: 400px; overflow-y: auto;">
+                    <!-- Transactions will be loaded here -->
+                    <div style="text-align: center; padding: 40px; color: #9ca3af;">
+                        Loading transactions...
+                    </div>
                 </div>
             </div>
         </div>
@@ -1130,9 +1228,15 @@ async def portfolio_dashboard(request: Request):
                 if (data.status === 'no_data') {{
                     // Portfolio initialized but no trades yet
                     showDashboard(data);
+                    // Load balance summary and transactions
+                    await loadBalanceSummary();
+                    await loadTransactionHistory();
                 }} else if (data.total_profit !== undefined) {{
                     // Portfolio has data
                     showDashboard(data);
+                    // Load balance summary and transactions
+                    await loadBalanceSummary();
+                    await loadTransactionHistory();
                 }} else {{
                     // Need to initialize
                     showSetupWizard();
@@ -1201,7 +1305,13 @@ async def portfolio_dashboard(request: Request):
         function updateDashboard(stats) {{
             document.getElementById('profit-label').textContent = `${{stats.period}} Profit`;
             document.getElementById('total-profit').textContent = `$${{stats.total_profit.toLocaleString()}}`;
-            document.getElementById('roi').textContent = `+${{stats.roi_on_initial}}%`;
+            
+            // Update both ROI displays
+            const roiInitial = stats.roi_on_initial || 0;
+            const roiTotal = stats.roi_on_total || roiInitial;
+            document.getElementById('roi-initial').textContent = `+${{roiInitial}}%`;
+            document.getElementById('roi-total').textContent = `+${{roiTotal}}%`;
+            
             document.getElementById('profit-factor').textContent = `${{stats.profit_factor}}x`;
             document.getElementById('best-trade').textContent = `$${{stats.best_trade.toLocaleString()}}`;
             document.getElementById('monthly-avg').textContent = `$${{stats.avg_monthly_profit.toLocaleString()}}`;
@@ -1217,6 +1327,119 @@ async def portfolio_dashboard(request: Request):
                 const startDate = new Date(stats.started_tracking);
                 document.getElementById('time-tracking').textContent = 
                     `Trading since ${{startDate.toLocaleDateString()}} • ${{stats.period}}`;
+            }}
+        }}
+        
+        // NEW: Load balance summary
+        async function loadBalanceSummary() {{
+            try {{
+                const response = await fetch(`/api/portfolio/balance-summary?key=${{currentApiKey}}`);
+                const data = await response.json();
+                
+                if (data.status === 'success') {{
+                    // Update portfolio overview
+                    document.getElementById('current-value').textContent = 
+                        `$${{data.current_value.toLocaleString()}}`;
+                    document.getElementById('initial-capital-display').textContent = 
+                        `$${{data.initial_capital.toLocaleString()}}`;
+                    document.getElementById('net-deposits').textContent = 
+                        data.net_deposits >= 0 
+                            ? `+$${{data.net_deposits.toLocaleString()}}`
+                            : `-$${{Math.abs(data.net_deposits).toLocaleString()}}`;
+                    document.getElementById('total-profit-overview').textContent = 
+                        `+$${{data.total_profit.toLocaleString()}}`;
+                    document.getElementById('total-deposits').textContent = 
+                        `+$${{data.total_deposits.toLocaleString()}}`;
+                    document.getElementById('total-withdrawals').textContent = 
+                        data.total_withdrawals > 0 
+                            ? `-$${{data.total_withdrawals.toLocaleString()}}`
+                            : `$0`;
+                    document.getElementById('total-capital').textContent = 
+                        `$${{data.total_capital.toLocaleString()}}`;
+                    
+                    // Update ROI displays
+                    document.getElementById('roi-initial').textContent = 
+                        `+${{data.roi_on_initial.toFixed(1)}}%`;
+                    document.getElementById('roi-total').textContent = 
+                        `+${{data.roi_on_total.toFixed(1)}}%`;
+                    
+                    // Update last check time
+                    if (data.last_balance_check) {{
+                        const checkTime = new Date(data.last_balance_check);
+                        document.getElementById('last-check').textContent = 
+                            checkTime.toLocaleString();
+                    }}
+                }}
+            }} catch (error) {{
+                console.error('Error loading balance summary:', error);
+            }}
+        }}
+        
+        // NEW: Load transaction history
+        async function loadTransactionHistory() {{
+            try {{
+                const response = await fetch(`/api/portfolio/transactions?key=${{currentApiKey}}&limit=20`);
+                const data = await response.json();
+                
+                const listElement = document.getElementById('transaction-list');
+                
+                if (data.status === 'success' && data.transactions.length > 0) {{
+                    let html = '';
+                    for (const tx of data.transactions) {{
+                        const date = new Date(tx.created_at).toLocaleDateString();
+                        const time = new Date(tx.created_at).toLocaleTimeString();
+                        const icon = tx.transaction_type === 'deposit' ? '💰' : 
+                                    tx.transaction_type === 'withdrawal' ? '💸' : '🎯';
+                        const color = tx.transaction_type === 'deposit' ? '#10b981' : 
+                                     tx.transaction_type === 'withdrawal' ? '#ef4444' : '#667eea';
+                        const sign = tx.transaction_type === 'deposit' ? '+' : 
+                                    tx.transaction_type === 'withdrawal' ? '-' : '';
+                        
+                        html += `
+                            <div style="
+                                padding: 15px;
+                                border-bottom: 1px solid #e5e7eb;
+                                display: flex;
+                                justify-content: space-between;
+                                align-items: center;
+                            ">
+                                <div style="display: flex; align-items: center; gap: 15px;">
+                                    <div style="font-size: 24px;">${{icon}}</div>
+                                    <div>
+                                        <div style="font-weight: 600; color: #374151; text-transform: capitalize;">
+                                            ${{tx.transaction_type}}
+                                        </div>
+                                        <div style="font-size: 12px; color: #9ca3af;">
+                                            ${{date}} at ${{time}}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="font-size: 20px; font-weight: 600; color: ${{color}};">
+                                        ${{sign}}$${{tx.amount.toLocaleString()}}
+                                    </div>
+                                    <div style="font-size: 11px; color: #9ca3af;">
+                                        ${{tx.detection_method}}
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }}
+                    listElement.innerHTML = html;
+                }} else {{
+                    listElement.innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: #9ca3af;">
+                            No transactions yet. System will automatically detect deposits and withdrawals.
+                        </div>
+                    `;
+                }}
+            }} catch (error) {{
+                console.error('Error loading transactions:', error);
+                document.getElementById('transaction-list').innerHTML = `
+                    <div style="text-align: center; padding: 40px; color: #ef4444;">
+                        Error loading transactions
+                    </div>
+                `;
             }}
         }}
         
@@ -1596,6 +1819,17 @@ async def startup_event():
     print("✅ Setup page available at /setup")
     print("✅ Dashboard available at /dashboard")
     print("✅ Ready to receive signals")
+    
+    # Start balance checker for automatic deposit/withdrawal detection
+    if DATABASE_URL:
+        try:
+            db_pool = await asyncpg.create_pool(DATABASE_URL)
+            scheduler = BalanceCheckerScheduler(db_pool, interval_minutes=60)
+            asyncio.create_task(scheduler.start())
+            print("✅ Balance checker started (checks every 60 minutes)")
+        except Exception as e:
+            print(f"⚠️ Balance checker failed to start: {e}")
+    
     print("=" * 60)
 
 # Run locally for testing
