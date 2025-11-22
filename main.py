@@ -495,66 +495,78 @@ async def portfolio_dashboard(request: Request):
                         background: rgba(255,255,255,0.95);
                         padding: 20px;
                         border-radius: 12px;
-                        max-width: 500px;
+                        max-width: 600px;
                         margin: 0 auto;
                         box-shadow: 0 8px 24px rgba(0,0,0,0.2);
                     ">
                         <h3 style="color: #667eea; margin: 0 0 15px 0; font-size: 18px;">Choose Your Background</h3>
                         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 15px;">
                             <div onclick="selectBackground('charles')" class="bg-option" data-bg="charles" style="
-                                padding: 40px 20px;
+                                height: 150px;
                                 border-radius: 8px;
                                 cursor: pointer;
-                                background: linear-gradient(135deg, #8B7355 0%, #D2B48C 100%);
-                                text-align: center;
-                                color: white;
-                                font-weight: 600;
+                                background-image: url('https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-charles.png');
+                                background-size: cover;
+                                background-position: center;
                                 border: 3px solid #667eea;
                                 transition: all 0.2s;
+                                position: relative;
+                                overflow: hidden;
                             ">
-                                📚 Charles & Nike
+                                <div style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 8px; text-align: center; color: white; font-weight: 600;">
+                                    📚 Charles & Nike
+                                </div>
                             </div>
                             
                             <div onclick="selectBackground('casino')" class="bg-option" data-bg="casino" style="
-                                padding: 40px 20px;
+                                height: 150px;
                                 border-radius: 8px;
                                 cursor: pointer;
-                                background: linear-gradient(135deg, #8B4513 0%, #654321 100%);
-                                text-align: center;
-                                color: white;
-                                font-weight: 600;
+                                background-image: url('https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-casino.png');
+                                background-size: cover;
+                                background-position: center;
                                 border: 3px solid transparent;
                                 transition: all 0.2s;
+                                position: relative;
+                                overflow: hidden;
                             ">
-                                🎰 Casino Wins
+                                <div style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 8px; text-align: center; color: white; font-weight: 600;">
+                                    🎰 Casino Wins
+                                </div>
                             </div>
                             
                             <div onclick="selectBackground('gaming')" class="bg-option" data-bg="gaming" style="
-                                padding: 40px 20px;
+                                height: 150px;
                                 border-radius: 8px;
                                 cursor: pointer;
-                                background: linear-gradient(135deg, #90EE90 0%, #228B22 100%);
-                                text-align: center;
-                                color: white;
-                                font-weight: 600;
+                                background-image: url('https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-gaming.png');
+                                background-size: cover;
+                                background-position: center;
                                 border: 3px solid transparent;
                                 transition: all 0.2s;
+                                position: relative;
+                                overflow: hidden;
                             ">
-                                🎮 Couch Trading
+                                <div style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 8px; text-align: center; color: white; font-weight: 600;">
+                                    🎮 Couch Trading
+                                </div>
                             </div>
                             
                             <div onclick="selectBackground('money')" class="bg-option" data-bg="money" style="
-                                padding: 40px 20px;
+                                height: 150px;
                                 border-radius: 8px;
                                 cursor: pointer;
-                                background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
-                                text-align: center;
-                                color: white;
-                                font-weight: 600;
+                                background-image: url('https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-money.png');
+                                background-size: cover;
+                                background-position: center;
                                 border: 3px solid transparent;
                                 transition: all 0.2s;
+                                position: relative;
+                                overflow: hidden;
                             ">
-                                💰 Money Rain
+                                <div style="position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); padding: 8px; text-align: center; color: white; font-weight: 600;">
+                                    💰 Money Rain
+                                </div>
                             </div>
                         </div>
                         <button onclick="downloadPerformanceCard()" style="
@@ -844,15 +856,17 @@ ROI: ${{roi}}`;
         function selectBackground(bgType) {{
             selectedBackground = bgType;
             
-            // Update visual selection
+            // Update visual selection - highlight selected background
             document.querySelectorAll('.bg-option').forEach(el => {{
                 el.style.border = '3px solid transparent';
                 el.style.transform = 'scale(1)';
+                el.style.boxShadow = 'none';
             }});
             
             const selected = document.querySelector(`[data-bg="${{bgType}}"]`);
-            selected.style.border = '3px solid white';
+            selected.style.border = '3px solid #667eea';
             selected.style.transform = 'scale(1.05)';
+            selected.style.boxShadow = '0 4px 12px rgba(102, 126, 234, 0.5)';
         }}
         
         function downloadPerformanceCard() {{
@@ -903,42 +917,53 @@ ROI: ${{roi}}`;
                     const logoWidth = (logo.width / logo.height) * logoHeight;
                     ctx.drawImage(logo, 50, 50, logoWidth, logoHeight);
                     
-                    // PROFIT label (using Bebas Neue style)
-                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    // PROFIT label (fully opaque + shadow)
+                    ctx.fillStyle = 'white';
                     ctx.font = '40px "Bebas Neue", Impact, Arial, sans-serif';
                     ctx.textAlign = 'left';
-                    ctx.letterSpacing = '2px';
+                    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 8;
+                    ctx.shadowOffsetX = 2;
+                    ctx.shadowOffsetY = 2;
                     ctx.fillText('PROFIT', 50, 230);
                     
-                    // HUGE Profit number (Bebas Neue - FluidTokens style)
-                    ctx.fillStyle = '#00FF88';  // Bright green like FluidTokens
+                    // HUGE Profit number (bright green + shadow)
+                    ctx.fillStyle = '#00FF88';
                     ctx.font = 'bold 140px "Bebas Neue", Impact, Arial, sans-serif';
-                    ctx.shadowColor = 'rgba(0,0,0,0.6)';
-                    ctx.shadowBlur = 25;
-                    ctx.shadowOffsetX = 0;
-                    ctx.shadowOffsetY = 5;
+                    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 15;
+                    ctx.shadowOffsetX = 3;
+                    ctx.shadowOffsetY = 3;
                     ctx.fillText(profit, 50, 360);
                     
-                    // ROI label
-                    ctx.shadowBlur = 0;
-                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    // ROI label (fully opaque + shadow)
+                    ctx.fillStyle = 'white';
                     ctx.font = '40px "Bebas Neue", Impact, Arial, sans-serif';
+                    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 8;
+                    ctx.shadowOffsetX = 2;
+                    ctx.shadowOffsetY = 2;
                     ctx.fillText('ROI', 50, 450);
                     
-                    // ROI percentage (Bebas Neue)
+                    // ROI percentage (bright green + shadow)
                     const roiColor = roi.includes('+') || !roi.includes('-') ? '#00FF88' : '#FF4444';
                     ctx.fillStyle = roiColor;
                     ctx.font = 'bold 100px "Bebas Neue", Impact, Arial, sans-serif';
-                    ctx.shadowColor = 'rgba(0,0,0,0.6)';
-                    ctx.shadowBlur = 20;
+                    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 12;
+                    ctx.shadowOffsetX = 3;
+                    ctx.shadowOffsetY = 3;
                     ctx.fillText(roi, 50, 540);
                     
-                    // "over X days" text at bottom center
-                    ctx.shadowBlur = 0;
-                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                    // "over X days" text DIRECTLY BELOW ROI (fully opaque + shadow)
+                    ctx.fillStyle = 'white';
                     ctx.font = '32px Arial, sans-serif';
-                    ctx.textAlign = 'center';
-                    ctx.fillText(`over ${{periodLabels[period]}}`, canvas.width / 2, 595);
+                    ctx.textAlign = 'left';
+                    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 8;
+                    ctx.shadowOffsetX = 2;
+                    ctx.shadowOffsetY = 2;
+                    ctx.fillText(`over ${{periodLabels[period]}}`, 50, 580);
                     
                     // Download
                     canvas.toBlob((blob) => {{
