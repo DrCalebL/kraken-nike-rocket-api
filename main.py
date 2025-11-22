@@ -87,6 +87,19 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
+# Serve static background images (NEW!)
+from fastapi.responses import FileResponse
+import os.path
+
+@app.get("/static/backgrounds/{filename}")
+async def get_background(filename: str):
+    """Serve background images for performance cards"""
+    filepath = f"backgrounds/{filename}"
+    if os.path.exists(filepath):
+        return FileResponse(filepath)
+    else:
+        raise HTTPException(status_code=404, detail="Background image not found")
+
 # Signup page
 @app.get("/signup", response_class=HTMLResponse)
 async def signup_page():
@@ -128,6 +141,9 @@ async def portfolio_dashboard(request: Request):
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nike Rocket - Portfolio Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">
     <style>
         * {{
             margin: 0;
@@ -419,57 +435,142 @@ async def portfolio_dashboard(request: Request):
                 <div class="hero-subtext" id="time-tracking">Trading since...</div>
                 
                 <!-- Social Sharing Buttons (NEW!) -->
-                <div style="margin: 30px 0; display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
-                    <button onclick="shareToTwitter()" style="
-                        padding: 12px 24px;
-                        background: #1DA1F2;
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        font-weight: 600;
-                        cursor: pointer;
-                        font-size: 14px;
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                        box-shadow: 0 4px 12px rgba(29, 161, 242, 0.3);
-                    ">
-                        <span>𝕏</span> Share to X/Twitter
-                    </button>
+                <div style="margin: 30px 0;">
+                    <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; margin-bottom: 20px;">
+                        <button onclick="shareToTwitter()" style="
+                            padding: 12px 24px;
+                            background: #1DA1F2;
+                            color: white;
+                            border: none;
+                            border-radius: 8px;
+                            font-weight: 600;
+                            cursor: pointer;
+                            font-size: 14px;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            box-shadow: 0 4px 12px rgba(29, 161, 242, 0.3);
+                        ">
+                            <span>𝕏</span> Share to X/Twitter
+                        </button>
+                        
+                        <button onclick="copyShareLink()" style="
+                            padding: 12px 24px;
+                            background: #10b981;
+                            color: white;
+                            border: none;
+                            border-radius: 8px;
+                            font-weight: 600;
+                            cursor: pointer;
+                            font-size: 14px;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+                        " id="copy-link-btn">
+                            <span>🔗</span> Copy Share Link
+                        </button>
+                        
+                        <button onclick="toggleBackgroundSelector()" style="
+                            padding: 12px 24px;
+                            background: #8b5cf6;
+                            color: white;
+                            border: none;
+                            border-radius: 8px;
+                            font-weight: 600;
+                            cursor: pointer;
+                            font-size: 14px;
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+                        ">
+                            <span>📸</span> Download Image
+                        </button>
+                    </div>
                     
-                    <button onclick="copyShareLink()" style="
-                        padding: 12px 24px;
-                        background: #10b981;
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        font-weight: 600;
-                        cursor: pointer;
-                        font-size: 14px;
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
-                    " id="copy-link-btn">
-                        <span>🔗</span> Copy Share Link
-                    </button>
-                    
-                    <button onclick="downloadPerformanceCard()" style="
-                        padding: 12px 24px;
-                        background: #8b5cf6;
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        font-weight: 600;
-                        cursor: pointer;
-                        font-size: 14px;
-                        display: flex;
-                        align-items: center;
-                        gap: 8px;
-                        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+                    <!-- Background Selector (Hidden by default) -->
+                    <div id="background-selector" style="
+                        display: none;
+                        background: rgba(255,255,255,0.95);
+                        padding: 20px;
+                        border-radius: 12px;
+                        max-width: 500px;
+                        margin: 0 auto;
+                        box-shadow: 0 8px 24px rgba(0,0,0,0.2);
                     ">
-                        <span>📸</span> Download Image
-                    </button>
+                        <h3 style="color: #667eea; margin: 0 0 15px 0; font-size: 18px;">Choose Your Background</h3>
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 15px;">
+                            <div onclick="selectBackground('charles')" class="bg-option" data-bg="charles" style="
+                                padding: 40px 20px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                background: linear-gradient(135deg, #8B7355 0%, #D2B48C 100%);
+                                text-align: center;
+                                color: white;
+                                font-weight: 600;
+                                border: 3px solid #667eea;
+                                transition: all 0.2s;
+                            ">
+                                📚 Charles & Nike
+                            </div>
+                            
+                            <div onclick="selectBackground('casino')" class="bg-option" data-bg="casino" style="
+                                padding: 40px 20px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                background: linear-gradient(135deg, #8B4513 0%, #654321 100%);
+                                text-align: center;
+                                color: white;
+                                font-weight: 600;
+                                border: 3px solid transparent;
+                                transition: all 0.2s;
+                            ">
+                                🎰 Casino Wins
+                            </div>
+                            
+                            <div onclick="selectBackground('gaming')" class="bg-option" data-bg="gaming" style="
+                                padding: 40px 20px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                background: linear-gradient(135deg, #90EE90 0%, #228B22 100%);
+                                text-align: center;
+                                color: white;
+                                font-weight: 600;
+                                border: 3px solid transparent;
+                                transition: all 0.2s;
+                            ">
+                                🎮 Couch Trading
+                            </div>
+                            
+                            <div onclick="selectBackground('money')" class="bg-option" data-bg="money" style="
+                                padding: 40px 20px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%);
+                                text-align: center;
+                                color: white;
+                                font-weight: 600;
+                                border: 3px solid transparent;
+                                transition: all 0.2s;
+                            ">
+                                💰 Money Rain
+                            </div>
+                        </div>
+                        <button onclick="downloadPerformanceCard()" style="
+                            width: 100%;
+                            padding: 12px;
+                            background: #10b981;
+                            color: white;
+                            border: none;
+                            border-radius: 8px;
+                            font-weight: 600;
+                            cursor: pointer;
+                            font-size: 14px;
+                        ">
+                            ✅ Download Image
+                        </button>
+                    </div>
                 </div>
             </div>
             
@@ -691,28 +792,27 @@ async def portfolio_dashboard(request: Request):
         
         // ==================== SOCIAL SHARING FUNCTIONS (NEW!) ====================
         
+        let selectedBackground = 'charles'; // Default background
+        
         function shareToTwitter() {{
             const profit = document.getElementById('total-profit').textContent;
             const roi = document.getElementById('roi').textContent;
             const period = document.getElementById('period-selector').value;
             const trades = document.getElementById('total-trades').textContent;
+            const profitFactor = document.getElementById('profit-factor').textContent;
             
             const periodLabels = {{
-                '7d': 'Last 7 Days',
-                '30d': 'Last 30 Days',
-                '90d': 'Last 90 Days',
+                '7d': '7-Day',
+                '30d': '30-Day',
+                '90d': '90-Day',
                 'all': 'All-Time'
             }};
             
-            const text = `🚀 Nike Rocket Trading Results (${{periodLabels[period]}})
+            // SUCCINCT FACTUAL CAPTION
+            const text = `$NIKEPIG's Massive Rocket ${{periodLabels[period]}} Performance Card
 
-💰 Profit: ${{profit}}
-📈 ROI: ${{roi}}
-📊 Trades: ${{trades}}
-
-Automated crypto futures trading with Nike Rocket! 🎯
-
-#CryptoTrading #NikeRocket #AutomatedTrading`;
+Profit: ${{profit}}
+ROI: ${{roi}}`;
             
             const twitterUrl = `https://twitter.com/intent/tweet?text=${{encodeURIComponent(text)}}`;
             window.open(twitterUrl, '_blank', 'width=600,height=400');
@@ -736,77 +836,148 @@ Automated crypto futures trading with Nike Rocket! 🎯
             }});
         }}
         
+        function toggleBackgroundSelector() {{
+            const selector = document.getElementById('background-selector');
+            selector.style.display = selector.style.display === 'none' ? 'block' : 'none';
+        }}
+        
+        function selectBackground(bgType) {{
+            selectedBackground = bgType;
+            
+            // Update visual selection
+            document.querySelectorAll('.bg-option').forEach(el => {{
+                el.style.border = '3px solid transparent';
+                el.style.transform = 'scale(1)';
+            }});
+            
+            const selected = document.querySelector(`[data-bg="${{bgType}}"]`);
+            selected.style.border = '3px solid white';
+            selected.style.transform = 'scale(1.05)';
+        }}
+        
         function downloadPerformanceCard() {{
-            // Create a simple text-based shareable card
             const profit = document.getElementById('total-profit').textContent;
             const roi = document.getElementById('roi').textContent;
             const period = document.getElementById('period-selector').value;
-            const trades = document.getElementById('total-trades').textContent;
-            const profitFactor = document.getElementById('profit-factor').textContent;
-            const sharpe = document.getElementById('sharpe').textContent;
             
             const periodLabels = {{
-                '7d': 'Last 7 Days',
-                '30d': 'Last 30 Days',
-                '90d': 'Last 90 Days',
-                'all': 'All-Time'
+                '7d': '7 days',
+                '30d': '30 days',
+                '90d': '90 days',
+                'all': 'all-time'
             }};
             
-            // Create canvas for image
+            // Create canvas
             const canvas = document.createElement('canvas');
             canvas.width = 1200;
             canvas.height = 630;
             const ctx = canvas.getContext('2d');
             
-            // Gradient background
-            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-            gradient.addColorStop(0, '#667eea');
-            gradient.addColorStop(1, '#764ba2');
-            ctx.fillStyle = gradient;
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            // Background image URLs from GitHub
+            const backgroundUrls = {{
+                'charles': 'https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-charles.png',
+                'casino': 'https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-casino.png',
+                'gaming': 'https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-gaming.png',
+                'money': 'https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/bg-money.png'
+            }};
             
-            // Title
-            ctx.fillStyle = 'white';
-            ctx.font = 'bold 60px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('🚀 NIKE ROCKET PERFORMANCE', canvas.width / 2, 100);
+            const logoUrl = 'https://raw.githubusercontent.com/DrCalebL/nike-rocket-api/main/static/nikepig-logo.png';
             
-            // Period
-            ctx.font = '30px Arial';
-            ctx.fillText(periodLabels[period], canvas.width / 2, 160);
+            // Load background image
+            const bgImage = new Image();
+            bgImage.crossOrigin = 'anonymous';
+            bgImage.onload = function() {{
+                // Draw background image (cover the entire canvas)
+                ctx.drawImage(bgImage, 0, 0, canvas.width, canvas.height);
+                
+                // Add dark overlay for text readability
+                ctx.fillStyle = 'rgba(0,0,0,0.35)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Load and draw NIKEPIG logo
+                const logo = new Image();
+                logo.crossOrigin = 'anonymous';
+                logo.onload = function() {{
+                    // Draw logo (top-left, scaled)
+                    const logoHeight = 100;
+                    const logoWidth = (logo.width / logo.height) * logoHeight;
+                    ctx.drawImage(logo, 50, 50, logoWidth, logoHeight);
+                    
+                    // PROFIT label (using Bebas Neue style)
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.font = '40px "Bebas Neue", Impact, Arial, sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.letterSpacing = '2px';
+                    ctx.fillText('PROFIT', 50, 230);
+                    
+                    // HUGE Profit number (Bebas Neue - FluidTokens style)
+                    ctx.fillStyle = '#00FF88';  // Bright green like FluidTokens
+                    ctx.font = 'bold 140px "Bebas Neue", Impact, Arial, sans-serif';
+                    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+                    ctx.shadowBlur = 25;
+                    ctx.shadowOffsetX = 0;
+                    ctx.shadowOffsetY = 5;
+                    ctx.fillText(profit, 50, 360);
+                    
+                    // ROI label
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.font = '40px "Bebas Neue", Impact, Arial, sans-serif';
+                    ctx.fillText('ROI', 50, 450);
+                    
+                    // ROI percentage (Bebas Neue)
+                    const roiColor = roi.includes('+') || !roi.includes('-') ? '#00FF88' : '#FF4444';
+                    ctx.fillStyle = roiColor;
+                    ctx.font = 'bold 100px "Bebas Neue", Impact, Arial, sans-serif';
+                    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+                    ctx.shadowBlur = 20;
+                    ctx.fillText(roi, 50, 540);
+                    
+                    // "over X days" text at bottom center
+                    ctx.shadowBlur = 0;
+                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                    ctx.font = '32px Arial, sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(`over ${{periodLabels[period]}}`, canvas.width / 2, 595);
+                    
+                    // Download
+                    canvas.toBlob((blob) => {{
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `nikepig-massive-rocket-${{period}}-performance.png`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                        
+                        // Hide selector after download
+                        document.getElementById('background-selector').style.display = 'none';
+                    }});
+                }};
+                logo.onerror = function() {{
+                    console.error('Failed to load NIKEPIG logo');
+                    // Continue without logo
+                    finishCard();
+                }};
+                logo.src = logoUrl;
+            }};
+            bgImage.onerror = function() {{
+                console.error('Failed to load background image');
+                alert('Failed to load background image. Please make sure images are uploaded to GitHub at: static/bg-' + selectedBackground + '.png');
+            }};
+            bgImage.src = backgroundUrls[selectedBackground];
             
-            // Main profit
-            ctx.font = 'bold 100px Arial';
-            ctx.fillText(profit, canvas.width / 2, 280);
-            
-            // Stats grid
-            ctx.font = 'bold 40px Arial';
-            ctx.textAlign = 'left';
-            const leftX = 150;
-            const rightX = 650;
-            let y = 380;
-            
-            ctx.fillText(`ROI: ${{roi}}`, leftX, y);
-            ctx.fillText(`Trades: ${{trades}}`, rightX, y);
-            
-            y += 70;
-            ctx.fillText(`Profit Factor: ${{profitFactor}}`, leftX, y);
-            ctx.fillText(`Sharpe: ${{sharpe}}`, rightX, y);
-            
-            // Footer
-            ctx.textAlign = 'center';
-            ctx.font = '25px Arial';
-            ctx.fillText('Automated Crypto Trading', canvas.width / 2, 570);
-            
-            // Download
-            canvas.toBlob((blob) => {{
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'nike-rocket-performance.png';
-                a.click();
-                URL.revokeObjectURL(url);
-            }});
+            function finishCard() {{
+                // Fallback if logo fails - still download the card
+                canvas.toBlob((blob) => {{
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `nikepig-massive-rocket-${{period}}-performance.png`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    document.getElementById('background-selector').style.display = 'none';
+                }});
+            }}
         }}
         
         function showError(elementId, message) {{
