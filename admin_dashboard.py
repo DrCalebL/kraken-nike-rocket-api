@@ -1,8 +1,7 @@
 """
-Admin Dashboard - Log-Based Monitoring (SMART VERSION)
+Admin Dashboard - Log-Based Monitoring (FIXED VERSION)
 =======================================================
-Deduces setup completion from agent logs & errors
-No credential storage needed!
+Fixed import error - function renamed to match main.py expectations
 """
 
 import os
@@ -16,6 +15,28 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme123")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
+
+
+def check_column_exists(table: str, column: str) -> bool:
+    """Check if a column exists in a table"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT 1 
+                FROM information_schema.columns 
+                WHERE table_name = %s AND column_name = %s
+            )
+        """, (table, column))
+        
+        exists = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return exists
+    except:
+        return False
 
 
 def get_agent_status(api_key: str, cur) -> Dict:
@@ -279,8 +300,8 @@ def get_stats_summary() -> Dict:
     }
 
 
-def create_tables():
-    """Create necessary tables"""
+def create_error_logs_table():
+    """Create error_logs and agent_logs tables - FIXED NAME"""
     conn = get_db_connection()
     cur = conn.cursor()
     
@@ -296,7 +317,7 @@ def create_tables():
         )
     """)
     
-    # Agent logs table (NEW!)
+    # Agent logs table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS agent_logs (
             id SERIAL PRIMARY KEY,
