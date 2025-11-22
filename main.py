@@ -454,23 +454,6 @@ async def portfolio_dashboard(request: Request):
                             <span>𝕏</span> Share to X (+ Download Image)
                         </button>
                         
-                        <button onclick="copyShareLink()" style="
-                            padding: 12px 24px;
-                            background: #10b981;
-                            color: white;
-                            border: none;
-                            border-radius: 8px;
-                            font-weight: 600;
-                            cursor: pointer;
-                            font-size: 14px;
-                            display: flex;
-                            align-items: center;
-                            gap: 8px;
-                            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
-                        " id="copy-link-btn">
-                            <span>🔗</span> Copy Share Link
-                        </button>
-                        
                         <button onclick="showBackgroundSelectorForDownload()" style="
                             padding: 12px 24px;
                             background: #8b5cf6;
@@ -940,23 +923,6 @@ ROI: ${{roi}}`;
             bgImage.src = backgroundUrls[selectedBackground];
         }}
         
-        function copyShareLink() {{
-            const shareUrl = `${{window.location.origin}}/dashboard?key=${{currentApiKey}}`;
-            
-            navigator.clipboard.writeText(shareUrl).then(() => {{
-                const btn = document.getElementById('copy-link-btn');
-                const originalHTML = btn.innerHTML;
-                btn.innerHTML = '<span>✅</span> Link Copied!';
-                btn.style.background = '#10b981';
-                
-                setTimeout(() => {{
-                    btn.innerHTML = originalHTML;
-                    btn.style.background = '#10b981';
-                }}, 2000);
-            }}).catch(() => {{
-                alert('Share link: ' + shareUrl);
-            }});
-        }}
         
         function toggleBackgroundSelector() {{
             const selector = document.getElementById('background-selector');
