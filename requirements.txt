@@ -26,3 +26,5 @@ numpy==1.26.2
 
 # Encryption (NEW!)
 cryptography==41.0.7
+
+asyncpg==0.29.0
