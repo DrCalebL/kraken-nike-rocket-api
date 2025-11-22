@@ -10,7 +10,7 @@ Setup:
 2. Get API key
 3. Set RESEND_API_KEY environment variable
 
-Updated: November 21, 2025 - Hosted Agents Flow
+Updated: November 22, 2025 - Improved UX with prominent dashboard
 """
 
 import os
@@ -43,175 +43,199 @@ def send_welcome_email(to_email: str, api_key: str) -> bool:
         return False
     
     setup_link = f"{BASE_URL}/setup?key={api_key}"
+    dashboard_link = f"{BASE_URL}/dashboard?key={api_key}"
+    login_link = f"{BASE_URL}/login"
     
-    # Email HTML
+    # Email HTML - IMPROVED VERSION
     html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 600px;
-                margin: 0 auto;
-                padding: 20px;
-                background: #f5f5f5;
-            }}
-            .container {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                border-radius: 12px;
-                padding: 40px 20px;
-                text-align: center;
-            }}
-            .content {{
-                background: white;
-                border-radius: 12px;
-                padding: 30px;
-                margin-top: 20px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            }}
-            .api-key {{
-                background: #f0f7ff;
-                border: 2px dashed #667eea;
-                padding: 15px;
-                border-radius: 8px;
-                font-family: 'Courier New', monospace;
-                font-size: 14px;
-                word-break: break-all;
-                margin: 20px 0;
-                color: #333;
-            }}
-            .btn {{
-                display: inline-block;
-                padding: 16px 32px;
-                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-                color: white !important;
-                text-decoration: none;
-                border-radius: 10px;
-                font-weight: bold;
-                font-size: 16px;
-                margin: 25px 0;
-                box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
-            }}
-            .info-box {{
-                background: #fef3c7;
-                border-left: 4px solid #f59e0b;
-                padding: 15px;
-                border-radius: 8px;
-                margin: 20px 0;
-                text-align: left;
-            }}
-            .info-box p {{
-                margin: 5px 0;
-                color: #92400e;
-            }}
-            .steps {{
-                text-align: left;
-                margin: 20px 0;
-            }}
-            .steps ol {{
-                padding-left: 20px;
-            }}
-            .steps li {{
-                margin: 10px 0;
-                line-height: 1.8;
-            }}
-            .footer {{
-                margin-top: 30px;
-                padding-top: 20px;
-                border-top: 1px solid #e5e7eb;
-                font-size: 12px;
-                color: #666;
-                text-align: center;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1 style="color: white; margin: 0; font-size: 36px;">🚀 $NIKEPIG's Massive Rocket</h1>
-            <p style="color: white; margin: 10px 0; font-size: 16px;">Welcome to Automated Trading!</p>
-        </div>
-        
-        <div class="content">
-            <h2 style="color: #667eea;">Your Account is Ready!</h2>
-            <p>Thanks for signing up! Your $NIKEPIG's Massive Rocket account has been created.</p>
-            
-            <div style="background: #f9fafb; padding: 15px; border-radius: 8px; margin: 20px 0;">
-                <p style="margin: 0 0 10px 0;"><strong>Your API Key:</strong></p>
-                <div class="api-key">{api_key}</div>
-                <p style="font-size: 12px; color: #666; margin: 10px 0 0 0;">
-                    💡 Keep this key secure - you'll need it to access your dashboard and trading agent.
-                </p>
-            </div>
-            
-            <div class="info-box">
-                <p><strong>⚡ Quick Setup (2 minutes):</strong></p>
-                <p style="margin-top: 10px;">Click the button below to set up your automated trading agent. No technical skills required!</p>
-            </div>
-            
-            <a href="{setup_link}" class="btn">
-                🚀 Setup Your Trading Agent
-            </a>
-            
-            <div class="steps">
-                <h3 style="color: #333; font-size: 18px;">What happens next:</h3>
-                <ol>
-                    <li><strong>Click the setup button above</strong> - Opens your personalized setup page</li>
-                    <li><strong>Enter your Kraken API credentials</strong> - Takes 30 seconds</li>
-                    <li><strong>Your agent starts automatically</strong> - Begins following trading signals</li>
-                    <li><strong>Track performance on your dashboard</strong> - View profits in real-time</li>
-                </ol>
-            </div>
-            
-            <div style="background: #f0f7ff; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: left;">
-                <p style="margin: 0 0 10px 0;"><strong style="color: #667eea;">📊 View Your Dashboard:</strong></p>
-                <p style="margin: 0; font-size: 14px; color: #666;">
-                    <a href="{BASE_URL}/dashboard?key={api_key}" style="color: #667eea; text-decoration: none;">
-                        {BASE_URL}/dashboard?key={api_key}
-                    </a>
-                </p>
-            </div>
-            
-            <div class="footer">
-                <p><strong>Need help?</strong> Visit our <a href="{BASE_URL}/signup" style="color: #667eea;">signup page</a> for detailed setup instructions.</p>
-                <p style="margin-top: 10px;">Having issues? Reply to this email for support.</p>
-            </div>
-        </div>
-        
-        <div style="text-align: center; margin-top: 20px; font-size: 12px; color: #999;">
-            <p>$NIKEPIG's Massive Rocket - Automated Kraken Futures Trading</p>
-            <p>You're receiving this email because you signed up at {BASE_URL}</p>
-        </div>
-    </body>
-    </html>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your $NIKEPIG's Massive Rocket API Key</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background: #f5f5f5; padding: 40px 20px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    
+                    <!-- Header -->
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+                            <h1 style="margin: 0; color: white; font-size: 32px; font-weight: bold;">
+                                🚀 $NIKEPIG's Massive Rocket
+                            </h1>
+                            <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9); font-size: 16px;">
+                                Your API Key
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Body -->
+                    <tr>
+                        <td style="padding: 40px 30px;">
+                            
+                            <!-- Your API Key Section -->
+                            <h2 style="margin: 0 0 20px 0; color: #667eea; font-size: 20px;">
+                                Your API Key
+                            </h2>
+                            <p style="margin: 0 0 15px 0; color: #374151; font-size: 14px;">
+                                As requested, here's your $NIKEPIG's Massive Rocket API key:
+                            </p>
+                            
+                            <div style="background: #f9fafb; border: 2px dashed #d1d5db; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
+                                <code style="font-family: 'Courier New', monospace; font-size: 14px; color: #667eea; word-break: break-all; display: block; text-align: center;">
+                                    {api_key}
+                                </code>
+                            </div>
+                            
+                            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin-bottom: 30px;">
+                                <p style="margin: 0; color: #92400e; font-size: 13px;">
+                                    🔒 <strong>Security Reminder:</strong> Never share your API key with anyone. If you believe your key has been compromised, contact support immediately.
+                                </p>
+                            </div>
+                            
+                            <!-- BIG DASHBOARD BUTTON (IMPROVED!) -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 30px;">
+                                <tr>
+                                    <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; padding: 30px; text-align: center; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
+                                        <p style="margin: 0 0 15px 0; color: white; font-size: 20px; font-weight: bold;">
+                                            📊 View Your Dashboard
+                                        </p>
+                                        <a href="{dashboard_link}" style="display: inline-block; background: white; color: #667eea; padding: 18px 50px; border-radius: 10px; text-decoration: none; font-weight: bold; font-size: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                                            📈 Open Dashboard Now
+                                        </a>
+                                        <p style="margin: 15px 0 0 0; color: rgba(255,255,255,0.95); font-size: 14px; font-weight: 600;">
+                                            💡 <strong>Tip:</strong> Bookmark this link for easy access!
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Quick Setup Notice -->
+                            <div style="background: #d1fae5; border-left: 4px solid #10b981; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+                                <p style="margin: 0 0 10px 0; color: #065f46; font-size: 16px; font-weight: bold;">
+                                    ⚡ Quick Setup (2 minutes):
+                                </p>
+                                <p style="margin: 0 0 15px 0; color: #047857; font-size: 14px;">
+                                    Click the button below to set up your automated trading agent. No technical skills required!
+                                </p>
+                                <a href="{setup_link}" style="display: inline-block; background: #10b981; color: white; padding: 14px 35px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);">
+                                    🛠️ Setup Agent
+                                </a>
+                            </div>
+                            
+                            <!-- What Happens Next (KEPT!) -->
+                            <h3 style="margin: 0 0 15px 0; color: #374151; font-size: 18px; font-weight: 600;">
+                                What happens next:
+                            </h3>
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 30px;">
+                                <tr>
+                                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                                        <p style="margin: 0; color: #374151; font-size: 14px; line-height: 1.6;">
+                                            <strong>1.</strong> Click the setup button above - Opens your personalized setup page
+                                        </p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                                        <p style="margin: 0; color: #374151; font-size: 14px; line-height: 1.6;">
+                                            <strong>2.</strong> Enter your Kraken API credentials - Takes 30 seconds
+                                        </p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 12px 0; border-bottom: 1px solid #e5e7eb;">
+                                        <p style="margin: 0; color: #374151; font-size: 14px; line-height: 1.6;">
+                                            <strong>3.</strong> Your agent starts automatically - Begins following trading signals
+                                        </p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 12px 0;">
+                                        <p style="margin: 0; color: #374151; font-size: 14px; line-height: 1.6;">
+                                            <strong>4.</strong> Track performance on your dashboard - View profits in real-time
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- RETURNING USERS SECTION (NEW!) -->
+                            <div style="background: #ede9fe; border-left: 4px solid #7c3aed; padding: 20px; border-radius: 8px;">
+                                <p style="margin: 0 0 10px 0; color: #5b21b6; font-size: 16px; font-weight: bold;">
+                                    🔖 For Future Access:
+                                </p>
+                                <p style="margin: 0 0 10px 0; color: #6b21a8; font-size: 14px; line-height: 1.6;">
+                                    <strong>Bookmark your dashboard link above</strong>, or use our login page anytime:
+                                </p>
+                                <p style="margin: 0 0 15px 0; color: #6b21a8; font-size: 14px;">
+                                    <a href="{login_link}" style="color: #7c3aed; text-decoration: none; font-weight: 600; font-size: 15px;">
+                                        🔗 {login_link}
+                                    </a>
+                                </p>
+                                <p style="margin: 0; color: #6b21a8; font-size: 13px;">
+                                    💡 Just enter your API key to access your dashboard from any device!
+                                </p>
+                            </div>
+                            
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 30px; background: #f9fafb; text-align: center; border-top: 1px solid #e5e7eb;">
+                            <p style="margin: 0 0 10px 0; color: #6b7280; font-size: 13px;">
+                                Questions? Need help? Contact us anytime.
+                            </p>
+                            <p style="margin: 0 0 5px 0; color: #9ca3af; font-size: 12px;">
+                                $NIKEPIG's Massive Rocket - Automated Kraken Futures Trading
+                            </p>
+                            <p style="margin: 0; color: #9ca3af; font-size: 12px;">
+                                You're receiving this email because you signed up at {BASE_URL}
+                            </p>
+                        </td>
+                    </tr>
+                    
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
     """
     
     # Plain text version
     text_content = f"""
-Welcome to $NIKEPIG's Massive Rocket!
+🚀 Your $NIKEPIG's Massive Rocket API Key
 
-Your account is ready! Here's your API key:
-
+Your API Key:
 {api_key}
 
-💡 Keep this key secure - you'll need it to access your dashboard and trading agent.
+🔒 Security Reminder: Never share your API key with anyone.
 
-⚡ QUICK SETUP (2 minutes):
-Click this link to set up your trading agent:
+📊 VIEW YOUR DASHBOARD:
+{dashboard_link}
+
+💡 Bookmark this link for easy access!
+
+⚡ Quick Setup (2 minutes):
 {setup_link}
 
 What happens next:
-1. Click the setup link above
-2. Enter your Kraken API credentials (30 seconds)
-3. Your agent starts automatically
-4. Track performance on your dashboard
+1. Click the setup button above - Opens your personalized setup page
+2. Enter your Kraken API credentials - Takes 30 seconds
+3. Your agent starts automatically - Begins following trading signals
+4. Track performance on your dashboard - View profits in real-time
 
-View Your Dashboard:
-{BASE_URL}/dashboard?key={api_key}
+🔖 FOR FUTURE ACCESS:
+Bookmark your dashboard link above, or use our login page:
+{login_link}
 
-Need help? Visit {BASE_URL}/signup for detailed instructions.
+Just enter your API key to access your dashboard from any device!
+
+Questions? Need help? Contact us anytime.
 
 ---
 $NIKEPIG's Massive Rocket - Automated Kraken Futures Trading
@@ -228,7 +252,7 @@ You're receiving this email because you signed up at {BASE_URL}
             json={
                 "from": FROM_EMAIL,
                 "to": [to_email],
-                "subject": "🚀 Welcome to $NIKEPIG's Massive Rocket - Your API Key Inside",
+                "subject": "🚀 Your $NIKEPIG's Massive Rocket API Key",
                 "html": html_content,
                 "text": text_content
             }
@@ -263,92 +287,89 @@ def send_api_key_resend_email(to_email: str, api_key: str) -> bool:
     
     setup_link = f"{BASE_URL}/setup?key={api_key}"
     dashboard_link = f"{BASE_URL}/dashboard?key={api_key}"
+    login_link = f"{BASE_URL}/login"
     
     html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 600px;
-                margin: 0 auto;
-                padding: 20px;
-                background: #f5f5f5;
-            }}
-            .container {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                border-radius: 12px;
-                padding: 40px 20px;
-                text-align: center;
-            }}
-            .content {{
-                background: white;
-                border-radius: 12px;
-                padding: 30px;
-                margin-top: 20px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            }}
-            .api-key {{
-                background: #f0f7ff;
-                border: 2px dashed #667eea;
-                padding: 15px;
-                border-radius: 8px;
-                font-family: 'Courier New', monospace;
-                font-size: 14px;
-                word-break: break-all;
-                margin: 20px 0;
-                color: #333;
-            }}
-            .btn {{
-                display: inline-block;
-                padding: 16px 32px;
-                background: linear-gradient(135deg, #667eea 0%, #5568d3 100%);
-                color: white !important;
-                text-decoration: none;
-                border-radius: 10px;
-                font-weight: bold;
-                font-size: 16px;
-                margin: 20px 10px;
-                box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1 style="color: white; margin: 0; font-size: 36px;">🚀 $NIKEPIG's Massive Rocket</h1>
-            <p style="color: white; margin: 10px 0;">Your API Key</p>
-        </div>
-        
-        <div class="content">
-            <h2 style="color: #667eea;">Your API Key</h2>
-            <p>As requested, here's your $NIKEPIG's Massive Rocket API key:</p>
-            
-            <div class="api-key">{api_key}</div>
-            
-            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: left;">
-                <p style="margin: 0; color: #92400e;">
-                    <strong>🔒 Security Reminder:</strong> Never share your API key with anyone. If you believe your key has been compromised, contact support immediately.
-                </p>
-            </div>
-            
-            <div style="margin: 30px 0;">
-                <a href="{dashboard_link}" class="btn">
-                    📊 View Dashboard
-                </a>
-                <a href="{setup_link}" class="btn" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
-                    ⚙️ Setup Agent
-                </a>
-            </div>
-            
-            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #666; text-align: center;">
-                <p>If you didn't request this email, please ignore it or contact support.</p>
-            </div>
-        </div>
-    </body>
-    </html>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="background: #f5f5f5; padding: 40px 20px;">
+        <tr>
+            <td align="center">
+                <table width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    
+                    <tr>
+                        <td style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 30px; text-align: center;">
+                            <h1 style="margin: 0; color: white; font-size: 32px;">🚀 $NIKEPIG's Massive Rocket</h1>
+                            <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.9);">Your API Key</p>
+                        </td>
+                    </tr>
+                    
+                    <tr>
+                        <td style="padding: 40px 30px;">
+                            <h2 style="color: #667eea; margin: 0 0 15px 0;">Your API Key</h2>
+                            <p style="color: #374151; font-size: 14px; margin: 0 0 20px 0;">
+                                As requested, here's your $NIKEPIG's Massive Rocket API key:
+                            </p>
+                            
+                            <div style="background: #f9fafb; border: 2px dashed #d1d5db; border-radius: 8px; padding: 20px; margin-bottom: 25px;">
+                                <code style="font-family: 'Courier New', monospace; font-size: 14px; color: #667eea; word-break: break-all; display: block; text-align: center;">
+                                    {api_key}
+                                </code>
+                            </div>
+                            
+                            <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; border-radius: 6px; margin-bottom: 30px;">
+                                <p style="margin: 0; color: #92400e; font-size: 13px;">
+                                    🔒 <strong>Security Reminder:</strong> Never share your API key with anyone. If you believe your key has been compromised, contact support immediately.
+                                </p>
+                            </div>
+                            
+                            <!-- Dashboard Button -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 20px;">
+                                <tr>
+                                    <td style="text-align: center;">
+                                        <a href="{dashboard_link}" style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 16px 40px; border-radius: 10px; text-decoration: none; font-weight: bold; font-size: 16px; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3); margin: 10px;">
+                                            📊 View Dashboard
+                                        </a>
+                                        <a href="{setup_link}" style="display: inline-block; background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 16px 40px; border-radius: 10px; text-decoration: none; font-weight: bold; font-size: 16px; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3); margin: 10px;">
+                                            ⚙️ Setup Agent
+                                        </a>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Login Info -->
+                            <div style="background: #ede9fe; border-left: 4px solid #7c3aed; padding: 15px; border-radius: 8px; margin-top: 25px;">
+                                <p style="margin: 0 0 8px 0; color: #5b21b6; font-size: 14px; font-weight: 600;">
+                                    🔖 Access anytime at:
+                                </p>
+                                <p style="margin: 0; color: #6b21a8; font-size: 13px;">
+                                    <a href="{login_link}" style="color: #7c3aed; text-decoration: none; font-weight: 600;">
+                                        {login_link}
+                                    </a>
+                                </p>
+                            </div>
+                        </td>
+                    </tr>
+                    
+                    <tr>
+                        <td style="padding: 20px 30px; background: #f9fafb; text-align: center; border-top: 1px solid #e5e7eb;">
+                            <p style="margin: 0; color: #6b7280; font-size: 12px;">
+                                If you didn't request this email, please ignore it or contact support.
+                            </p>
+                        </td>
+                    </tr>
+                    
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
     """
     
     text_content = f"""
@@ -362,6 +383,8 @@ As requested, here's your API key:
 
 View Dashboard: {dashboard_link}
 Setup Agent: {setup_link}
+
+🔖 Access anytime at: {login_link}
 
 If you didn't request this email, please ignore it or contact support.
     """
