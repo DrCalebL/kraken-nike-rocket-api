@@ -647,36 +647,97 @@ async def setup_agent(
 
 @router.get("/api/agent-status")
 async def get_agent_status(
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    key: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """
-    Get customer's agent status
+    Get customer's agent status with configuring state support
     
-    Called by: Dashboard to show if agent is running
-    Auth: Requires user API key
+    Returns:
+    - configuring: Agent being set up (first 5 minutes after credentials set)
+    - active: Agent is running
+    - ready: Agent configured but not started
+    - not_configured: No credentials set
+    
+    Called by: Dashboard to show agent status
+    Auth: Requires user API key (header or query param)
     """
     
+    # Get API key from header or query param
+    api_key = x_api_key or key
+    
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    
     # Find user
-    user = db.query(User).filter(User.api_key == x_api_key).first()
+    user = db.query(User).filter(User.api_key == api_key).first()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        return {
+            "status": "not_found",
+            "message": "No agent found for this API key",
+            "credentials_set": False
+        }
+    
+    # Check if credentials were just set (within last 5 minutes)
+    now = datetime.utcnow()
+    
+    # Use updated_at if available (when credentials were last changed), otherwise created_at
+    setup_time = user.updated_at if user.updated_at else user.created_at
+    
+    if setup_time:
+        time_since_setup = (now - setup_time).total_seconds() / 60  # minutes
+        
+        # If credentials just set and within 5-minute configuration window
+        if user.credentials_set and time_since_setup < 5:
+            minutes_remaining = max(0, int(5 - time_since_setup))
+            return {
+                "status": "configuring",
+                "message": f"Agent is being configured. Ready in {minutes_remaining} minute(s).",
+                "ready_in_minutes": minutes_remaining,
+                "credentials_set": True,
+                "setup_complete_percentage": int((time_since_setup / 5) * 100),
+                "agent_configured": True,
+                "agent_active": False
+            }
     
     # Check if credentials are set
     if not user.credentials_set:
         return {
+            "status": "not_configured",
+            "message": "Agent not configured. Please set up your Kraken credentials.",
+            "credentials_set": False,
             "agent_configured": False,
             "agent_active": False,
-            "message": "Agent not configured. Please set up your Kraken credentials.",
             "setup_url": "/setup"
         }
     
-    # Check if agent is active
+    # Check if agent is actively running (has recent activity)
+    if user.agent_active and user.agent_last_poll:
+        poll_age = (now - user.agent_last_poll).total_seconds() / 60
+        
+        if poll_age < 10:  # Active within last 10 minutes
+            return {
+                "status": "active",
+                "message": "Agent is running and following signals",
+                "credentials_set": True,
+                "agent_configured": True,
+                "agent_active": True,
+                "agent_started_at": user.agent_started_at.isoformat() if user.agent_started_at else None,
+                "agent_last_poll": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
+                "last_heartbeat": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
+                "access_granted": user.access_granted,
+                "email": user.email
+            }
+    
+    # Credentials set but agent not currently active
     return {
+        "status": "ready",
+        "message": "Agent configured and ready to start",
+        "credentials_set": True,
         "agent_configured": True,
-        "agent_active": user.agent_active,
+        "agent_active": False,
         "agent_started_at": user.agent_started_at.isoformat() if user.agent_started_at else None,
-        "agent_last_poll": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
         "access_granted": user.access_granted,
         "email": user.email
     }
