@@ -1,6 +1,6 @@
 # UPDATED PORTFOLIO API - AUTO-DETECT INITIAL CAPITAL
 # ====================================================
-# CORRECTED VERSION - Queries follower_users with encrypted credentials
+# FULLY CORRECTED VERSION - Proper column names for all tables
 
 from fastapi import APIRouter, Request, HTTPException
 from datetime import datetime
@@ -109,7 +109,7 @@ async def initialize_portfolio_autodetect(request: Request):
     """
     Initialize portfolio tracking - AUTO-DETECTS initial capital from Kraken
     
-    CORRECTED: Uses follower_users table with encrypted credentials
+    FULLY CORRECTED with proper column names
     """
     api_key = request.headers.get("X-API-Key")
     
@@ -123,9 +123,9 @@ async def initialize_portfolio_autodetect(request: Request):
         
         conn = await asyncpg.connect(DATABASE_URL)
         
-        # Check if user already exists
+        # CORRECTED: Use api_key column
         existing = await conn.fetchrow(
-            "SELECT * FROM portfolio_users WHERE user_id = $1",
+            "SELECT * FROM portfolio_users WHERE api_key = $1",
             api_key
         )
         
@@ -180,13 +180,13 @@ async def initialize_portfolio_autodetect(request: Request):
         # Use current balance as initial capital!
         initial_capital = float(kraken_balance)
         
-        # Create portfolio user
+        # CORRECTED: Use api_key column
         await conn.execute("""
-            INSERT INTO portfolio_users (user_id, initial_capital, created_at, last_known_balance)
+            INSERT INTO portfolio_users (api_key, initial_capital, created_at, last_known_balance)
             VALUES ($1, $2, CURRENT_TIMESTAMP, $2)
         """, api_key, initial_capital)
         
-        # Create initial transaction
+        # Create initial transaction (user_id in portfolio_transactions is api_key string)
         await conn.execute("""
             INSERT INTO portfolio_transactions (
                 user_id, transaction_type, amount, detection_method, notes
