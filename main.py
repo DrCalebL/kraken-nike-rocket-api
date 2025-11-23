@@ -1701,7 +1701,7 @@ async def portfolio_dashboard(request: Request):
                 let html = '<div style="display: grid; gap: 12px;">';
                 
                 data.transactions.forEach(tx => {{
-                    const date = new Date(tx.detected_at).toLocaleString();
+                    const date = new Date(tx.created_at).toLocaleString();
                     const typeClass = tx.transaction_type === 'deposit' ? 'deposit' : 'withdrawal';
                     const typeIcon = tx.transaction_type === 'deposit' ? '⬆️' : '⬇️';
                     const amountColor = tx.transaction_type === 'deposit' ? '#10b981' : '#ef4444';
