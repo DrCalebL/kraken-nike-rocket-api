@@ -8,7 +8,7 @@ FULLY CORRECTED VERSION FOR KRAKEN FUTURES:
 - Uses api_key column (not user_id)  
 - Uses pnl_usd column (not pnl)
 - Proper integer FK handling
-- KRAKEN FUTURES API support (not Spot)
+- USES CCXT for Kraken Futures (same as trading algo)
 
 Author: Nike Rocket Team
 Updated: November 24, 2025
@@ -20,11 +20,6 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 import logging
 from cryptography.fernet import Fernet
-import hmac
-import hashlib
-import time
-import base64
-import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -186,90 +181,52 @@ class BalanceChecker:
         api_secret: str
     ) -> Decimal:
         """
-        Get current balance from Kraken FUTURES account
+        Get current balance from Kraken FUTURES account using CCXT
         
-        UPDATED: Uses correct Kraken Futures API v3 authentication
+        UPDATED: Uses CCXT library (same as the working trading algo)
         """
         try:
-            import aiohttp
+            import ccxt
             
-            # Kraken Futures API endpoint
-            endpoint = "/derivatives/api/v3/accounts"
-            url = f"https://futures.kraken.com{endpoint}"
+            # Initialize Kraken Futures exchange using CCXT
+            exchange = ccxt.krakenfutures({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'enableRateLimit': True,
+                'options': {
+                    'defaultType': 'future',
+                }
+            })
             
-            # Create nonce (timestamp in milliseconds)
-            nonce = str(int(time.time() * 1000))
+            logger.info("🔐 Fetching balance from Kraken Futures via CCXT...")
             
-            # For GET requests, postData is empty
-            post_data = ""
+            # Fetch balance (CCXT handles all authentication)
+            balance = await asyncio.to_thread(exchange.fetch_balance)
             
-            # Create the message for signing: postData + nonce + endpoint
-            message = post_data + nonce + endpoint
+            # DEBUG: Log the response structure
+            logger.info(f"🔍 Balance response keys: {list(balance.keys())}")
             
-            # Create SHA-256 hash of the message
-            message_hash = hashlib.sha256(message.encode('utf-8')).digest()
+            # Try multiple currency options (Kraken multi-collateral)
+            for currency in ['USD', 'USDT', 'USDC']:
+                # Check total balance
+                if 'total' in balance and currency in balance['total']:
+                    equity = float(balance['total'][currency])
+                    if equity > 0:
+                        logger.info(f"✅ Retrieved Kraken Futures balance: ${equity:.2f} {currency}")
+                        return Decimal(str(equity))
             
-            # Decode the API secret from base64
-            secret_decoded = base64.b64decode(api_secret)
+            # Try free balance as fallback
+            for currency in ['USD', 'USDT', 'USDC']:
+                if 'free' in balance and currency in balance['free']:
+                    equity = float(balance['free'][currency])
+                    if equity > 0:
+                        logger.info(f"✅ Retrieved Kraken Futures available: ${equity:.2f} {currency}")
+                        return Decimal(str(equity))
             
-            # Create HMAC-SHA512 signature
-            signature = hmac.new(secret_decoded, message_hash, hashlib.sha512)
-            signature_b64 = base64.b64encode(signature.digest()).decode()
-            
-            # Headers for Kraken Futures API
-            headers = {
-                "APIKey": api_key,
-                "Nonce": nonce,
-                "Authent": signature_b64
-            }
-            
-            logger.info(f"🔐 Calling Kraken Futures API with nonce: {nonce}")
-            
-            # Make request
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
-                    response_text = await response.text()
-                    
-                    if response.status == 200:
-                        try:
-                            data = json.loads(response_text)
-                        except json.JSONDecodeError:
-                            logger.error(f"Invalid JSON response: {response_text}")
-                            return None
-                        
-                        # DEBUG: Log the actual response
-                        logger.info(f"🔍 Kraken Futures API Response: {json.dumps(data, indent=2)}")
-                        
-                        # Check for error in response
-                        if data.get("result") == "error":
-                            logger.error(f"Kraken API error: {data.get('error')}")
-                            return None
-                        
-                        # Get account balance
-                        if "accounts" in data:
-                            accounts = data["accounts"]
-                            
-                            # accounts might be a list or dict
-                            if isinstance(accounts, list) and len(accounts) > 0:
-                                # Get balance from first account
-                                balance = accounts[0].get("balanceValue", 0)
-                                logger.info(f"✅ Retrieved Kraken Futures balance: ${float(balance):.2f}")
-                                return Decimal(str(balance))
-                            elif isinstance(accounts, dict):
-                                # If accounts is a dict, try to get balance from any account type
-                                for account_type, account_data in accounts.items():
-                                    if isinstance(account_data, dict):
-                                        balance = account_data.get("balanceValue", 0)
-                                        if balance > 0:
-                                            logger.info(f"✅ Retrieved Kraken Futures balance ({account_type}): ${float(balance):.2f}")
-                                            return Decimal(str(balance))
-                        
-                        logger.warning(f"No accounts found in Kraken Futures response: {data}")
-                        return Decimal('0')
-                    else:
-                        logger.error(f"Kraken Futures API error: {response.status} - {response_text}")
-                        return None
-                        
+            logger.warning("⚠️ No balance found in USD, USDT, or USDC")
+            logger.warning("💡 Make sure you have funds in your Kraken Futures wallet")
+            return Decimal('0')
+                
         except Exception as e:
             logger.error(f"Error getting Kraken Futures balance: {e}")
             import traceback
