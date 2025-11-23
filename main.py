@@ -1331,12 +1331,6 @@ async def portfolio_dashboard(request: Request):
         </div>
     </div>
     
-    // ═══════════════════════════════════════════════════════════════════════
-// COMPLETE JAVASCRIPT SECTION FOR main.py DASHBOARD - WITH ALL UX IMPROVEMENTS
-// ═══════════════════════════════════════════════════════════════════════
-// Replace the entire <script> section in your dashboard (lines 1334-2139) with this
-// ═══════════════════════════════════════════════════════════════════════
-
 <script>
     let currentApiKey = '{api_key}';
     let currentPeriod = '30d';
@@ -1784,10 +1778,6 @@ async def portfolio_dashboard(request: Request):
         el.style.display = 'block';
     }}
 </script>
-
-// ═══════════════════════════════════════════════════════════════════════
-// END OF COMPLETE JAVASCRIPT SECTION
-// ═══════════════════════════════════════════════════════════════════════
 </body>
 </html>
     """
