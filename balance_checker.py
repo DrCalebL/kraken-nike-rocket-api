@@ -495,12 +495,12 @@ class BalanceChecker:
                 SELECT 
                     transaction_type,
                     amount,
-                    detected_at,
+                    created_at,
                     detection_method,
                     notes
                 FROM portfolio_transactions
                 WHERE user_id = $1
-                ORDER BY detected_at DESC
+                ORDER BY created_at DESC
                 LIMIT $2
             """, api_key, limit)
             
