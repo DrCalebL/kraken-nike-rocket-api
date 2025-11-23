@@ -34,3 +34,5 @@ krakenex==2.2.2
 pykrakenapi==0.3.2
 
 aiohttp==3.9.1
+
+ccxt==4.1.0
