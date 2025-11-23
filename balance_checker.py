@@ -5,6 +5,8 @@ Automatic Balance Checker - Detects Deposits & Withdrawals
 This module automatically detects when users deposit or withdraw funds
 from their Kraken account by comparing actual balance to expected balance.
 
+INCLUDES ZERO DIVISION PROTECTION for safe ROI calculations.
+
 Usage:
     from balance_checker import BalanceChecker
     
@@ -12,13 +14,13 @@ Usage:
     await checker.check_all_users()
 
 Author: Nike Rocket Team
-Updated: November 22, 2025
+Updated: November 23, 2025 (with zero division protection)
 """
 
 import asyncio
 import asyncpg
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, List
 import logging
 
@@ -243,7 +245,15 @@ class BalanceChecker:
             return [dict(tx) for tx in transactions]
     
     async def get_balance_summary(self, user_id: str) -> Dict:
-        """Get balance summary for a user"""
+        """
+        Get balance summary for a user - WITH ZERO DIVISION PROTECTION
+        
+        This method includes multiple layers of protection against division by zero:
+        1. Checks if initial_capital <= 0 and sets to 1 if needed
+        2. Checks if total_capital <= 0 and falls back to initial
+        3. Try-catch on all ROI calculations
+        4. Caps ROI at reasonable values (±10,000%)
+        """
         async with self.db_pool.acquire() as conn:
             summary = await conn.fetchrow("""
                 SELECT 
@@ -277,13 +287,50 @@ class BalanceChecker:
             withdrawals = Decimal(str(summary['total_withdrawals'] or 0))
             profit = Decimal(str(summary['total_profit'] or 0))
             
+            # SAFETY CHECK 1: Ensure initial capital is never zero or negative
+            if initial <= 0:
+                logger.warning(
+                    f"User {user_id} has invalid initial_capital: {initial}. "
+                    f"Setting to 1 to prevent division by zero."
+                )
+                initial = Decimal('1')  # Prevent division by zero
+            
             net_deposits = deposits - withdrawals
             total_capital = initial + net_deposits
+            
+            # SAFETY CHECK 2: Ensure total capital is never zero or negative
+            if total_capital <= 0:
+                logger.warning(
+                    f"User {user_id} has invalid total_capital: {total_capital}. "
+                    f"Setting to initial capital."
+                )
+                total_capital = initial  # Fallback to initial
+            
             current_value = total_capital + profit
             
-            # Calculate ROI
-            roi_on_initial = (profit / initial * 100) if initial > 0 else 0
-            roi_on_total = (profit / total_capital * 100) if total_capital > 0 else 0
+            # SAFETY CHECK 3: Calculate ROI with zero division protection
+            try:
+                roi_on_initial = float((profit / initial * 100)) if initial > 0 else 0.0
+            except (ZeroDivisionError, InvalidOperation) as e:
+                logger.error(
+                    f"ROI calculation error for user {user_id}: "
+                    f"initial={initial}, profit={profit}. Error: {e}"
+                )
+                roi_on_initial = 0.0
+            
+            try:
+                roi_on_total = float((profit / total_capital * 100)) if total_capital > 0 else 0.0
+            except (ZeroDivisionError, InvalidOperation) as e:
+                logger.error(
+                    f"ROI calculation error for user {user_id}: "
+                    f"total_capital={total_capital}, profit={profit}. Error: {e}"
+                )
+                roi_on_total = 0.0
+            
+            # SAFETY CHECK 4: Cap ROI at reasonable values (prevent infinity display)
+            # Max ROI: ±10,000% (100x return)
+            roi_on_initial = min(max(roi_on_initial, -10000), 10000)
+            roi_on_total = min(max(roi_on_total, -10000), 10000)
             
             return {
                 'initial_capital': float(initial),
@@ -293,8 +340,8 @@ class BalanceChecker:
                 'total_capital': float(total_capital),
                 'total_profit': float(profit),
                 'current_value': float(current_value),
-                'roi_on_initial': float(roi_on_initial),
-                'roi_on_total': float(roi_on_total),
+                'roi_on_initial': roi_on_initial,
+                'roi_on_total': roi_on_total,
                 'last_balance_check': summary['last_balance_check']
             }
 
@@ -319,14 +366,22 @@ class BalanceCheckerScheduler:
     async def start(self):
         """Start the scheduler"""
         self.running = True
-        logger.info(f"✅ Balance checker started (checking every {self.interval_minutes} minutes)")
+        logger.info(
+            f"✅ Balance checker started "
+            f"(checks every {self.interval_minutes} minutes)"
+        )
         
         while self.running:
             try:
                 await self.checker.check_all_users()
-                logger.info(f"✅ Balance check complete. Next check in {self.interval_minutes} minutes")
+                logger.info(
+                    f"✅ Balance check complete. "
+                    f"Next check in {self.interval_minutes} minutes"
+                )
             except Exception as e:
                 logger.error(f"Error in balance check: {e}")
+                import traceback
+                traceback.print_exc()
             
             # Wait for next check
             await asyncio.sleep(self.interval_minutes * 60)
@@ -353,9 +408,11 @@ async def example_usage():
     checker = BalanceChecker(db_pool)
     await checker.check_all_users()
     
-    # Option 2: Get balance summary for specific user
+    # Option 2: Get balance summary for specific user (SAFE - no division by zero)
     summary = await checker.get_balance_summary("nk_abc123")
     print(f"Balance summary: {summary}")
+    print(f"ROI on Initial: {summary['roi_on_initial']:.2f}%")
+    print(f"ROI on Total: {summary['roi_on_total']:.2f}%")
     
     # Option 3: Get transaction history
     history = await checker.get_transaction_history("nk_abc123", limit=10)
