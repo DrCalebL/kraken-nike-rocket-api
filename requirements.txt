@@ -35,4 +35,4 @@ pykrakenapi==0.3.2
 
 aiohttp==3.9.1
 
-ccxt==4.1.0
+ccxt==4.5.20
