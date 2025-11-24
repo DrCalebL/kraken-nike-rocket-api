@@ -1450,7 +1450,7 @@ async def portfolio_dashboard(request: Request):
         
         async function checkAgentStatusAPI() {{
             try {{
-                const response = await fetch(`/api/agent-status?key=${{currentApiKey}}`, {{
+                const response = await fetch('/api/agent-status', {{
                     headers: {{'X-API-Key': currentApiKey}}
                 }});
                 
@@ -1459,7 +1459,7 @@ async def portfolio_dashboard(request: Request):
                 
             }} catch (error) {{
                 console.error('Error checking agent status:', error);
-                return {{ status: 'error', message: error.message }};
+                return {{ agent_active: false, agent_configured: false, message: error.message }};
             }}
         }}
         
@@ -1473,21 +1473,16 @@ async def portfolio_dashboard(request: Request):
                 let statusHTML = '';
                 let statusClass = '';
                 
-                if (statusData.status === 'active') {{
+                // API returns: agent_active, agent_configured, message
+                if (statusData.agent_active) {{
                     statusHTML = '🟢 <strong>Agent Active</strong> - Following signals';
                     statusClass = 'status-active';
-                }} else if (statusData.status === 'configuring') {{
-                    statusHTML = `⏳ <strong>Configuring</strong> - Ready in ${{statusData.ready_in_minutes}} min (${{statusData.setup_complete_percentage}}%)`;
-                    statusClass = 'status-configuring';
-                }} else if (statusData.status === 'ready') {{
-                    statusHTML = '🟡 <strong>Ready</strong> - Agent configured';
+                }} else if (statusData.agent_configured) {{
+                    statusHTML = '🟡 <strong>Ready</strong> - Agent configured but stopped';
                     statusClass = 'status-ready';
-                }} else if (statusData.status === 'not_configured') {{
+                }} else {{
                     statusHTML = '🔴 <strong>Not Configured</strong> - <a href="/setup?key=' + currentApiKey + '" style="color: #dc2626;">Complete setup</a>';
                     statusClass = 'status-error';
-                }} else {{
-                    statusHTML = '⚠️ <strong>Unknown</strong> - ' + statusData.message;
-                    statusClass = 'status-unknown';
                 }}
                 
                 statusElement.innerHTML = statusHTML;
@@ -2394,7 +2389,7 @@ ROI: ${{roi}}`;
         
         async function checkAgentStatus() {{
             try {{
-                const response = await fetch(`/api/agent-status?key=${{currentApiKey}}`, {{
+                const response = await fetch('/api/agent-status', {{
                     headers: {{'X-API-Key': currentApiKey}}
                 }});
                 
@@ -2402,30 +2397,16 @@ ROI: ${{roi}}`;
                 
                 // ========== UPDATE TOP BANNER ==========
                 const topBanner = document.getElementById('agent-status-display');
-                if (topBanner) {{
-                    if (data.status === 'active' || data.status === 'running') {{
+                
+                // API returns: agent_configured, agent_active, message
+                if (data.agent_active) {{
+                    // Agent is running
+                    if (topBanner) {{
                         topBanner.innerHTML = '🟢 <strong>Agent Active</strong> - Following signals';
                         topBanner.className = 'agent-status status-active';
-                    }} else if (data.status === 'ready') {{
-                        topBanner.innerHTML = '🟡 <strong>Ready</strong> - Agent configured';
-                        topBanner.className = 'agent-status status-ready';
-                    }} else if (data.status === 'configuring') {{
-                        topBanner.innerHTML = `⏳ <strong>Configuring</strong> - Ready in ${{data.ready_in_minutes || 'a few'}} min`;
-                        topBanner.className = 'agent-status status-configuring';
-                    }} else if (data.status === 'not_configured' || data.status === 'not_found') {{
-                        topBanner.innerHTML = '🔴 <strong>Not Configured</strong> - <a href="/setup?key=' + currentApiKey + '" style="color: #dc2626;">Complete setup</a>';
-                        topBanner.className = 'agent-status status-error';
-                    }} else {{
-                        topBanner.innerHTML = '⚠️ <strong>Unknown</strong> - ' + (data.message || 'Status unclear');
-                        topBanner.className = 'agent-status status-unknown';
                     }}
-                }}
-                
-                // ========== UPDATE SECTION BADGE ==========
-                // Handle NEW status values from updated API
-                if (data.status === 'active' || data.status === 'running') {{
-                    // Agent is active/running
-                    document.getElementById('agent-status-badge').innerHTML = '🟢 Active';
+                    
+                    document.getElementById('agent-status-badge').innerHTML = '🟢 Running';
                     document.getElementById('agent-status-badge').style.background = '#d1fae5';
                     document.getElementById('agent-status-badge').style.color = '#065f46';
                     
@@ -2434,8 +2415,13 @@ ROI: ${{roi}}`;
                     
                     document.getElementById('agent-details').textContent = 'Agent is active and following signals';
                     
-                }} else if (data.status === 'ready') {{
-                    // Agent configured but not running
+                }} else if (data.agent_configured) {{
+                    // Agent configured but not active
+                    if (topBanner) {{
+                        topBanner.innerHTML = '🟡 <strong>Ready</strong> - Agent configured but stopped';
+                        topBanner.className = 'agent-status status-ready';
+                    }}
+                    
                     document.getElementById('agent-status-badge').innerHTML = '🟡 Ready';
                     document.getElementById('agent-status-badge').style.background = '#fef3c7';
                     document.getElementById('agent-status-badge').style.color = '#92400e';
@@ -2443,22 +2429,15 @@ ROI: ${{roi}}`;
                     document.getElementById('start-agent-btn').style.display = 'block';
                     document.getElementById('stop-agent-btn').style.display = 'none';
                     
-                    document.getElementById('agent-details').textContent = 'Agent configured and ready to start';
+                    document.getElementById('agent-details').textContent = 'Agent configured - click Start to begin trading';
                     
-                }} else if (data.status === 'configuring') {{
-                    // Agent being configured
-                    document.getElementById('agent-status-badge').innerHTML = '⏳ Configuring';
-                    document.getElementById('agent-status-badge').style.background = '#dbeafe';
-                    document.getElementById('agent-status-badge').style.color = '#1e40af';
+                }} else {{
+                    // Agent not configured
+                    if (topBanner) {{
+                        topBanner.innerHTML = '🔴 <strong>Not Configured</strong> - <a href="/setup?key=' + currentApiKey + '" style="color: #dc2626;">Complete setup</a>';
+                        topBanner.className = 'agent-status status-error';
+                    }}
                     
-                    document.getElementById('start-agent-btn').style.display = 'none';
-                    document.getElementById('stop-agent-btn').style.display = 'none';
-                    
-                    document.getElementById('agent-details').textContent = 
-                        `Setup in progress... Ready in ${{data.ready_in_minutes || 'a few'}} minutes`;
-                        
-                }} else if (data.status === 'stopped' || data.status === 'not_configured' || data.status === 'not_found') {{
-                    // Agent not configured or stopped
                     document.getElementById('agent-status-badge').innerHTML = '🔴 Not Configured';
                     document.getElementById('agent-status-badge').style.background = '#fee2e2';
                     document.getElementById('agent-status-badge').style.color = '#991b1b';
@@ -2468,18 +2447,20 @@ ROI: ${{roi}}`;
                     
                     document.getElementById('agent-details').innerHTML = 
                         '<a href="/setup?key=' + currentApiKey + '" style="color: #667eea;">Set up your agent first →</a>';
-                        
-                }} else {{
-                    // Unknown status
-                    document.getElementById('agent-status-badge').innerHTML = '⚠️ Unknown';
-                    document.getElementById('agent-status-badge').style.background = '#fef3c7';
-                    document.getElementById('agent-status-badge').style.color = '#92400e';
-                    
-                    document.getElementById('agent-details').textContent = data.message || 'Status unclear';
                 }}
+                
             }} catch (error) {{
                 console.error('Error checking agent status:', error);
+                
+                const topBanner = document.getElementById('agent-status-display');
+                if (topBanner) {{
+                    topBanner.innerHTML = '❌ <strong>Error</strong> - Could not check status';
+                    topBanner.className = 'agent-status status-error';
+                }}
+                
                 document.getElementById('agent-status-badge').innerHTML = '❌ Error';
+                document.getElementById('agent-status-badge').style.background = '#fee2e2';
+                document.getElementById('agent-status-badge').style.color = '#991b1b';
                 document.getElementById('agent-details').textContent = 'Could not check agent status';
             }}
         }}
