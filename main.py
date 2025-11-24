@@ -42,6 +42,9 @@ from admin_dashboard import (
 # Import hosted trading loop for automatic signal execution
 from hosted_trading_loop import start_hosted_trading
 
+# Import position monitor to track P&L when trades close
+from position_monitor import start_position_monitor
+
 # Initialize FastAPI
 app = FastAPI(
     title="Nike Rocket Follower API",
@@ -2662,6 +2665,13 @@ async def startup_event():
             # ═══════════════════════════════════════════════════════════
             asyncio.create_task(start_hosted_trading(db_pool))
             print("🤖 Hosted trading loop scheduled (starts in 35 seconds)")
+            
+            # ═══════════════════════════════════════════════════════════
+            # POSITION MONITOR: Tracks open positions for TP/SL fills
+            # Records actual P&L when trades close for accurate billing
+            # ═══════════════════════════════════════════════════════════
+            asyncio.create_task(start_position_monitor(db_pool))
+            print("📊 Position monitor scheduled (starts in 40 seconds)")
             
         except Exception as e:
             print(f"⚠️ Background tasks failed to start: {e}")
