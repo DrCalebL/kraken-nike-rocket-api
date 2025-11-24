@@ -86,7 +86,8 @@ def get_sleep_until_next_window() -> int:
     next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     sleep_seconds = (next_hour - now).total_seconds()
     
-    return int(sleep_seconds)
+    # Minimum sleep of 5 seconds to prevent tight loop at edge cases
+    return max(5, int(sleep_seconds))
 
 
 class HostedTradingLoop:
@@ -407,10 +408,9 @@ class HostedTradingLoop:
         users = await self.get_active_users()
         
         if not users:
-            self.logger.debug("No active users with credentials")
-            return
+            return  # No active users, skip silently
         
-        self.logger.info(f"📡 Polling {len(users)} active users...")
+        signals_found = 0
         
         for user in users:
             user_short = user['api_key'][:15] + "..."
@@ -420,7 +420,8 @@ class HostedTradingLoop:
                 signal = await self.get_latest_signal(user['api_key'])
                 
                 if signal:
-                    self.logger.info(f"   ✨ {user_short}: Signal found - {signal['action']} {signal['symbol']}")
+                    signals_found += 1
+                    self.logger.info(f"✨ {user_short}: Signal found - {signal['action']} {signal['symbol']}")
                     
                     # Execute trade
                     success = await self.execute_trade(user, signal)
@@ -428,53 +429,44 @@ class HostedTradingLoop:
                     if success:
                         # Acknowledge signal
                         await self.acknowledge_signal(signal['delivery_id'])
-                        self.logger.info(f"   ✅ {user_short}: Signal acknowledged")
+                        self.logger.info(f"✅ {user_short}: Trade executed and acknowledged")
                     else:
-                        self.logger.warning(f"   ⚠️ {user_short}: Trade failed, will retry next poll")
-                else:
-                    self.logger.debug(f"   {user_short}: No new signals")
+                        self.logger.warning(f"⚠️ {user_short}: Trade failed, will retry next poll")
                     
             except Exception as e:
-                self.logger.error(f"   ❌ {user_short}: Error - {e}")
+                self.logger.error(f"❌ {user_short}: Error - {e}")
     
     async def run(self):
         """
-        Main loop - runs forever, polling during active windows
+        Main loop - polls continuously every 10 seconds
+        
+        Note: Unlike standalone follower agents that sync with algo timing,
+        the hosted model should always be ready since signals come via broadcast.
         """
         self.logger.info("=" * 60)
         self.logger.info("🚀 HOSTED TRADING LOOP STARTED")
         self.logger.info("=" * 60)
-        self.logger.info(f"⏰ Active window: First {ACTIVE_MINUTES_PER_HOUR} minutes of each hour")
         self.logger.info(f"🔄 Poll interval: {POLL_INTERVAL_SECONDS} seconds")
         self.logger.info(f"💰 Risk per trade: {RISK_PERCENTAGE*100}%")
         self.logger.info("=" * 60)
         
         poll_count = 0
+        last_status_log = datetime.now()
         
         while True:
             try:
-                if should_poll_now():
-                    # Active window - poll for signals
-                    poll_count += 1
-                    current_time = datetime.now().strftime("%H:%M:%S")
-                    self.logger.info(f"🟢 Poll #{poll_count} [{current_time}]")
-                    
-                    await self.poll_and_execute()
-                    
-                    # Wait before next poll
-                    await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                    
-                else:
-                    # Outside active window - sleep until next window
-                    sleep_seconds = get_sleep_until_next_window()
-                    sleep_minutes = sleep_seconds / 60
-                    
-                    current_time = datetime.now().strftime("%H:%M:%S")
-                    self.logger.info(f"💤 Outside window [{current_time}] - sleeping {sleep_minutes:.1f} min")
-                    
-                    await asyncio.sleep(sleep_seconds)
-                    
-                    self.logger.info(f"⏰ Waking up - entering active window!")
+                poll_count += 1
+                
+                await self.poll_and_execute()
+                
+                # Log status every 5 minutes to show we're alive
+                if (datetime.now() - last_status_log).total_seconds() >= 300:
+                    users = await self.get_active_users()
+                    self.logger.info(f"💓 Trading loop alive - Poll #{poll_count}, {len(users)} active users")
+                    last_status_log = datetime.now()
+                
+                # Wait before next poll
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     
             except asyncio.CancelledError:
                 self.logger.info("🛑 Trading loop cancelled")
