@@ -11,23 +11,21 @@ Endpoints:
 - POST /api/users/register - New user signup
 - GET /api/users/verify - Verify user access
 - GET /api/users/stats - Get user statistics
-- POST /api/setup-agent - Setup hosted trading agent
-- GET /api/agent-status - Get agent status
-- POST /api/stop-agent - Stop trading agent (deletes credentials)
-- POST /api/agent/activate - Activate configured agent (NEW!)
-- POST /api/agent/deactivate - Pause agent without deleting credentials (NEW!)
+- POST /api/setup-agent - Setup hosted trading agent (NEW!)
+- GET /api/agent-status - Get agent status (NEW!)
+- POST /api/stop-agent - Stop trading agent (NEW!)
 - POST /api/payments/create - Create payment link
 - POST /api/payments/webhook - Coinbase Commerce webhook
 
 Author: Nike Rocket Team
-Updated: November 24, 2025
+Updated: November 21, 2025
 """
 
 from fastapi import APIRouter, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict
 import os
 import secrets
 import hashlib
@@ -649,100 +647,36 @@ async def setup_agent(
 
 @router.get("/api/agent-status")
 async def get_agent_status(
-    x_api_key: str = Header(None, alias="X-API-Key"),
-    key: Optional[str] = None,
+    x_api_key: str = Header(..., alias="X-API-Key"),
     db: Session = Depends(get_db)
 ):
     """
-    Get customer's agent status with configuring state support
+    Get customer's agent status
     
-    Returns:
-    - configuring: Agent being set up (first 5 minutes after credentials set)
-    - active: Agent is running
-    - ready: Agent configured but not started
-    - not_configured: No credentials set
-    
-    Called by: Dashboard to show agent status
-    Auth: Requires user API key (header or query param)
+    Called by: Dashboard to show if agent is running
+    Auth: Requires user API key
     """
     
-    # Get API key from header or query param
-    api_key = x_api_key or key
-    
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API key required")
-    
     # Find user
-    user = db.query(User).filter(User.api_key == api_key).first()
+    user = db.query(User).filter(User.api_key == x_api_key).first()
     if not user:
-        return {
-            "status": "not_found",
-            "message": "No agent found for this API key",
-            "credentials_set": False
-        }
-    
-    # Check if credentials were just set (within last 5 minutes)
-    now = datetime.utcnow()
-    
-    # Use created_at for setup time (User model doesn't have updated_at)
-    setup_time = user.created_at
-    
-    if setup_time:
-        time_since_setup = (now - setup_time).total_seconds() / 60  # minutes
-        
-        # If credentials just set and within 5-minute configuration window
-        if user.credentials_set and time_since_setup < 5:
-            minutes_remaining = max(0, int(5 - time_since_setup))
-            return {
-                "status": "configuring",
-                "message": f"Agent is being configured. Ready in {minutes_remaining} minute(s).",
-                "ready_in_minutes": minutes_remaining,
-                "credentials_set": True,
-                "setup_complete_percentage": int((time_since_setup / 5) * 100),
-                "agent_configured": True,
-                "agent_active": False
-            }
+        raise HTTPException(status_code=401, detail="Invalid API key")
     
     # Check if credentials are set
     if not user.credentials_set:
         return {
-            "status": "not_configured",
-            "message": "Agent not configured. Please set up your Kraken credentials.",
-            "credentials_set": False,
             "agent_configured": False,
             "agent_active": False,
+            "message": "Agent not configured. Please set up your Kraken credentials.",
             "setup_url": "/setup"
         }
     
-    # Check if agent is active (user has activated it)
-    if user.agent_active:
-        # Check if agent has recent polling activity (optional extra info)
-        has_recent_poll = False
-        if user.agent_last_poll:
-            poll_age = (now - user.agent_last_poll).total_seconds() / 60
-            has_recent_poll = poll_age < 10
-        
-        return {
-            "status": "active",
-            "message": "Agent is active and following signals",
-            "credentials_set": True,
-            "agent_configured": True,
-            "agent_active": True,
-            "agent_started_at": user.agent_started_at.isoformat() if user.agent_started_at else None,
-            "agent_last_poll": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
-            "has_recent_heartbeat": has_recent_poll,
-            "access_granted": user.access_granted,
-            "email": user.email
-        }
-    
-    # Credentials set but agent not currently active
+    # Check if agent is active
     return {
-        "status": "ready",
-        "message": "Agent configured and ready to start",
-        "credentials_set": True,
         "agent_configured": True,
-        "agent_active": False,
+        "agent_active": user.agent_active,
         "agent_started_at": user.agent_started_at.isoformat() if user.agent_started_at else None,
+        "agent_last_poll": user.agent_last_poll.isoformat() if user.agent_last_poll else None,
         "access_granted": user.access_granted,
         "email": user.email
     }
@@ -782,105 +716,6 @@ async def stop_agent(
         "message": "Trading agent stopped",
         "agent_active": False
     }
-
-
-@router.post("/api/agent/activate")
-async def activate_agent(
-    x_api_key: str = Header(..., alias="X-API-Key"),
-    db: Session = Depends(get_db)
-):
-    """
-    Activate an already-configured trading agent
-    
-    This endpoint is for users who have already setup their agent
-    and just want to turn it on manually.
-    
-    Requirements:
-    - User must have credentials_set = True
-    - User must have access_granted = True
-    
-    Called by: Dashboard "Start Agent" button
-    Auth: Requires user API key
-    """
-    
-    # Find user
-    user = db.query(User).filter(User.api_key == x_api_key).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    
-    # Check if agent is configured
-    if not user.credentials_set:
-        return {
-            "status": "error",
-            "message": "Agent not configured. Please complete setup first.",
-            "redirect": f"/setup?key={x_api_key}"
-        }
-    
-    # Check if access granted
-    if not user.access_granted:
-        return {
-            "status": "error",
-            "message": "Account suspended. Please contact support."
-        }
-    
-    try:
-        # Mark agent as active
-        user.agent_active = True
-        db.commit()
-        
-        logger.info(f"✅ Agent activated for user: {user.email}")
-        
-        return {
-            "status": "success",
-            "message": "Trading agent activated successfully",
-            "agent_status": "active",
-            "note": "Your agent is now following signals"
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Error activating agent: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to activate agent: {str(e)}")
-
-
-@router.post("/api/agent/deactivate")
-async def deactivate_agent(
-    x_api_key: str = Header(..., alias="X-API-Key"),
-    db: Session = Depends(get_db)
-):
-    """
-    Deactivate (pause) trading agent
-    
-    This will pause signal following without deleting credentials.
-    User can re-activate anytime.
-    
-    Called by: Dashboard "Stop Agent" button
-    Auth: Requires user API key
-    """
-    
-    # Find user
-    user = db.query(User).filter(User.api_key == x_api_key).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    
-    try:
-        # Mark agent as inactive
-        user.agent_active = False
-        db.commit()
-        
-        logger.info(f"⏸️ Agent deactivated for user: {user.email}")
-        
-        return {
-            "status": "success",
-            "message": "Trading agent deactivated",
-            "agent_status": "paused",
-            "note": "Your agent will no longer follow signals until re-activated"
-        }
-        
-    except Exception as e:
-        db.rollback()
-        logger.error(f"❌ Error deactivating agent: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to deactivate agent: {str(e)}")
 
 
 # ==================== PAYMENT ENDPOINTS ====================
@@ -1083,6 +918,219 @@ async def get_system_stats(
         },
         "updated_at": datetime.utcnow().isoformat()
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MONITORING ENDPOINTS - For agent heartbeats, errors, and event logging
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class HeartbeatRequest(BaseModel):
+    """Heartbeat from running agent"""
+    api_key: str
+    status: Optional[str] = "alive"
+    details: Optional[Dict] = None
+
+
+class ErrorLogRequest(BaseModel):
+    """Error report from agent"""
+    api_key: str
+    error_type: str
+    error_message: str
+    context: Optional[Dict] = None
+
+
+class AgentEventRequest(BaseModel):
+    """General agent event"""
+    api_key: str
+    event_type: str
+    event_data: Optional[Dict] = None
+
+
+@router.post("/api/heartbeat")
+async def receive_heartbeat(request: HeartbeatRequest):
+    """
+    Receive heartbeat from running trading agent.
+    
+    Called by: Trading agent every 60 seconds
+    Purpose: Let admin dashboard know agent is alive
+    
+    Status displayed in admin:
+    - 🟢 Active (heartbeat < 5 min ago)
+    - 🟠 Idle (heartbeat 5-60 min ago)
+    - 🟡 Ready (no recent heartbeat but configured)
+    """
+    try:
+        from admin_dashboard import log_agent_event
+        
+        log_agent_event(
+            api_key=request.api_key,
+            event_type="heartbeat",
+            event_data={
+                "status": request.status,
+                "timestamp": datetime.utcnow().isoformat(),
+                **(request.details or {})
+            }
+        )
+        
+        return {
+            "status": "ok",
+            "message": "Heartbeat received",
+            "server_time": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to log heartbeat: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/api/log-error")
+async def receive_error_log(request: ErrorLogRequest):
+    """
+    Receive error report from agent for troubleshooting.
+    
+    Common error_types:
+    - kraken_auth_failed: Kraken credentials invalid
+    - trade_failed: Trade execution failed
+    - api_error: Nike Rocket API communication error
+    - signal_expired: Signal too old to execute
+    - insufficient_balance: Not enough funds
+    """
+    try:
+        from admin_dashboard import log_error
+        
+        log_error(
+            api_key=request.api_key,
+            error_type=request.error_type,
+            error_message=request.error_message,
+            context=request.context
+        )
+        
+        logger.warning(f"⚠️ Error logged for {request.api_key[:15]}...: {request.error_type}")
+        
+        return {
+            "status": "ok",
+            "message": "Error logged",
+            "error_type": request.error_type
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to log error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.post("/api/log-event")
+async def receive_agent_event(request: AgentEventRequest):
+    """
+    Receive general agent event for monitoring.
+    
+    Common event_types:
+    - agent_start: Agent started running
+    - agent_stop: Agent stopped gracefully
+    - kraken_auth_success: Kraken credentials validated
+    - trade_executed: Trade was executed successfully
+    - signal_received: New signal received from API
+    """
+    try:
+        from admin_dashboard import log_agent_event
+        
+        log_agent_event(
+            api_key=request.api_key,
+            event_type=request.event_type,
+            event_data=request.event_data
+        )
+        
+        logger.info(f"📝 Event logged for {request.api_key[:15]}...: {request.event_type}")
+        
+        return {
+            "status": "ok",
+            "message": "Event logged",
+            "event_type": request.event_type
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to log event: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/api/agent-logs")
+async def get_agent_logs(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    limit: int = 50
+):
+    """Get recent agent logs for a specific user."""
+    try:
+        import psycopg2
+        DATABASE_URL = os.getenv("DATABASE_URL")
+        
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT timestamp, event_type, event_data
+            FROM agent_logs
+            WHERE api_key = %s
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (x_api_key, limit))
+        
+        logs = []
+        for row in cur.fetchall():
+            logs.append({
+                "timestamp": row[0].isoformat() if row[0] else None,
+                "event_type": row[1],
+                "event_data": row[2]
+            })
+        
+        cur.close()
+        conn.close()
+        
+        return {"status": "success", "logs": logs, "count": len(logs)}
+        
+    except Exception as e:
+        logger.error(f"Failed to get agent logs: {e}")
+        return {"status": "error", "message": str(e), "logs": []}
+
+
+@router.get("/api/my-errors")
+async def get_my_errors(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    hours: int = 24,
+    limit: int = 20
+):
+    """Get recent errors for a specific user."""
+    try:
+        import psycopg2
+        DATABASE_URL = os.getenv("DATABASE_URL")
+        
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT timestamp, error_type, error_message, context
+            FROM error_logs
+            WHERE api_key = %s
+            AND timestamp > NOW() - INTERVAL '%s hours'
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (x_api_key, hours, limit))
+        
+        errors = []
+        for row in cur.fetchall():
+            errors.append({
+                "timestamp": row[0].isoformat() if row[0] else None,
+                "error_type": row[1],
+                "error_message": row[2],
+                "context": row[3]
+            })
+        
+        cur.close()
+        conn.close()
+        
+        return {"status": "success", "errors": errors, "count": len(errors)}
+        
+    except Exception as e:
+        logger.error(f"Failed to get errors: {e}")
+        return {"status": "error", "message": str(e), "errors": []}
 
 
 # Export router
