@@ -418,7 +418,7 @@ class HostedTradingLoop:
                         entry_order['id'],
                         tp_order['id'],
                         sl_order['id'],
-                        symbol,  # BTC/USDT format
+                        signal['symbol'],  # BTC/USDT format
                         kraken_symbol,  # PF_XBTUSD format
                         action.upper(),  # BUY or SELL
                         quantity,
