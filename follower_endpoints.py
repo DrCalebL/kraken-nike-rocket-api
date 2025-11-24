@@ -692,6 +692,9 @@ async def stop_agent(
     
     Called by: User dashboard when they want to pause trading
     Auth: Requires user API key
+    
+    NOTE: This only pauses the agent - credentials are preserved
+    so users can easily restart without re-entering API keys.
     """
     
     # Find user
@@ -699,22 +702,21 @@ async def stop_agent(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid API key")
     
-    # Mark agent as inactive
+    # Mark agent as inactive (but keep credentials!)
     user.agent_active = False
     
-    # Clear credentials (for security)
-    user.kraken_api_key_encrypted = None
-    user.kraken_api_secret_encrypted = None
-    user.credentials_set = False
+    # DON'T clear credentials - user can restart easily
+    # If user wants full reset, they can go through setup again
     
     db.commit()
     
-    logger.info(f"🛑 Agent stopped for user: {user.email}")
+    logger.info(f"⏸️ Agent paused for user: {user.email}")
     
     return {
         "status": "success",
-        "message": "Trading agent stopped",
-        "agent_active": False
+        "message": "Trading agent paused",
+        "agent_active": False,
+        "agent_configured": user.credentials_set  # Still configured!
     }
 
 
