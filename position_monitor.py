@@ -157,9 +157,9 @@ class PositionMonitor:
         """Record completed trade in database"""
         try:
             # Calculate P&L
-            entry_price = position['entry_fill_price']
-            quantity = position['quantity']
-            side = position['side']
+            entry_price = float(position['entry_fill_price'])
+            quantity = float(position['quantity'])
+            side = str(position['side'])
             
             # P&L calculation
             if side == 'BUY':
@@ -179,26 +179,28 @@ class PositionMonitor:
             
             async with self.db_pool.acquire() as conn:
                 # Insert trade record
+                # Note: signal_id in trades table might be nullable, handle None case
+                signal_id = position.get('signal_id')
+                
                 await conn.execute("""
                     INSERT INTO trades 
-                    (user_id, signal_id, trade_id, kraken_order_id,
+                    (user_id, trade_id, kraken_order_id,
                      opened_at, closed_at, symbol, side,
                      entry_price, exit_price, position_size, leverage,
                      profit_usd, profit_percent, fee_charged, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 """,
-                    position['user_id'],
-                    position['signal_id'],
+                    int(position['user_id']),
                     trade_id,
-                    position['entry_order_id'],
+                    str(position['entry_order_id']),
                     position['opened_at'],
                     closed_at,
-                    position['symbol'],
+                    str(position['symbol']),
                     side,
                     entry_price,
                     exit_price,
                     quantity,
-                    position['leverage'],
+                    float(position['leverage']),
                     profit_usd,
                     profit_percent,
                     fee_charged,
