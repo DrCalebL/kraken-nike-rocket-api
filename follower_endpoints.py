@@ -14,6 +14,7 @@ Endpoints:
 - POST /api/setup-agent - Setup hosted trading agent (NEW!)
 - GET /api/agent-status - Get agent status (NEW!)
 - POST /api/stop-agent - Stop trading agent (NEW!)
+- POST /api/start-agent - Start/resume trading agent (NEW!)
 - POST /api/payments/create - Create payment link
 - POST /api/payments/webhook - Coinbase Commerce webhook
 
@@ -717,6 +718,50 @@ async def stop_agent(
         "message": "Trading agent paused",
         "agent_active": False,
         "agent_configured": user.credentials_set  # Still configured!
+    }
+
+
+@router.post("/api/start-agent")
+async def start_agent(
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Start/resume customer's trading agent
+    
+    Called by: User dashboard when they want to start/resume trading
+    Auth: Requires user API key
+    
+    NOTE: Agent must already be configured with credentials.
+    If not configured, directs user to /setup page.
+    """
+    
+    # Find user
+    user = db.query(User).filter(User.api_key == x_api_key).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Check if credentials are set
+    if not user.credentials_set:
+        return {
+            "status": "error",
+            "message": "Agent not configured. Please set up your Kraken credentials first.",
+            "redirect": f"/setup?key={x_api_key}"
+        }
+    
+    # Activate agent
+    user.agent_active = True
+    user.agent_started_at = datetime.utcnow()
+    
+    db.commit()
+    
+    logger.info(f"▶️ Agent started for user: {user.email}")
+    
+    return {
+        "status": "success",
+        "message": "Trading agent started",
+        "agent_active": True,
+        "agent_configured": True
     }
 
 
