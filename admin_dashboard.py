@@ -112,66 +112,50 @@ def create_error_logs_table():
 
 
 def get_all_users_with_status() -> List[Dict]:
-    """Get all users - SCHEMA AGNOSTIC"""
+    """Get all users from follower_users table with portfolio data"""
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Check if users table exists
-    if not table_exists('users'):
+    # Check if follower_users table exists
+    if not table_exists('follower_users'):
         cur.close()
         conn.close()
         return []
     
-    # Get users table columns
-    user_columns = get_table_columns('users')
-    
-    # Find the API key column (could be 'api_key', 'user_api_key', etc.)
-    api_key_col = None
-    for col in user_columns:
-        if 'api' in col.lower() and 'key' in col.lower():
-            api_key_col = col
-            break
-    
-    if not api_key_col:
-        api_key_col = 'api_key'  # Default guess
-    
-    # Find email column
-    email_col = 'email' if 'email' in user_columns else user_columns[0]
-    
     try:
-        # Get all users
-        cur.execute(f"SELECT {email_col}, {api_key_col} FROM users ORDER BY id DESC")
+        # Get all users from follower_users with portfolio data
+        cur.execute("""
+            SELECT 
+                fu.email,
+                fu.api_key,
+                fu.credentials_set,
+                fu.agent_active,
+                fu.total_profit,
+                fu.total_trades,
+                fu.created_at,
+                COALESCE(pu.initial_capital, 0) as initial_capital,
+                COALESCE(pu.last_known_balance, 0) as current_balance
+            FROM follower_users fu
+            LEFT JOIN portfolio_users pu ON fu.api_key = pu.api_key
+            ORDER BY fu.id DESC
+        """)
         
         users = []
         for row in cur.fetchall():
-            email, api_key = row
+            email, api_key, credentials_set, agent_active, total_profit, total_trades, created_at, initial_capital, current_balance = row
             
-            # Get agent status (if agent_logs exists)
-            status = {'status': 'pending', 'status_text': 'Setup Pending', 'emoji': '⏳', 'detail': 'Waiting'}
-            if table_exists('agent_logs'):
-                cur.execute("""
-                    SELECT timestamp FROM agent_logs 
-                    WHERE api_key = %s AND event_type = 'heartbeat'
-                    ORDER BY timestamp DESC LIMIT 1
-                """, (api_key,))
-                heartbeat = cur.fetchone()
-                
-                if heartbeat:
-                    time_diff = (datetime.utcnow() - heartbeat[0]).seconds
-                    if time_diff < 300:  # 5 minutes
-                        status = {'status': 'active', 'status_text': 'Active', 'emoji': '🟢', 'detail': 'Running'}
+            # Determine status
+            if agent_active:
+                status = {'status': 'active', 'status_text': 'Active', 'emoji': '🟢'}
+            elif credentials_set:
+                status = {'status': 'configured', 'status_text': 'Ready', 'emoji': '🟡'}
+            else:
+                status = {'status': 'pending', 'status_text': 'Pending', 'emoji': '⏳'}
             
-            # Get trade stats (if trades table exists)
-            total_trades = 0
-            total_profit = 0.0
-            if table_exists('trades'):
-                try:
-                    cur.execute("SELECT COUNT(*), COALESCE(SUM(profit), 0) FROM trades WHERE api_key = %s", (api_key,))
-                    trade_row = cur.fetchone()
-                    total_trades = trade_row[0] if trade_row else 0
-                    total_profit = float(trade_row[1]) if trade_row else 0.0
-                except:
-                    pass
+            # Calculate ROI
+            capital = float(initial_capital) if initial_capital else 0
+            profit = float(total_profit) if total_profit else 0
+            roi = (profit / capital * 100) if capital > 0 else 0
             
             # Get error count
             recent_errors = 0
@@ -191,12 +175,13 @@ def get_all_users_with_status() -> List[Dict]:
                 'agent_status': status['status'],
                 'status_text': status['status_text'],
                 'status_emoji': status['emoji'],
-                'status_detail': status['detail'],
-                'total_trades': total_trades,
-                'last_trade_str': 'Never',
-                'total_profit': total_profit,
+                'total_trades': total_trades or 0,
+                'total_profit': profit,
+                'capital': capital,
+                'current_balance': float(current_balance) if current_balance else 0,
+                'roi': roi,
                 'recent_errors': recent_errors,
-                'created_at': datetime.utcnow()
+                'created_at': created_at
             })
         
         cur.close()
@@ -243,57 +228,67 @@ def get_recent_errors(hours: int = 24) -> List[Dict]:
 
 
 def get_stats_summary() -> Dict:
-    """Get summary statistics"""
+    """Get summary statistics from follower_users and portfolio_users"""
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Count users
+    # Count users from follower_users
     total_users = 0
-    if table_exists('users'):
-        try:
-            cur.execute("SELECT COUNT(*) FROM users")
-            total_users = cur.fetchone()[0]
-        except:
-            pass
-    
-    # Count active agents
+    configured_users = 0
     active_now = 0
-    setup_completed = 0
-    if table_exists('agent_logs'):
+    total_profit = 0.0
+    total_trades = 0
+    
+    if table_exists('follower_users'):
         try:
-            cur.execute("""
-                SELECT COUNT(DISTINCT api_key) FROM agent_logs 
-                WHERE event_type = 'heartbeat' 
-                AND timestamp > NOW() - INTERVAL '5 minutes'
-            """)
+            cur.execute("SELECT COUNT(*) FROM follower_users")
+            total_users = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) FROM follower_users WHERE credentials_set = true")
+            configured_users = cur.fetchone()[0]
+            
+            cur.execute("SELECT COUNT(*) FROM follower_users WHERE agent_active = true")
             active_now = cur.fetchone()[0]
             
-            cur.execute("""
-                SELECT COUNT(DISTINCT api_key) FROM agent_logs 
-                WHERE event_type = 'kraken_auth_success'
-            """)
-            setup_completed = cur.fetchone()[0]
-        except:
-            pass
-    
-    # Count trades
-    total_trades = 0
-    total_profit = 0.0
-    if table_exists('trades'):
-        try:
-            cur.execute("SELECT COUNT(*), COALESCE(SUM(profit), 0) FROM trades")
+            cur.execute("SELECT COALESCE(SUM(total_profit), 0), COALESCE(SUM(total_trades), 0) FROM follower_users")
             row = cur.fetchone()
-            total_trades = row[0] if row else 0
-            total_profit = float(row[1]) if row else 0.0
-        except:
-            pass
+            total_profit = float(row[0]) if row else 0.0
+            total_trades = int(row[1]) if row else 0
+        except Exception as e:
+            print(f"Error getting follower_users stats: {e}")
     
-    # Count errors
-    recent_errors = 0
+    # Get platform capital from portfolio_users
+    platform_capital = 0.0
+    current_value = 0.0
+    if table_exists('portfolio_users'):
+        try:
+            cur.execute("""
+                SELECT 
+                    COALESCE(SUM(initial_capital), 0),
+                    COALESCE(SUM(last_known_balance), 0)
+                FROM portfolio_users
+            """)
+            row = cur.fetchone()
+            platform_capital = float(row[0]) if row else 0.0
+            current_value = float(row[1]) if row else 0.0
+        except Exception as e:
+            print(f"Error getting portfolio stats: {e}")
+    
+    # Calculate platform ROI
+    platform_roi = ((current_value - platform_capital) / platform_capital * 100) if platform_capital > 0 else 0.0
+    
+    # Active percentage
+    active_percent = (active_now / configured_users * 100) if configured_users > 0 else 0.0
+    
+    # Average profit per user
+    avg_profit = total_profit / total_users if total_users > 0 else 0.0
+    
+    # Count recent errors
+    errors_1h = 0
     if table_exists('error_logs'):
         try:
             cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '1 hour'")
-            recent_errors = cur.fetchone()[0]
+            errors_1h = cur.fetchone()[0]
         except:
             pass
     
@@ -302,15 +297,16 @@ def get_stats_summary() -> Dict:
     
     return {
         'total_users': total_users,
-        'setup_completed': setup_completed,
-        'setup_pending': total_users - setup_completed,
-        'setup_rate': f"{(setup_completed/total_users*100) if total_users > 0 else 0:.1f}%",
-        'total_trades': total_trades,
+        'configured_users': configured_users,
         'active_now': active_now,
-        'active_rate': f"{(active_now/setup_completed*100) if setup_completed > 0 else 0:.1f}%",
+        'active_percent': active_percent,
+        'total_trades': total_trades,
         'total_profit': total_profit,
-        'avg_profit_per_user': total_profit / setup_completed if setup_completed > 0 else 0.0,
-        'recent_errors': recent_errors
+        'avg_profit': avg_profit,
+        'platform_capital': platform_capital,
+        'current_value': current_value,
+        'platform_roi': platform_roi,
+        'errors_1h': errors_1h
     }
 
 
