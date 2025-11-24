@@ -2058,17 +2058,21 @@ async def portfolio_dashboard(request: Request):
             
             const profit = profitElement.textContent;
             const roi = roiElement.textContent;
-            const period = '30d'; // Default to 30 days for portfolio
+            
+            // Get the ACTUAL selected period from dropdown
+            const periodSelector = document.getElementById('period-selector');
+            const period = periodSelector ? periodSelector.value : '30d';
             
             const periodLabels = {{
                 '7d': '7 days',
                 '30d': '30 days',
                 '90d': '90 days',
+                '1y': '1 year',
                 'all': 'all-time'
             }};
             
             // Prepare Twitter URL BEFORE generating image
-            const text = `$NIKEPIG's Massive Rocket ${{periodLabels[period]}} Performance Card
+            const text = `$NIKEPIG's Massive Rocket ${{periodLabels[period] || period}} Performance Card
 
 Profit: ${{profit}}
 ROI: ${{roi}}`;
