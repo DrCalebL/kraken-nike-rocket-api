@@ -340,7 +340,10 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         elif period == "90d":
             start_date = now - timedelta(days=90)
             period_label = "Last 90 Days"
-        else:
+        elif period == "1y":
+            start_date = now - timedelta(days=365)
+            period_label = "Last 1 Year"
+        else:  # "all" or any other value
             start_date = datetime(2020, 1, 1)
             period_label = "All Time"
         
