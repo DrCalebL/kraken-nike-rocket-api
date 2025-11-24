@@ -176,6 +176,46 @@ class SignalDelivery(Base):
     user = relationship("User", back_populates="signal_deliveries")
 
 
+class OpenPosition(Base):
+    """
+    Tracks open positions waiting for TP or SL to fill.
+    Used by position monitor to calculate actual P&L.
+    """
+    __tablename__ = "open_positions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("follower_users.id"), nullable=False)
+    signal_id = Column(Integer, ForeignKey("signals.id"), nullable=True)
+    
+    # Kraken order IDs for tracking
+    entry_order_id = Column(String, nullable=False)
+    tp_order_id = Column(String, nullable=True)
+    sl_order_id = Column(String, nullable=True)
+    
+    # Position details
+    symbol = Column(String, nullable=False)  # BTC/USDT format
+    kraken_symbol = Column(String, nullable=False)  # PF_XBTUSD format
+    side = Column(String, nullable=False)  # BUY or SELL
+    quantity = Column(Float, nullable=False)
+    leverage = Column(Float, default=1.0)
+    
+    # Actual fill price from Kraken (may differ from signal due to slippage)
+    entry_fill_price = Column(Float, nullable=True)
+    
+    # Target prices from signal
+    target_tp = Column(Float, nullable=False)
+    target_sl = Column(Float, nullable=False)
+    
+    # Timing
+    opened_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Status
+    status = Column(String, default='open')  # open, closed, error
+    
+    # Relationships
+    user = relationship("User")
+
+
 class Trade(Base):
     """Completed trade record"""
     __tablename__ = "trades"
@@ -284,7 +324,7 @@ def init_db(engine):
     
     required_tables = [
         'follower_users', 'signals', 'signal_deliveries', 
-        'trades', 'payments', 'system_stats'
+        'trades', 'payments', 'system_stats', 'open_positions'
     ]
     
     missing = [t for t in required_tables if t not in tables]
@@ -296,6 +336,6 @@ def init_db(engine):
 
 # Export everything
 __all__ = [
-    'Base', 'User', 'Signal', 'SignalDelivery', 'Trade', 
+    'Base', 'User', 'Signal', 'SignalDelivery', 'OpenPosition', 'Trade', 
     'Payment', 'SystemStats', 'get_db_session', 'init_db'
 ]
