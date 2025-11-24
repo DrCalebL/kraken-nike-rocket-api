@@ -1130,6 +1130,7 @@ async def portfolio_dashboard(request: Request):
                         <option value="7d">Last 7 Days</option>
                         <option value="30d" selected>Last 30 Days</option>
                         <option value="90d">Last 90 Days</option>
+                        <option value="1y">Last 1 Year</option>
                         <option value="all">All-Time</option>
                     </select>
                 </div>
@@ -1300,8 +1301,8 @@ async def portfolio_dashboard(request: Request):
                 </div>
                 
                 <div class="stat-card">
-                    <div class="stat-label">Avg Monthly Profit</div>
-                    <div class="stat-value" id="monthly-avg">$0</div>
+                    <div class="stat-label">Avg Trade</div>
+                    <div class="stat-value" id="avg-trade">$0</div>
                 </div>
                 
                 <div class="stat-card">
@@ -1662,17 +1663,39 @@ async def portfolio_dashboard(request: Request):
         
         function updateDashboard(stats) {{
             document.getElementById('profit-label').textContent = `${{stats.period}} Profit`;
-            document.getElementById('total-profit').textContent = `$${{stats.total_profit.toLocaleString()}}`;
             
-            // Update both ROI displays
+            // Handle negative total profit
+            const totalProfit = stats.total_profit || 0;
+            document.getElementById('total-profit').textContent = 
+                totalProfit >= 0 
+                    ? `+$${{totalProfit.toLocaleString()}}` 
+                    : `-$${{Math.abs(totalProfit).toLocaleString()}}`;
+            document.getElementById('total-profit').style.color = totalProfit >= 0 ? '#10b981' : '#ef4444';
+            
+            // Handle negative ROI values
             const roiInitial = stats.roi_on_initial || 0;
             const roiTotal = stats.roi_on_total || roiInitial;
-            document.getElementById('roi-initial').textContent = `+${{roiInitial}}%`;
-            document.getElementById('roi-total').textContent = `+${{roiTotal}}%`;
+            document.getElementById('roi-initial').textContent = 
+                roiInitial >= 0 ? `+${{roiInitial.toFixed(1)}}%` : `${{roiInitial.toFixed(1)}}%`;
+            document.getElementById('roi-initial').style.color = roiInitial >= 0 ? '#10b981' : '#ef4444';
+            document.getElementById('roi-total').textContent = 
+                roiTotal >= 0 ? `+${{roiTotal.toFixed(1)}}%` : `${{roiTotal.toFixed(1)}}%`;
+            document.getElementById('roi-total').style.color = roiTotal >= 0 ? '#10b981' : '#ef4444';
             
             document.getElementById('profit-factor').textContent = `${{stats.profit_factor}}x`;
-            document.getElementById('best-trade').textContent = `$${{stats.best_trade.toLocaleString()}}`;
-            document.getElementById('monthly-avg').textContent = `$${{stats.avg_monthly_profit.toLocaleString()}}`;
+            
+            // Handle negative best trade (worst "best" trade)
+            const bestTrade = stats.best_trade || 0;
+            document.getElementById('best-trade').textContent = 
+                bestTrade >= 0 ? `+$${{bestTrade.toLocaleString()}}` : `-$${{Math.abs(bestTrade).toLocaleString()}}`;
+            document.getElementById('best-trade').style.color = bestTrade >= 0 ? '#10b981' : '#ef4444';
+            
+            // Handle negative avg trade
+            const avgTrade = stats.avg_trade || 0;
+            document.getElementById('avg-trade').textContent = 
+                avgTrade >= 0 ? `+$${{avgTrade.toLocaleString()}}` : `-$${{Math.abs(avgTrade).toLocaleString()}}`;
+            document.getElementById('avg-trade').style.color = avgTrade >= 0 ? '#10b981' : '#ef4444';
+            
             document.getElementById('total-trades').textContent = stats.total_trades;
             document.getElementById('max-dd').textContent = `-${{stats.max_drawdown}}%`;
             document.getElementById('dd-recovery').textContent = `+${{stats.recovery_from_dd.toFixed(0)}}% recovered`;
@@ -1704,8 +1727,15 @@ async def portfolio_dashboard(request: Request):
                         data.net_deposits >= 0 
                             ? `+$${{data.net_deposits.toLocaleString()}}`
                             : `-$${{Math.abs(data.net_deposits).toLocaleString()}}`;
-                    document.getElementById('total-profit-overview').textContent = 
-                        `+$${{data.total_profit.toLocaleString()}}`;
+                    
+                    // Handle negative total profit with color
+                    const totalProfit = data.total_profit || 0;
+                    const profitEl = document.getElementById('total-profit-overview');
+                    profitEl.textContent = totalProfit >= 0 
+                        ? `+$${{totalProfit.toLocaleString()}}` 
+                        : `-$${{Math.abs(totalProfit).toLocaleString()}}`;
+                    profitEl.style.color = totalProfit >= 0 ? '#10b981' : '#ef4444';
+                    
                     document.getElementById('total-deposits').textContent = 
                         `+$${{data.total_deposits.toLocaleString()}}`;
                     document.getElementById('total-withdrawals').textContent = 
@@ -1715,11 +1745,21 @@ async def portfolio_dashboard(request: Request):
                     document.getElementById('total-capital').textContent = 
                         `$${{data.total_capital.toLocaleString()}}`;
                     
-                    // Update ROI displays
-                    document.getElementById('roi-initial').textContent = 
-                        `+${{data.roi_on_initial.toFixed(1)}}%`;
-                    document.getElementById('roi-total').textContent = 
-                        `+${{data.roi_on_total.toFixed(1)}}%`;
+                    // Handle negative ROI with colors
+                    const roiInitial = data.roi_on_initial || 0;
+                    const roiTotal = data.roi_on_total || 0;
+                    
+                    const roiInitialEl = document.getElementById('roi-initial');
+                    roiInitialEl.textContent = roiInitial >= 0 
+                        ? `+${{roiInitial.toFixed(1)}}%` 
+                        : `${{roiInitial.toFixed(1)}}%`;
+                    roiInitialEl.style.color = roiInitial >= 0 ? '#10b981' : '#ef4444';
+                    
+                    const roiTotalEl = document.getElementById('roi-total');
+                    roiTotalEl.textContent = roiTotal >= 0 
+                        ? `+${{roiTotal.toFixed(1)}}%` 
+                        : `${{roiTotal.toFixed(1)}}%`;
+                    roiTotalEl.style.color = roiTotal >= 0 ? '#10b981' : '#ef4444';
                     
                     // Update last check time
                     if (data.last_balance_check) {{
