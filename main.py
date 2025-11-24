@@ -186,9 +186,18 @@ async def admin_dashboard(password: str = ""):
                         margin-top: 15px;
                         width: 100%;
                         font-size: 14px;
+                        transition: all 0.1s ease;
+                        transform: translateY(0);
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
                     }}
                     button:hover {{
                         background: #5568d3;
+                        transform: translateY(-1px);
+                        box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+                    }}
+                    button:active {{
+                        transform: translateY(2px);
+                        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
                     }}
                     .error {{
                         color: #ef4444;
@@ -500,11 +509,16 @@ async def login_page():
                         font-size: 16px;
                         font-weight: 600;
                         cursor: pointer;
-                        transition: transform 0.2s, box-shadow 0.2s;
+                        transition: transform 0.1s, box-shadow 0.1s;
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
                     }
                     .button:hover {
                         transform: translateY(-2px);
-                        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+                        box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4);
+                    }
+                    .button:active {
+                        transform: translateY(2px);
+                        box-shadow: 0 2px 4px rgba(102, 126, 234, 0.2);
                     }
                     .help-box {
                         background: #f9fafb;
@@ -678,16 +692,27 @@ async def portfolio_dashboard(request: Request):
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.1s ease;
+            transform: translateY(0);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }}
         
         .btn:hover {{
             background: #5568d3;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15);
+        }}
+        
+        .btn:active {{
+            transform: translateY(2px);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }}
         
         .btn:disabled {{
             background: #9ca3af;
             cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }}
         
         /* Setup Wizard */
@@ -823,12 +848,18 @@ async def portfolio_dashboard(request: Request):
             border-radius: 8px;
             cursor: pointer;
             font-weight: 600;
+            transition: all 0.1s ease;
+            transform: translateY(0);
         }}
         
+        .logout-btn:hover {{
+            background: rgba(255,255,255,0.3);
+            transform: translateY(-1px);
+        }}
         
-        /* ═══════════════════════════════════════════════════════════════ */
-        /* Agent Status Monitoring Styles */
-        /* ═══════════════════════════════════════════════════════════════ */
+        .logout-btn:active {{
+            transform: translateY(2px);
+        }}
         .agent-status-container {{
             margin: 20px 0;
             padding: 0;
@@ -889,8 +920,27 @@ async def portfolio_dashboard(request: Request):
             opacity: 0.8;
         }}
         
-        .logout-btn:hover {{
-            background: rgba(255,255,255,0.3);
+        /* ═══════════════════════════════════════════════════════════════ */
+        /* Agent Status Monitoring Styles */
+        /* ═══════════════════════════════════════════════════════════════ */
+        
+        /* Global Tactile Button Effect - applies to ALL buttons */
+        button, .tactile-btn {{
+            transition: all 0.1s ease !important;
+            transform: translateY(0);
+        }}
+        
+        button:hover, .tactile-btn:hover {{
+            transform: translateY(-1px);
+        }}
+        
+        button:active, .tactile-btn:active {{
+            transform: translateY(3px) !important;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1) !important;
+        }}
+        
+        button:disabled {{
+            transform: none !important;
         }}
     </style>
 </head>
@@ -1039,8 +1089,9 @@ async def portfolio_dashboard(request: Request):
                             border-radius: 8px;
                             font-weight: 600;
                             cursor: pointer;
-                            transition: all 0.2s;
+                            transition: all 0.1s ease;
                             display: none;
+                            box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
                         ">
                             ▶️ Start Agent
                         </button>
@@ -1053,23 +1104,11 @@ async def portfolio_dashboard(request: Request):
                             border-radius: 8px;
                             font-weight: 600;
                             cursor: pointer;
-                            transition: all 0.2s;
+                            transition: all 0.1s ease;
                             display: none;
+                            box-shadow: 0 4px 6px rgba(239, 68, 68, 0.3);
                         ">
                             ⏸️ Stop Agent
-                        </button>
-                        
-                        <button onclick="checkAgentStatus()" style="
-                            padding: 12px 20px;
-                            background: #667eea;
-                            color: white;
-                            border: none;
-                            border-radius: 8px;
-                            font-weight: 600;
-                            cursor: pointer;
-                            transition: all 0.2s;
-                        ">
-                            🔄 Refresh
                         </button>
                     </div>
                 </div>
@@ -1114,6 +1153,7 @@ async def portfolio_dashboard(request: Request):
                             align-items: center;
                             gap: 8px;
                             box-shadow: 0 4px 12px rgba(29, 161, 242, 0.3);
+                            transition: all 0.1s ease;
                         ">
                             <span>𝕏</span> Share to X (+ Download Image)
                         </button>
@@ -1131,6 +1171,7 @@ async def portfolio_dashboard(request: Request):
                             align-items: center;
                             gap: 8px;
                             box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+                            transition: all 0.1s ease;
                         ">
                             <span>📸</span> Download Image
                         </button>
@@ -1226,6 +1267,8 @@ async def portfolio_dashboard(request: Request):
                             font-weight: 600;
                             cursor: pointer;
                             font-size: 14px;
+                            box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+                            transition: all 0.1s ease;
                         ">
                             ✅ Download Image
                         </button>
@@ -1302,6 +1345,8 @@ async def portfolio_dashboard(request: Request):
                         border-radius: 6px;
                         cursor: pointer;
                         font-size: 14px;
+                        box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
+                        transition: all 0.1s ease;
                     ">
                         🔄 Refresh
                     </button>
@@ -2141,6 +2186,7 @@ ROI: ${{roi}}`;
         
         async function startAgent() {{
             const startBtn = document.getElementById('start-agent-btn');
+            const stopBtn = document.getElementById('stop-agent-btn');
             startBtn.disabled = true;
             startBtn.textContent = '⏳ Starting...';
             
@@ -2163,11 +2209,19 @@ ROI: ${{roi}}`;
                     messageEl.style.color = '#065f46';
                     messageEl.textContent = '✅ Agent activated successfully!';
                     
-                    // Refresh status after 2 seconds
+                    // Reset start button state BEFORE hiding it
+                    startBtn.disabled = false;
+                    startBtn.textContent = '▶️ Start Agent';
+                    
+                    // Ensure stop button is in correct state
+                    stopBtn.disabled = false;
+                    stopBtn.textContent = '⏸️ Stop Agent';
+                    
+                    // Refresh status after 1 second (shorter delay)
                     setTimeout(() => {{
                         checkAgentStatus();
                         messageEl.style.display = 'none';
-                    }}, 2000);
+                    }}, 1000);
                 }} else if (data.status === 'error') {{
                     messageEl.style.display = 'block';
                     messageEl.style.background = '#fee2e2';
@@ -2207,6 +2261,7 @@ ROI: ${{roi}}`;
         
         async function stopAgent() {{
             const stopBtn = document.getElementById('stop-agent-btn');
+            const startBtn = document.getElementById('start-agent-btn');
             stopBtn.disabled = true;
             stopBtn.textContent = '⏳ Stopping...';
             
@@ -2229,11 +2284,19 @@ ROI: ${{roi}}`;
                     messageEl.style.color = '#065f46';
                     messageEl.textContent = '✅ Agent deactivated successfully!';
                     
-                    // Refresh status after 2 seconds
+                    // Reset stop button state BEFORE hiding it
+                    stopBtn.disabled = false;
+                    stopBtn.textContent = '⏸️ Stop Agent';
+                    
+                    // Ensure start button is in correct state
+                    startBtn.disabled = false;
+                    startBtn.textContent = '▶️ Start Agent';
+                    
+                    // Refresh status after 1 second (shorter delay)
                     setTimeout(() => {{
                         checkAgentStatus();
                         messageEl.style.display = 'none';
-                    }}, 2000);
+                    }}, 1000);
                 }} else {{
                     messageEl.style.display = 'block';
                     messageEl.style.background = '#fee2e2';
