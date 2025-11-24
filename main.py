@@ -7,7 +7,7 @@ Includes automatic deposit/withdrawal detection via balance_checker.
 FIXED VERSION with startup_delay_seconds=30 to prevent race condition.
 
 Author: Nike Rocket Team
-Updated: November 23, 2025 - COMPLETE VERSION
+Updated: November 24, 2025 - WITH HOSTED TRADING
 """
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +38,9 @@ from admin_dashboard import (
     create_error_logs_table,
     ADMIN_PASSWORD
 )
+
+# Import hosted trading loop for automatic signal execution
+from hosted_trading_loop import start_hosted_trading
 
 # Initialize FastAPI
 app = FastAPI(
@@ -78,7 +81,7 @@ async def root():
     return {
         "status": "online",
         "service": "$NIKEPIG's Massive Rocket API",
-        "version": "1.0.1",
+        "version": "1.0.2",
         "endpoints": {
             "signup": "/signup",
             "login": "/login",
@@ -2653,8 +2656,15 @@ async def startup_event():
             asyncio.create_task(scheduler.start())
             print("⏳ Balance checker scheduled (starts in 30 seconds)")
             
+            # ═══════════════════════════════════════════════════════════
+            # HOSTED TRADING LOOP: Executes trades for all active users
+            # Polls signals and places orders on Kraken Futures
+            # ═══════════════════════════════════════════════════════════
+            asyncio.create_task(start_hosted_trading(db_pool))
+            print("🤖 Hosted trading loop scheduled (starts in 35 seconds)")
+            
         except Exception as e:
-            print(f"⚠️ Balance checker failed to start: {e}")
+            print(f"⚠️ Background tasks failed to start: {e}")
     
     print("=" * 60)
 
