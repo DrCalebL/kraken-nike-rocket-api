@@ -116,15 +116,17 @@ class PositionMonitor:
         # Kraken Futures doesn't support fetchOrder, use check_position_closed instead
         return {'status': 'unknown', 'error': 'Use check_position_closed instead'}
     
-    async def check_position_closed(self, exchange: ccxt.krakenfutures, kraken_symbol: str, side: str, quantity: float) -> Dict[str, Any]:
+    async def check_position_closed(self, exchange: ccxt.krakenfutures, kraken_symbol: str, side: str, quantity: float, tp_order_id: str, sl_order_id: str) -> Dict[str, Any]:
         """
         Check if position is still open on Kraken.
+        Uses multiple verification methods to avoid false positives.
         
         Returns:
             - {'closed': False} if position still exists
-            - {'closed': True, 'exit_price': price} if position closed
+            - {'closed': True, 'exit_price': price, 'exit_type': 'TP'/'SL'} if position closed
         """
         try:
+            # Method 1: Check open positions
             positions = exchange.fetch_positions([kraken_symbol])
             
             for pos in positions:
@@ -135,19 +137,53 @@ class PositionMonitor:
                         # Position still open
                         return {'closed': False, 'current_size': contracts}
             
-            # No position found = closed
-            # Try to get exit price from recent trades
+            # No position found - verify by checking if TP or SL filled
+            # Check open orders - if both TP and SL still exist, position wasn't closed
+            try:
+                open_orders = exchange.fetch_open_orders(kraken_symbol)
+                tp_exists = any(o['id'] == tp_order_id for o in open_orders)
+                sl_exists = any(o['id'] == sl_order_id for o in open_orders)
+                
+                if tp_exists and sl_exists:
+                    # Both orders still exist but no position? Weird - keep monitoring
+                    self.logger.warning(f"⚠️ No position but both TP/SL orders exist for {kraken_symbol}")
+                    return {'closed': False, 'anomaly': True}
+                
+                # One order filled - determine which one
+                if not tp_exists and sl_exists:
+                    # TP filled, position closed
+                    exit_type = 'TP'
+                elif tp_exists and not sl_exists:
+                    # SL filled, position closed
+                    exit_type = 'SL'
+                else:
+                    # Both canceled? Might be manual close
+                    self.logger.warning(f"⚠️ Both TP/SL canceled for {kraken_symbol} - manual close?")
+                    return {'closed': False, 'manual_close': True}
+                
+            except Exception as e:
+                self.logger.warning(f"Could not check open orders: {e}")
+                # Fall back to position check only
+                exit_type = 'UNKNOWN'
+            
+            # Get exit price from recent trades
             exit_price = None
             try:
-                trades = exchange.fetch_my_trades(kraken_symbol, limit=10)
+                trades = exchange.fetch_my_trades(kraken_symbol, limit=20)
                 if trades:
-                    # Get most recent trade (the exit)
-                    latest = trades[-1]
-                    exit_price = float(latest.get('price', 0))
+                    # Find the closing trade (opposite side of entry)
+                    entry_side = side  # 'BUY' or 'SELL'
+                    exit_side = 'SELL' if entry_side == 'BUY' else 'BUY'
+                    
+                    # Get most recent exit trade
+                    exit_trades = [t for t in trades if t.get('side', '').upper() == exit_side]
+                    if exit_trades:
+                        latest = exit_trades[-1]
+                        exit_price = float(latest.get('price', 0))
             except Exception as e:
                 self.logger.warning(f"Could not fetch trades for exit price: {e}")
             
-            return {'closed': True, 'exit_price': exit_price}
+            return {'closed': True, 'exit_price': exit_price, 'exit_type': exit_type}
             
         except Exception as e:
             self.logger.error(f"Error checking position: {e}")
@@ -267,27 +303,33 @@ class PositionMonitor:
                 exchange, 
                 kraken_symbol, 
                 position['side'], 
-                position['quantity']
+                position['quantity'],
+                position['tp_order_id'],
+                position['sl_order_id']
             )
             
             if not result.get('closed'):
                 # Position still open, nothing to do
+                if result.get('anomaly'):
+                    self.logger.warning(f"⚠️ {user_short}: Anomaly detected - will continue monitoring")
+                if result.get('manual_close'):
+                    # Both TP and SL canceled - might be manual close
+                    # Mark for review
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE open_positions SET status = 'needs_review' WHERE id = $1",
+                            position['id']
+                        )
+                    self.logger.warning(f"⚠️ {user_short}: Manual close detected - marked for review")
                 return
             
-            # Position closed! Determine if it was TP or SL
+            # Position closed! Get details
             exit_price = result.get('exit_price')
+            exit_type_detected = result.get('exit_type', 'UNKNOWN')
             
             if exit_price is None:
-                # Couldn't get exit price, estimate from targets
-                entry = position['entry_fill_price']
-                tp = position['target_tp']
-                sl = position['target_sl']
-                
-                # Check which target was closer to entry (rough estimate)
-                # In practice, we'd need the actual fill
-                self.logger.warning(f"⚠️ {user_short}: Could not get exit price, will estimate")
-                
-                # For now, mark as error - we need manual review
+                # Couldn't get exit price, mark for manual review
+                self.logger.warning(f"⚠️ {user_short}: Could not get exit price - marked for review")
                 async with self.db_pool.acquire() as conn:
                     await conn.execute(
                         "UPDATE open_positions SET status = 'needs_review' WHERE id = $1",
@@ -295,11 +337,10 @@ class PositionMonitor:
                     )
                 return
             
-            # Determine if TP or SL hit based on exit price
+            # Verify exit type by comparing to targets
             entry = position['entry_fill_price']
             tp = position['target_tp']
             sl = position['target_sl']
-            side = position['side']
             
             # Calculate distance to TP and SL
             dist_to_tp = abs(exit_price - tp)
@@ -311,6 +352,10 @@ class PositionMonitor:
             else:
                 exit_type = 'SL'
                 self.logger.info(f"🛑 {user_short}: SL HIT on {position['symbol']} @ ${exit_price:.2f}")
+            
+            # Cross-check with detected type
+            if exit_type_detected != 'UNKNOWN' and exit_type_detected != exit_type:
+                self.logger.warning(f"⚠️ Exit type mismatch: detected {exit_type_detected}, calculated {exit_type}")
             
             # Record the trade with actual P&L
             await self.record_trade(position, exit_price, exit_type, datetime.now())
