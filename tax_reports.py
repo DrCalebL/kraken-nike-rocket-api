@@ -231,6 +231,35 @@ def get_user_fees(start_date: str, end_date: str) -> List[Dict]:
         return []
 
 
+def get_earliest_trade_year() -> int:
+    """Get the year of the earliest trade with fees"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT MIN(EXTRACT(YEAR FROM closed_at))
+            FROM trades
+            WHERE fee_usd > 0 AND closed_at IS NOT NULL
+        """)
+        
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if result and result[0]:
+            return int(result[0])
+        else:
+            # Default to current year if no trades yet
+            from datetime import datetime
+            return datetime.now().year
+            
+    except Exception as e:
+        print(f"Error getting earliest trade year: {e}")
+        from datetime import datetime
+        return datetime.now().year
+
+
 def generate_monthly_csv(year: int, month: int) -> str:
     """Generate CSV for monthly income (Xero-compatible)"""
     data = get_monthly_income(year, month)
