@@ -227,6 +227,72 @@ def get_recent_errors(hours: int = 24) -> List[Dict]:
         return []
 
 
+def get_positions_needing_review() -> List[Dict]:
+    """Get all positions that need manual review"""
+    if not table_exists('open_positions'):
+        return []
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT 
+                op.id,
+                op.user_id,
+                fu.email,
+                fu.api_key,
+                op.symbol,
+                op.kraken_symbol,
+                op.side,
+                op.quantity,
+                op.leverage,
+                op.entry_fill_price,
+                op.target_tp,
+                op.target_sl,
+                op.opened_at,
+                op.status
+            FROM open_positions op
+            JOIN follower_users fu ON op.user_id = fu.id
+            WHERE op.status = 'needs_review'
+            ORDER BY op.opened_at DESC
+        """)
+        
+        positions = []
+        for row in cur.fetchall():
+            pid, user_id, email, api_key, symbol, kraken_symbol, side, qty, leverage, entry, tp, sl, opened_at, status = row
+            
+            # Calculate potential P&L if it was closed
+            # (This is theoretical since we don't know actual close price)
+            risk_amount = abs(float(entry) - float(sl)) * float(qty)
+            reward_amount = abs(float(tp) - float(entry)) * float(qty)
+            
+            positions.append({
+                'id': pid,
+                'user_id': user_id,
+                'email': email,
+                'api_key': api_key[:20] + '...',
+                'symbol': symbol,
+                'side': side,
+                'quantity': float(qty),
+                'leverage': float(leverage),
+                'entry': float(entry),
+                'tp': float(tp),
+                'sl': float(sl),
+                'risk_amount': risk_amount,
+                'reward_amount': reward_amount,
+                'opened_at': opened_at,
+                'reason': 'Manual close detected (both TP/SL canceled)'
+            })
+        
+        cur.close()
+        conn.close()
+        return positions
+    except Exception as e:
+        print(f"Error getting positions needing review: {e}")
+        return []
+
+
 def get_stats_summary() -> Dict:
     """Get summary statistics from follower_users and portfolio_users"""
     conn = get_db_connection()
@@ -344,7 +410,7 @@ def log_agent_event(api_key: str, event_type: str, event_data: Optional[Dict] = 
         pass
 
 
-def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict) -> str:
+def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict]) -> str:
     """Generate admin dashboard HTML - Dark Theme with Error Tooltips"""
     
     # User rows
@@ -377,6 +443,66 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict) -> s
                 <td style="text-align: center;">{error_cell}</td>
             </tr>
             """
+    
+    # Review positions section
+    review_positions_section = ""
+    if review_positions:
+        review_rows = ""
+        for pos in review_positions:
+            side_color = "#10b981" if pos['side'] == 'BUY' else "#ef4444"
+            review_rows += f"""
+                <tr>
+                    <td>{pos['email']}</td>
+                    <td><span style="color: {side_color}; font-weight: 600;">{pos['side']}</span> {pos['symbol']}</td>
+                    <td>{pos['quantity']:.4f} @ {pos['leverage']}x</td>
+                    <td>${pos['entry']:.2f}</td>
+                    <td><span style="color: #10b981">${pos['tp']:.2f}</span></td>
+                    <td><span style="color: #ef4444">${pos['sl']:.2f}</span></td>
+                    <td>{pos['opened_at'].strftime('%Y-%m-%d %H:%M') if pos['opened_at'] else 'N/A'}</td>
+                    <td style="color: #f59e0b;">{pos['reason']}</td>
+                    <td>
+                        <a href="#" onclick="deletePosition({pos['id']}); return false;" style="color: #ef4444; text-decoration: none;">🗑️ Delete</a>
+                    </td>
+                </tr>
+            """
+        
+        review_positions_section = f"""
+        <div class="users-section" style="border: 2px solid #f59e0b;">
+            <h2 style="color: #fbbf24;">🔍 Positions Needing Review ({len(review_positions)})</h2>
+            <p style="color: #9ca3af; margin-bottom: 15px; font-size: 13px;">
+                These positions were manually closed or had unusual closure patterns. Review and delete when confirmed.
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Position</th>
+                        <th>Size</th>
+                        <th>Entry</th>
+                        <th>TP</th>
+                        <th>SL</th>
+                        <th>Opened</th>
+                        <th>Reason</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>{review_rows}</tbody>
+            </table>
+        </div>
+        
+        <script>
+        function deletePosition(posId) {{
+            if (confirm('Delete this position from review? This action cannot be undone.')) {{
+                fetch('/admin/delete-review-position/' + posId, {{
+                    method: 'DELETE',
+                    headers: {{'X-Admin-Key': '{ADMIN_PASSWORD}'}}
+                }})
+                .then(() => location.reload())
+                .catch(err => alert('Error: ' + err));
+            }}
+        }}
+        </script>
+        """
     
     # Error items with detailed view
     error_items = ""
@@ -676,6 +802,8 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict) -> s
                 <tbody>{user_rows}</tbody>
             </table>
         </div>
+        
+        {review_positions_section}
         
         <div class="errors-section">
             <div class="errors-header">
