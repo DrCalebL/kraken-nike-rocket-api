@@ -279,7 +279,7 @@ class BalanceChecker:
             deposits_result = await conn.fetchval("""
                 SELECT COALESCE(SUM(amount), 0)
                 FROM portfolio_transactions
-                WHERE api_key = $1 AND transaction_type = 'deposit'
+                WHERE user_id = $1 AND transaction_type = 'deposit'
             """, api_key)
             total_deposits = float(deposits_result or 0)
             
@@ -287,7 +287,7 @@ class BalanceChecker:
             withdrawals_result = await conn.fetchval("""
                 SELECT COALESCE(SUM(amount), 0)
                 FROM portfolio_transactions
-                WHERE api_key = $1 AND transaction_type = 'withdrawal'
+                WHERE user_id = $1 AND transaction_type = 'withdrawal'
             """, api_key)
             total_withdrawals = float(withdrawals_result or 0)
             
@@ -327,21 +327,22 @@ class BalanceChecker:
         """
         Record a deposit or withdrawal transaction
         
-        FIXED: Uses api_key column (not user_id)
+        FIXED: Uses user_id column (which stores api_key value)
         """
         async with self.db_pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO portfolio_transactions (
-                    api_key,
+                    user_id,
                     transaction_type,
                     amount,
                     detection_method,
                     notes
-                ) VALUES ($1, $2, $3, 'automatic', $4)
+                ) VALUES ($1, $2, $3, $4, $5)
             """,
-                api_key,
+                api_key,  # user_id column stores the api_key
                 transaction_type,
                 float(amount),
+                'automatic',
                 f'Auto-detected {transaction_type} via balance checker'
             )
             
@@ -484,7 +485,7 @@ class BalanceChecker:
         """
         Get transaction history for a user
         
-        FIXED: Uses api_key column (not user_id)
+        FIXED: Uses user_id column (which stores api_key value)
         """
         async with self.db_pool.acquire() as conn:
             transactions = await conn.fetch("""
@@ -495,7 +496,7 @@ class BalanceChecker:
                     detection_method,
                     notes
                 FROM portfolio_transactions
-                WHERE api_key = $1
+                WHERE user_id = $1
                 ORDER BY created_at DESC
                 LIMIT $2
             """, api_key, limit)
