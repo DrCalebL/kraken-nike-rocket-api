@@ -1090,9 +1090,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             
             <div class="report-controls">
                 <select id="reportYear" class="report-select">
-                    <option value="2025">2025</option>
-                    <option value="2024">2024</option>
-                    <option value="2023">2023</option>
+                    <!-- Years populated by JavaScript -->
                 </select>
                 
                 <select id="reportMonth" class="report-select">
@@ -1195,6 +1193,52 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
     </div>
     
     <script>
+    // ============ DYNAMIC YEAR POPULATION ============
+    async function populateYears() {{
+        const yearSelect = document.getElementById('reportYear');
+        
+        try {{
+            // Fetch available years from database
+            const response = await fetch(`/admin/reports/available-years?password=${{'{ADMIN_PASSWORD}'}}`);
+            const result = await response.json();
+            
+            if (result.status === 'success') {{
+                const years = result.years;
+                const currentYear = result.current_year;
+                
+                years.forEach(year => {{
+                    const option = document.createElement('option');
+                    option.value = year;
+                    option.textContent = year;
+                    if (year === currentYear) {{
+                        option.selected = true;
+                    }}
+                    yearSelect.appendChild(option);
+                }});
+            }} else {{
+                // Fallback: just show current year
+                const currentYear = new Date().getFullYear();
+                const option = document.createElement('option');
+                option.value = currentYear;
+                option.textContent = currentYear;
+                option.selected = true;
+                yearSelect.appendChild(option);
+            }}
+        }} catch (error) {{
+            console.error('Error populating years:', error);
+            // Fallback: just show current year
+            const currentYear = new Date().getFullYear();
+            const option = document.createElement('option');
+            option.value = currentYear;
+            option.textContent = currentYear;
+            option.selected = true;
+            yearSelect.appendChild(option);
+        }}
+    }}
+    
+    // Populate years on load
+    populateYears();
+    
     // ============ TAX REPORTS FUNCTIONALITY ============
     const ADMIN_PASSWORD = '{ADMIN_PASSWORD}';
     
