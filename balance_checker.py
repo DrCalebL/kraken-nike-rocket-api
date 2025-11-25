@@ -255,25 +255,34 @@ class BalanceChecker:
         Calculate expected balance based on initial capital + deposits - withdrawals + trading P&L
         
         FIXED: 
+        - Gets initial_capital from portfolio_users table
+        - Gets user_id from follower_users table
         - Reads trading P&L from trades table (where position monitor records closed trades)
-        - Uses follower_users table
         - Only counts closed trades (not open positions)
         """
         async with self.db_pool.acquire() as conn:
             
-            # Get user info from follower_users
+            # Get user ID from follower_users
             user_info = await conn.fetchrow("""
-                SELECT id, api_key, initial_balance
+                SELECT id, api_key
                 FROM follower_users
                 WHERE api_key = $1
             """, api_key)
             
             if not user_info:
-                logger.warning(f"User not found: {api_key[:10]}...")
+                logger.warning(f"User not found in follower_users: {api_key[:10]}...")
                 return Decimal('0')
             
             user_id = user_info['id']
-            initial_capital = float(user_info['initial_balance'] or 0)
+            
+            # Get initial capital from portfolio_users (if exists)
+            portfolio_info = await conn.fetchrow("""
+                SELECT initial_capital
+                FROM portfolio_users
+                WHERE api_key = $1
+            """, api_key)
+            
+            initial_capital = float(portfolio_info['initial_capital'] or 0) if portfolio_info else 0.0
             
             # Get deposits from portfolio_transactions
             deposits_result = await conn.fetchval("""
