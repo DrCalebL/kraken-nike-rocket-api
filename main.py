@@ -52,6 +52,7 @@ from tax_reports import (
     get_monthly_income,
     get_yearly_income,
     get_user_fees,
+    get_earliest_trade_year,
     generate_monthly_csv,
     generate_yearly_csv,
     generate_user_fees_csv
@@ -553,6 +554,34 @@ async def get_income_summary(
         return {
             "status": "success",
             "data": data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/admin/reports/available-years")
+async def get_available_years(password: str = ""):
+    """
+    Get list of years with trade data
+    
+    Returns years from earliest trade to current year
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        from datetime import datetime
+        current_year = datetime.now().year
+        earliest_year = get_earliest_trade_year()
+        
+        # Generate list of years from earliest to current
+        years = list(range(current_year, earliest_year - 1, -1))
+        
+        return {
+            "status": "success",
+            "years": years,
+            "current_year": current_year,
+            "earliest_year": earliest_year
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
