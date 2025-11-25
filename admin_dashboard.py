@@ -423,8 +423,12 @@ def log_agent_event(api_key: str, event_type: str, event_data: Optional[Dict] = 
         pass
 
 
-def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict]) -> str:
+def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict] = None) -> str:
     """Generate admin dashboard HTML - Dark Theme with Error Tooltips"""
+    
+    # Handle backward compatibility
+    if review_positions is None:
+        review_positions = []
     
     # User rows
     user_rows = ""
