@@ -33,7 +33,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 
-def get_historical_monthly_fees(year: int, month: int) -> Dict:
+def get_monthly_income(year: int, month: int) -> Dict:
     """
     Get actual historical fee data from trades table
     
@@ -139,7 +139,7 @@ def get_yearly_income(year: int) -> Dict:
     all_users = set()
     
     for month in range(1, 13):
-        month_data = get_historical_monthly_fees(year, month)
+        month_data = get_monthly_income(year, month)
         monthly_data.append(month_data)
         yearly_total_fees += month_data['total_fees']
         yearly_total_profit += month_data['total_profit']
@@ -161,7 +161,7 @@ def get_yearly_income(year: int) -> Dict:
     }
 
 
-def get_user_fees_breakdown(start_date: str, end_date: str) -> List[Dict]:
+def get_user_fees(start_date: str, end_date: str) -> List[Dict]:
     """
     Get per-user fee breakdown for date range
     
@@ -233,7 +233,7 @@ def get_user_fees_breakdown(start_date: str, end_date: str) -> List[Dict]:
 
 def generate_monthly_csv(year: int, month: int) -> str:
     """Generate CSV for monthly income (Xero-compatible)"""
-    data = get_historical_monthly_fees(year, month)
+    data = get_monthly_income(year, month)
     
     output = io.StringIO()
     writer = csv.writer(output)
@@ -327,7 +327,7 @@ def generate_yearly_csv(year: int) -> str:
 
 def generate_user_fees_csv(start_date: str, end_date: str) -> str:
     """Generate per-user fee breakdown CSV"""
-    users = get_user_fees_breakdown(start_date, end_date)
+    users = get_user_fees(start_date, end_date)
     
     output = io.StringIO()
     writer = csv.writer(output)
