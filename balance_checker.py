@@ -134,7 +134,11 @@ class BalanceChecker:
         kraken_api_key: str, 
         kraken_api_secret: str
     ):
-        """Check a single user's balance and detect changes"""
+        """
+        Check a single user's balance and detect changes
+        
+        IMPROVED: Better logic to distinguish trading losses/fees from actual withdrawals
+        """
         
         # Get current Kraken balance
         current_balance = await self.get_kraken_balance(
@@ -146,18 +150,24 @@ class BalanceChecker:
             logger.warning(f"Could not get Kraken balance for {api_key}")
             return
         
-        # Calculate expected balance
+        # Calculate expected balance (includes trading P&L)
         expected_balance = await self.calculate_expected_balance(api_key)
         
-        # Check for significant discrepancy (>$1)
+        # Check for significant discrepancy
+        # Use larger threshold ($5) to avoid false positives from:
+        # - Trading fees
+        # - Slippage
+        # - Small unrealized P&L changes
+        # - Funding fees
         discrepancy = abs(float(current_balance) - float(expected_balance))
         
-        if discrepancy > 1.0:
+        # Only flag as deposit/withdrawal if discrepancy is significant
+        if discrepancy > 5.0:
             transaction_type = 'deposit' if current_balance > expected_balance else 'withdrawal'
             amount = abs(current_balance - expected_balance)
             
             logger.info(
-                f"✅ Detected {transaction_type} for {api_key}: "
+                f"💰 Detected {transaction_type} for {api_key[:10]}...: "
                 f"Expected ${expected_balance:.2f}, Actual ${current_balance:.2f}, "
                 f"Difference: ${amount:.2f}"
             )
@@ -168,8 +178,14 @@ class BalanceChecker:
                 transaction_type=transaction_type,
                 amount=amount
             )
+        elif discrepancy > 1.0:
+            # Small discrepancy - likely trading fees or slippage, not deposit/withdrawal
+            logger.info(
+                f"📊 User {api_key[:10]}...: Small discrepancy ${discrepancy:.2f} "
+                f"(likely fees/slippage, not recording as transaction)"
+            )
         else:
-            logger.info(f"✅ User {api_key[:10]}...: Balance ${current_balance:.2f} (no change)")
+            logger.info(f"✅ User {api_key[:10]}...: Balance ${current_balance:.2f} matches expected")
         
         # Update last known balance
         await self.update_last_known_balance(api_key, current_balance)
@@ -236,95 +252,67 @@ class BalanceChecker:
 
     async def calculate_expected_balance(self, api_key: str) -> Decimal:
         """
-        Calculate expected balance based on initial capital + deposits - withdrawals + trades
+        Calculate expected balance based on initial capital + deposits - withdrawals + trading P&L
         
-        CORRECTED: Uses api_key and pnl_usd column
+        FIXED: 
+        - Reads trading P&L from trades table (where position monitor records closed trades)
+        - Uses follower_users table
+        - Only counts closed trades (not open positions)
         """
         async with self.db_pool.acquire() as conn:
             
-            # Get last balance check time
-            last_check = await conn.fetchval("""
-                SELECT last_balance_check 
-                FROM portfolio_users 
+            # Get user info from follower_users
+            user_info = await conn.fetchrow("""
+                SELECT id, api_key, initial_balance
+                FROM follower_users
                 WHERE api_key = $1
             """, api_key)
             
-            # Check if portfolio_trades table exists
-            table_exists = await conn.fetchval("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'portfolio_trades'
-                )
-            """)
-            
-            if not table_exists:
-                logger.info("Portfolio trades table doesn't exist yet")
-                # Just return initial capital + deposits - withdrawals
-                result = await conn.fetchrow("""
-                    SELECT 
-                        initial_capital,
-                        COALESCE(
-                            (SELECT SUM(amount) FROM portfolio_transactions 
-                             WHERE user_id = $1 AND transaction_type = 'deposit'),
-                            0
-                        ) as total_deposits,
-                        COALESCE(
-                            (SELECT SUM(amount) FROM portfolio_transactions 
-                             WHERE user_id = $1 AND transaction_type = 'withdrawal'),
-                            0
-                        ) as total_withdrawals
-                    FROM portfolio_users
-                    WHERE api_key = $1
-                """, api_key)
-                
-                if not result:
-                    return Decimal('0')
-                
-                expected = Decimal(str(result['initial_capital'])) + \
-                          Decimal(str(result['total_deposits'])) - \
-                          Decimal(str(result['total_withdrawals']))
-                
-                logger.info(f"Expected balance for {api_key[:10]}...: ${expected:.2f} (no trades yet)")
-                return expected
-            
-            # CORRECTED: Use pnl_usd column and proper JOINs
-            result = await conn.fetchrow("""
-                SELECT 
-                    pu.initial_capital,
-                    COALESCE(
-                        (SELECT SUM(amount) FROM portfolio_transactions 
-                         WHERE user_id = $1 AND transaction_type = 'deposit'),
-                        0
-                    ) as total_deposits,
-                    COALESCE(
-                        (SELECT SUM(amount) FROM portfolio_transactions 
-                         WHERE user_id = $1 AND transaction_type = 'withdrawal'),
-                        0
-                    ) as total_withdrawals,
-                    COALESCE(
-                        (SELECT SUM(pt.pnl_usd) FROM portfolio_trades pt
-                         JOIN portfolio_users pu2 ON pt.user_id = pu2.id
-                         WHERE pu2.api_key = $1),
-                        0
-                    ) as total_profit
-                FROM portfolio_users pu
-                WHERE pu.api_key = $1
-            """, api_key)
-            
-            if not result:
+            if not user_info:
+                logger.warning(f"User not found: {api_key[:10]}...")
                 return Decimal('0')
             
-            expected = Decimal(str(result['initial_capital'])) + \
-                      Decimal(str(result['total_deposits'])) - \
-                      Decimal(str(result['total_withdrawals'])) + \
-                      Decimal(str(result['total_profit']))
+            user_id = user_info['id']
+            initial_capital = float(user_info['initial_balance'] or 0)
+            
+            # Get deposits from portfolio_transactions
+            deposits_result = await conn.fetchval("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM portfolio_transactions
+                WHERE api_key = $1 AND transaction_type = 'deposit'
+            """, api_key)
+            total_deposits = float(deposits_result or 0)
+            
+            # Get withdrawals from portfolio_transactions
+            withdrawals_result = await conn.fetchval("""
+                SELECT COALESCE(SUM(amount), 0)
+                FROM portfolio_transactions
+                WHERE api_key = $1 AND transaction_type = 'withdrawal'
+            """, api_key)
+            total_withdrawals = float(withdrawals_result or 0)
+            
+            # Get trading P&L from trades table (closed trades only)
+            # This is where position monitor records actual trade results
+            trading_pnl_result = await conn.fetchval("""
+                SELECT COALESCE(SUM(profit_usd), 0)
+                FROM trades
+                WHERE user_id = $1 AND closed_at IS NOT NULL
+            """, user_id)
+            trading_pnl = float(trading_pnl_result or 0)
+            
+            # Calculate expected balance
+            # Formula: Initial + Deposits - Withdrawals + Trading P&L
+            expected = Decimal(str(initial_capital)) + \
+                      Decimal(str(total_deposits)) - \
+                      Decimal(str(total_withdrawals)) + \
+                      Decimal(str(trading_pnl))
             
             logger.info(
                 f"Expected balance for {api_key[:10]}...: ${expected:.2f} "
-                f"(IC: ${result['initial_capital']:.2f}, "
-                f"Deposits: ${result['total_deposits']:.2f}, "
-                f"Withdrawals: ${result['total_withdrawals']:.2f}, "
-                f"Profit: ${result['total_profit']:.2f})"
+                f"(Initial: ${initial_capital:.2f}, "
+                f"Deposits: ${total_deposits:.2f}, "
+                f"Withdrawals: ${total_withdrawals:.2f}, "
+                f"Trading P&L: ${trading_pnl:.2f})"
             )
             
             return expected
@@ -336,11 +324,15 @@ class BalanceChecker:
         transaction_type: str,
         amount: Decimal
     ):
-        """Record a deposit or withdrawal transaction"""
+        """
+        Record a deposit or withdrawal transaction
+        
+        FIXED: Uses api_key column (not user_id)
+        """
         async with self.db_pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO portfolio_transactions (
-                    user_id,
+                    api_key,
                     transaction_type,
                     amount,
                     detection_method,
@@ -489,7 +481,11 @@ class BalanceChecker:
         api_key: str, 
         limit: int = 50
     ) -> list:
-        """Get transaction history for a user"""
+        """
+        Get transaction history for a user
+        
+        FIXED: Uses api_key column (not user_id)
+        """
         async with self.db_pool.acquire() as conn:
             transactions = await conn.fetch("""
                 SELECT 
@@ -499,7 +495,7 @@ class BalanceChecker:
                     detection_method,
                     notes
                 FROM portfolio_transactions
-                WHERE user_id = $1
+                WHERE api_key = $1
                 ORDER BY created_at DESC
                 LIMIT $2
             """, api_key, limit)
