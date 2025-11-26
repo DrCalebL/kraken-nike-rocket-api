@@ -126,16 +126,44 @@ class PositionMonitor:
             - {'closed': True, 'exit_price': price, 'exit_type': 'TP'/'SL'} if position closed
         """
         try:
-            # Method 1: Check open positions
-            positions = exchange.fetch_positions([kraken_symbol])
+            # Method 1: Check open positions (without symbol filter - more reliable)
+            positions = exchange.fetch_positions()
             
-            for pos in positions:
-                if pos['symbol'] == kraken_symbol:
-                    contracts = abs(float(pos.get('contracts', 0) or 0))
+            # Debug: Log raw response
+            self.logger.info(f"🔍 Kraken positions API returned {len(positions)} items")
+            
+            # Debug: Log what Kraken returns
+            if positions:
+                for i, pos in enumerate(positions):
+                    pos_symbol = pos.get('symbol', 'Unknown')
+                    pos_contracts = pos.get('contracts') or pos.get('contractSize') or 0
+                    pos_side = pos.get('side', 'Unknown')
+                    pos_info = pos.get('info', {})
                     
-                    if contracts > 0:
-                        # Position still open
-                        return {'closed': False, 'current_size': contracts}
+                    # Log raw position data for debugging
+                    self.logger.info(f"   Position {i}: symbol={pos_symbol}, contracts={pos_contracts}, side={pos_side}")
+                    
+                    # Check if this position matches our symbol (flexible matching)
+                    # Kraken might return "PF_ADAUSD" or "ADA/USD:USD" or similar
+                    symbol_base = kraken_symbol.replace('PF_', '').replace('USD', '')  # e.g., "ADA"
+                    
+                    if symbol_base in str(pos_symbol).upper():
+                        contracts = abs(float(pos_contracts))
+                        
+                        if contracts > 0:
+                            # Position still open
+                            self.logger.info(f"✅ Position found: {pos_symbol} {pos_side} ({contracts} contracts)")
+                            return {'closed': False, 'current_size': contracts}
+            
+            # Also check for ANY position (single position model)
+            for pos in positions:
+                contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
+                if contracts > 0:
+                    self.logger.info(f"✅ Position found (any symbol): {pos.get('symbol')} ({contracts} contracts)")
+                    return {'closed': False, 'current_size': contracts}
+            
+            # If we get here, no position with contracts > 0 was found
+            self.logger.info(f"📭 No open positions found in Kraken API response")
             
             # No position found - verify by checking if TP or SL filled
             # Check open orders - if both TP and SL still exist, position wasn't closed
