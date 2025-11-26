@@ -450,7 +450,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             # Error indicator with tooltip
             error_count = user.get('recent_errors', 0)
             if error_count > 0:
-                error_cell = f'''<span class="error-indicator error-has-errors" title="⚠️ {error_count} error(s) in last 24h - hover to see details">⚠️</span>'''
+                error_cell = f'''<span class="error-indicator error-has-errors" title="⚠️ {error_count} error(s) in last 24h - see Error History below">⚠️</span>'''
             else:
                 error_cell = '''<span class="error-indicator error-none" title="✅ No errors in last 24h">✅</span>'''
             
