@@ -279,6 +279,66 @@ class HostedTradingLoop:
             self.logger.warning(f"Error checking positions: {e}")
             return False
     
+    async def check_any_open_positions_or_orders(self, exchange: ccxt.krakenfutures, user_short: str) -> tuple:
+        """
+        SAFETY CHECK: Verify user has NO open positions or orders on ANY symbol
+        
+        Returns:
+            tuple: (has_open, reason_string)
+            - (True, "reason") if there ARE open positions/orders (should SKIP trade)
+            - (False, None) if account is clear (safe to trade)
+        
+        This prevents:
+        1. Double positions on same symbol (entry filled, exit didn't, new signal comes)
+        2. Multiple symbols open (risk management assumes single position)
+        3. Orphaned TP/SL orders affecting new trades
+        """
+        try:
+            # ===== CHECK 1: Any open positions (any symbol) =====
+            try:
+                positions = exchange.fetch_positions()
+                
+                for pos in positions:
+                    size = pos.get('contracts') or pos.get('contractSize') or 0
+                    if abs(float(size)) > 0:
+                        symbol = pos.get('symbol', 'Unknown')
+                        side = pos.get('side', 'Unknown')
+                        self.logger.warning(
+                            f"   🚫 {user_short}: Found open position - {symbol} {side} ({size} contracts)"
+                        )
+                        return (True, f"Open position exists: {symbol} {side}")
+            except Exception as e:
+                self.logger.warning(f"   ⚠️ {user_short}: Error fetching positions: {e}")
+                # Continue to check orders even if positions check fails
+            
+            # ===== CHECK 2: Any open orders (TP/SL leftovers) =====
+            try:
+                open_orders = exchange.fetch_open_orders()
+                
+                if open_orders and len(open_orders) > 0:
+                    # Group by symbol for cleaner logging
+                    symbols_with_orders = set()
+                    for order in open_orders:
+                        symbols_with_orders.add(order.get('symbol', 'Unknown'))
+                    
+                    symbols_list = ', '.join(symbols_with_orders)
+                    self.logger.warning(
+                        f"   🚫 {user_short}: Found {len(open_orders)} open order(s) on: {symbols_list}"
+                    )
+                    return (True, f"Open orders exist: {len(open_orders)} orders on {symbols_list}")
+            except Exception as e:
+                self.logger.warning(f"   ⚠️ {user_short}: Error fetching open orders: {e}")
+                # If we can't check orders, be cautious and allow trade
+                # (positions check is more critical)
+            
+            # ===== ALL CLEAR =====
+            return (False, None)
+            
+        except Exception as e:
+            self.logger.error(f"   ❌ {user_short}: Error in safety check: {e}")
+            # On error, be cautious - allow trade but log warning
+            return (False, None)
+    
     async def execute_trade(self, user: Dict, signal: Dict) -> bool:
         """
         Execute trade for a user
@@ -306,9 +366,15 @@ class HostedTradingLoop:
             
             self.logger.info(f"   📊 {user_short}: Executing {signal['action']} {api_symbol}")
             
-            # Check for existing position
-            if await self.check_existing_position(exchange, kraken_symbol):
-                self.logger.info(f"   ⚠️ {user_short}: Already has position in {kraken_symbol}, skipping")
+            # ===== SAFETY CHECK: No open positions or orders on ANY symbol =====
+            # This prevents:
+            # - Double trades (position exists, new signal comes)
+            # - Multi-symbol exposure (risk management assumes single position)
+            # - Orphaned orders interfering with new trades
+            has_open, reason = await self.check_any_open_positions_or_orders(exchange, user_short)
+            if has_open:
+                self.logger.warning(f"   ⏭️ {user_short}: SKIPPING TRADE - {reason}")
+                self.logger.warning(f"   ℹ️ {user_short}: Clean up positions/orders on Kraken before next signal")
                 return False
             
             # Get equity
