@@ -56,7 +56,7 @@ def get_table_columns(table_name: str) -> List[str]:
 
 
 def create_error_logs_table():
-    """Create monitoring tables"""
+    """Create monitoring tables and ensure schema is up to date"""
     conn = get_db_connection()
     cur = conn.cursor()
     
@@ -90,6 +90,18 @@ def create_error_logs_table():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_error_logs_timestamp ON error_logs(timestamp DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_logs_timestamp ON agent_logs(timestamp DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at DESC)")
+    
+    # ========== SCHEMA MIGRATIONS ==========
+    # Add fee_tier column to follower_users if it doesn't exist
+    try:
+        cur.execute("""
+            ALTER TABLE follower_users 
+            ADD COLUMN IF NOT EXISTS fee_tier VARCHAR(20) DEFAULT 'standard'
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Note: fee_tier column may already exist: {e}")
     
     conn.commit()
     cur.close()
@@ -429,12 +441,79 @@ def log_agent_event(api_key: str, event_type: str, event_data: Optional[Dict] = 
         pass
 
 
-def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict] = None) -> str:
+def get_users_by_tier() -> Dict[str, List[Dict]]:
+    """Get all users grouped by fee tier"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    result = {
+        'team': [],    # 0% fees
+        'vip': [],     # 5% fees
+        'standard': [] # 10% fees
+    }
+    
+    try:
+        cur.execute("""
+            SELECT id, email, fee_tier, total_profit, total_trades, agent_active
+            FROM follower_users
+            ORDER BY email
+        """)
+        rows = cur.fetchall()
+        
+        for row in rows:
+            user = {
+                'id': row[0],
+                'email': row[1],
+                'fee_tier': row[2] or 'standard',
+                'total_profit': row[3] or 0,
+                'total_trades': row[4] or 0,
+                'agent_active': row[5] or False
+            }
+            tier = user['fee_tier']
+            if tier in result:
+                result[tier].append(user)
+            else:
+                result['standard'].append(user)
+    except Exception as e:
+        print(f"Error getting users by tier: {e}")
+    finally:
+        cur.close()
+        conn.close()
+    
+    return result
+
+
+def update_user_tier(user_id: int, new_tier: str) -> bool:
+    """Update a user's fee tier"""
+    if new_tier not in ['team', 'vip', 'standard']:
+        return False
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute(
+            "UPDATE follower_users SET fee_tier = %s WHERE id = %s",
+            (new_tier, user_id)
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        print(f"Error updating user tier: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+
+def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict] = None, users_by_tier: Dict = None) -> str:
     """Generate admin dashboard HTML - Dark Theme with Error Tooltips"""
     
     # Handle backward compatibility
     if review_positions is None:
         review_positions = []
+    if users_by_tier is None:
+        users_by_tier = {'team': [], 'vip': [], 'standard': []}
     
     # User rows
     user_rows = ""
@@ -1034,6 +1113,129 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
         .error-timestamp {{ color: #6b7280; font-size: 12px; }}
         .error-message {{ color: #e5e7eb; font-size: 13px; line-height: 1.5; }}
         .error-context {{ color: #6b7280; font-size: 11px; margin-top: 8px; font-family: monospace; }}
+        
+        /* User Tiers Section */
+        .tiers-section {{
+            background: #1a1f2e;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid #2d3748;
+        }}
+        .tiers-section h2 {{
+            color: #e5e7eb;
+            margin-bottom: 20px;
+        }}
+        .tiers-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }}
+        .tier-column {{
+            background: #111827;
+            border-radius: 10px;
+            padding: 15px;
+            min-height: 200px;
+        }}
+        .tier-column.team {{
+            border: 2px solid #10b981;
+        }}
+        .tier-column.vip {{
+            border: 2px solid #f59e0b;
+        }}
+        .tier-column.standard {{
+            border: 2px solid #6b7280;
+        }}
+        .tier-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #374151;
+        }}
+        .tier-header h3 {{
+            margin: 0;
+            font-size: 16px;
+        }}
+        .tier-header.team h3 {{ color: #10b981; }}
+        .tier-header.vip h3 {{ color: #f59e0b; }}
+        .tier-header.standard h3 {{ color: #9ca3af; }}
+        .tier-count {{
+            background: #374151;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #e5e7eb;
+        }}
+        .tier-user {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 10px;
+            background: #1f2937;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }}
+        .tier-user:hover {{
+            background: #2d3748;
+        }}
+        .tier-user-email {{
+            color: #e5e7eb;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        .tier-user-stats {{
+            color: #6b7280;
+            font-size: 11px;
+            margin-left: 10px;
+        }}
+        .tier-user-actions {{
+            display: flex;
+            gap: 5px;
+            margin-left: 10px;
+        }}
+        .tier-btn {{
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.2s;
+        }}
+        .tier-btn.to-team {{
+            background: #065f46;
+            color: #10b981;
+        }}
+        .tier-btn.to-team:hover {{
+            background: #10b981;
+            color: white;
+        }}
+        .tier-btn.to-vip {{
+            background: #78350f;
+            color: #f59e0b;
+        }}
+        .tier-btn.to-vip:hover {{
+            background: #f59e0b;
+            color: white;
+        }}
+        .tier-btn.to-standard {{
+            background: #374151;
+            color: #9ca3af;
+        }}
+        .tier-btn.to-standard:hover {{
+            background: #6b7280;
+            color: white;
+        }}
+        .tier-empty {{
+            color: #6b7280;
+            text-align: center;
+            padding: 30px;
+            font-style: italic;
+        }}
     </style>
 </head>
 <body>
@@ -1128,6 +1330,72 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             
             <div id="incomeSummary" class="income-summary">
                 <!-- Will be populated by JavaScript -->
+            </div>
+        </div>
+        
+        <!-- User Fee Tiers Section -->
+        <div class="tiers-section">
+            <h2>💰 User Fee Tiers</h2>
+            <div class="tiers-grid">
+                <!-- Team Column (0%) -->
+                <div class="tier-column team">
+                    <div class="tier-header team">
+                        <h3>🏠 Team (0%)</h3>
+                        <span class="tier-count">{len(users_by_tier.get('team', []))} users</span>
+                    </div>
+                    <div class="tier-users" id="tier-team">
+                        {''.join([f'''
+                        <div class="tier-user" data-user-id="{u['id']}">
+                            <span class="tier-user-email" title="{u['email']}">{u['email']}</span>
+                            <span class="tier-user-stats">${u['total_profit']:.0f}</span>
+                            <div class="tier-user-actions">
+                                <button class="tier-btn to-vip" onclick="changeTier({u['id']}, 'vip')" title="Move to VIP">⭐</button>
+                                <button class="tier-btn to-standard" onclick="changeTier({u['id']}, 'standard')" title="Move to Standard">👤</button>
+                            </div>
+                        </div>
+                        ''' for u in users_by_tier.get('team', [])]) or '<div class="tier-empty">No team members</div>'}
+                    </div>
+                </div>
+                
+                <!-- VIP Column (5%) -->
+                <div class="tier-column vip">
+                    <div class="tier-header vip">
+                        <h3>⭐ VIP (5%)</h3>
+                        <span class="tier-count">{len(users_by_tier.get('vip', []))} users</span>
+                    </div>
+                    <div class="tier-users" id="tier-vip">
+                        {''.join([f'''
+                        <div class="tier-user" data-user-id="{u['id']}">
+                            <span class="tier-user-email" title="{u['email']}">{u['email']}</span>
+                            <span class="tier-user-stats">${u['total_profit']:.0f}</span>
+                            <div class="tier-user-actions">
+                                <button class="tier-btn to-team" onclick="changeTier({u['id']}, 'team')" title="Move to Team">🏠</button>
+                                <button class="tier-btn to-standard" onclick="changeTier({u['id']}, 'standard')" title="Move to Standard">👤</button>
+                            </div>
+                        </div>
+                        ''' for u in users_by_tier.get('vip', [])]) or '<div class="tier-empty">No VIP users</div>'}
+                    </div>
+                </div>
+                
+                <!-- Standard Column (10%) -->
+                <div class="tier-column standard">
+                    <div class="tier-header standard">
+                        <h3>👤 Standard (10%)</h3>
+                        <span class="tier-count">{len(users_by_tier.get('standard', []))} users</span>
+                    </div>
+                    <div class="tier-users" id="tier-standard">
+                        {''.join([f'''
+                        <div class="tier-user" data-user-id="{u['id']}">
+                            <span class="tier-user-email" title="{u['email']}">{u['email']}</span>
+                            <span class="tier-user-stats">${u['total_profit']:.0f}</span>
+                            <div class="tier-user-actions">
+                                <button class="tier-btn to-team" onclick="changeTier({u['id']}, 'team')" title="Move to Team">🏠</button>
+                                <button class="tier-btn to-vip" onclick="changeTier({u['id']}, 'vip')" title="Move to VIP">⭐</button>
+                            </div>
+                        </div>
+                        ''' for u in users_by_tier.get('standard', [])]) or '<div class="tier-empty">No standard users</div>'}
+                    </div>
+                </div>
             </div>
         </div>
         
@@ -1524,6 +1792,37 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
     window.addEventListener('load', () => {{
         paginateErrors();
     }});
+    
+    // Change user fee tier
+    function changeTier(userId, newTier) {{
+        const tierNames = {{'team': 'Team (0%)', 'vip': 'VIP (5%)', 'standard': 'Standard (10%)'}};
+        if (confirm(`Move user to ${{tierNames[newTier]}}?`)) {{
+            fetch('/admin/update-user-tier', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json',
+                    'X-Admin-Key': '{ADMIN_PASSWORD}'
+                }},
+                body: JSON.stringify({{user_id: userId, new_tier: newTier}})
+            }})
+            .then(response => {{
+                if (!response.ok) {{
+                    return response.json().then(data => {{
+                        throw new Error(data.detail || 'Update failed');
+                    }});
+                }}
+                return response.json();
+            }})
+            .then(data => {{
+                console.log('Tier update successful:', data);
+                location.reload();
+            }})
+            .catch(err => {{
+                console.error('Tier update error:', err);
+                alert('Error updating tier: ' + err.message);
+            }});
+        }}
+    }}
     
     // Review position deletion
     function deletePosition(posId) {{
