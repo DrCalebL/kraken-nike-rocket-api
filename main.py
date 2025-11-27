@@ -36,6 +36,7 @@ from admin_dashboard import (
     get_recent_errors,
     get_stats_summary,
     get_positions_needing_review,
+    get_users_by_tier,
     generate_admin_html,
     create_error_logs_table,
     ADMIN_PASSWORD
@@ -257,9 +258,10 @@ async def admin_dashboard(password: str = ""):
         errors = get_recent_errors(hours=None, limit=500)  # Get all errors, paginated
         stats = get_stats_summary()
         positions_review = get_positions_needing_review()
+        users_by_tier = get_users_by_tier()
         
         # Generate and return HTML
-        html = generate_admin_html(users, errors, stats, positions_review)
+        html = generate_admin_html(users, errors, stats, positions_review, users_by_tier)
         return HTMLResponse(html)
         
     except Exception as e:
@@ -429,6 +431,61 @@ async def delete_review_position(
             raise HTTPException(status_code=404, detail="Position not found or not in review status")
         
         return {"status": "success", "message": f"Position {position_id} deleted"}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/admin/update-user-tier")
+async def update_user_tier_endpoint(
+    request: Request,
+    x_admin_key: Optional[str] = Header(None)
+):
+    """
+    Update a user's fee tier
+    
+    Admin only endpoint to change user fee tier:
+    - team: 0% fees
+    - vip: 5% fees
+    - standard: 10% fees
+    """
+    # Verify admin authentication
+    if x_admin_key != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    try:
+        data = await request.json()
+        user_id = data.get('user_id')
+        new_tier = data.get('new_tier')
+        
+        if not user_id or not new_tier:
+            raise HTTPException(status_code=400, detail="Missing user_id or new_tier")
+        
+        if new_tier not in ['team', 'vip', 'standard']:
+            raise HTTPException(status_code=400, detail="Invalid tier. Must be: team, vip, or standard")
+        
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        
+        # Update the user's tier
+        cur.execute(
+            "UPDATE follower_users SET fee_tier = %s WHERE id = %s",
+            (new_tier, user_id)
+        )
+        
+        rows_updated = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if rows_updated == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        tier_names = {'team': 'Team (0%)', 'vip': 'VIP (5%)', 'standard': 'Standard (10%)'}
+        return {"status": "success", "message": f"User moved to {tier_names[new_tier]}"}
     
     except HTTPException:
         raise
