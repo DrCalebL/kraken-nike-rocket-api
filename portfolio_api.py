@@ -2,7 +2,7 @@
 # ====================================================
 # FULLY CORRECTED VERSION - Proper column names for all tables
 # FIXED: Uses pnl_usd column (not pnl)
-# CONSOLIDATED: Updates follower_users as primary source of truth
+# OPTIMIZED: Uses shared database connection pool
 # NO CIRCULAR IMPORTS
 
 from fastapi import APIRouter, Request, HTTPException
@@ -11,6 +11,9 @@ from decimal import Decimal
 import asyncpg
 import os
 from cryptography.fernet import Fernet
+
+# Import shared database pool
+from db import get_pool
 
 router = APIRouter()
 
@@ -38,23 +41,18 @@ def decrypt_credentials(encrypted_key: str, encrypted_secret: str) -> tuple:
 
 async def get_kraken_credentials(api_key: str):
     """Get user's Kraken API credentials from database"""
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    pool = await get_pool()
     
-    conn = await asyncpg.connect(DATABASE_URL)
-    
-    user = await conn.fetchrow("""
-        SELECT 
-            kraken_api_key_encrypted, 
-            kraken_api_secret_encrypted,
-            credentials_set
-        FROM follower_users
-        WHERE api_key = $1
-        AND credentials_set = true
-    """, api_key)
-    
-    await conn.close()
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow("""
+            SELECT 
+                kraken_api_key_encrypted, 
+                kraken_api_secret_encrypted,
+                credentials_set
+            FROM follower_users
+            WHERE api_key = $1
+            AND credentials_set = true
+        """, api_key)
     
     if not user:
         return None
@@ -98,51 +96,35 @@ async def get_current_kraken_balance(kraken_key: str, kraken_secret: str):
 
 @router.post("/api/portfolio/initialize")
 async def initialize_portfolio_autodetect(request: Request):
-    """
-    Initialize portfolio tracking - AUTO-DETECTS initial capital from Kraken
-    
-    CONSOLIDATED: Updates both follower_users (primary) and portfolio_users (backwards compat)
-    """
+    """Initialize portfolio tracking - AUTO-DETECTS initial capital from Kraken"""
     api_key = request.headers.get("X-API-Key")
     
     if not api_key:
         raise HTTPException(status_code=401, detail="API key required")
     
     try:
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-        
-        conn = await asyncpg.connect(DATABASE_URL)
+        pool = await get_pool()
         
         credentials = await get_kraken_credentials(api_key)
         
         if not credentials:
-            await conn.close()
             return {
                 "status": "error",
                 "message": "Please set up your trading agent first."
             }
         
-        # Check if already initialized in either table
-        existing = await conn.fetchrow(
-            "SELECT * FROM portfolio_users WHERE api_key = $1",
-            api_key
-        )
-        
-        fu_existing = await conn.fetchrow(
-            "SELECT portfolio_initialized, initial_capital FROM follower_users WHERE api_key = $1",
-            api_key
-        )
-        
-        if existing or (fu_existing and fu_existing['portfolio_initialized']):
-            initial_cap = existing['initial_capital'] if existing else fu_existing['initial_capital']
-            await conn.close()
-            return {
-                "status": "already_initialized",
-                "message": "Portfolio already initialized",
-                "initial_capital": float(initial_cap or 0)
-            }
+        async with pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT * FROM portfolio_users WHERE api_key = $1",
+                api_key
+            )
+            
+            if existing:
+                return {
+                    "status": "already_initialized",
+                    "message": "Portfolio already initialized",
+                    "initial_capital": float(existing['initial_capital'])
+                }
         
         kraken_balance = await get_current_kraken_balance(
             credentials['kraken_key'],
@@ -150,14 +132,12 @@ async def initialize_portfolio_autodetect(request: Request):
         )
         
         if kraken_balance is None:
-            await conn.close()
             return {
                 "status": "error",
                 "message": "Could not connect to Kraken. Please check your agent setup."
             }
         
         if kraken_balance <= 0:
-            await conn.close()
             return {
                 "status": "error",
                 "message": f"Your Kraken balance is $0. Please deposit funds first."
@@ -165,7 +145,6 @@ async def initialize_portfolio_autodetect(request: Request):
         
         MINIMUM_BALANCE = 10
         if kraken_balance < MINIMUM_BALANCE:
-            await conn.close()
             return {
                 "status": "error",
                 "message": f"Minimum balance: ${MINIMUM_BALANCE}. Your balance: ${float(kraken_balance):.2f}"
@@ -173,38 +152,18 @@ async def initialize_portfolio_autodetect(request: Request):
         
         initial_capital = float(kraken_balance)
         
-        # CONSOLIDATED: Update follower_users (primary source of truth)
-        await conn.execute("""
-            UPDATE follower_users SET
-                initial_capital = $1,
-                last_known_balance = $1,
-                portfolio_initialized = true,
-                started_tracking_at = CURRENT_TIMESTAMP
-            WHERE api_key = $2
-        """, initial_capital, api_key)
-        
-        # BACKWARDS COMPAT: Also insert into portfolio_users
-        await conn.execute("""
-            INSERT INTO portfolio_users (api_key, initial_capital, created_at, last_known_balance)
-            VALUES ($1, $2, CURRENT_TIMESTAMP, $2)
-            ON CONFLICT (api_key) DO NOTHING
-        """, api_key, initial_capital)
-        
-        # Get user_id for proper FK
-        user_id = await conn.fetchval(
-            "SELECT id FROM follower_users WHERE api_key = $1",
-            api_key
-        )
-        
-        # Record initial transaction with proper FKs
-        await conn.execute("""
-            INSERT INTO portfolio_transactions (
-                follower_user_id, user_id, transaction_type, amount, detection_method, notes
-            ) VALUES ($1, $2, 'initial', $3, 'automatic', $4)
-        """, user_id, api_key, initial_capital, 
-            f'Auto-detected from Kraken balance: ${initial_capital:,.2f}')
-        
-        await conn.close()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO portfolio_users (api_key, initial_capital, created_at, last_known_balance)
+                VALUES ($1, $2, CURRENT_TIMESTAMP, $2)
+            """, api_key, initial_capital)
+            
+            await conn.execute("""
+                INSERT INTO portfolio_transactions (
+                    user_id, transaction_type, amount, detection_method, notes
+                ) VALUES ($1, 'initial', $2, 'automatic', $3)
+            """, api_key, initial_capital, 
+                f'Auto-detected from Kraken balance: ${initial_capital:,.2f}')
         
         return {
             "status": "success",
@@ -231,26 +190,20 @@ async def get_balance_summary(request: Request):
     try:
         from balance_checker import BalanceChecker
         
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-        
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        checker = BalanceChecker(db_pool)
+        pool = await get_pool()
+        checker = BalanceChecker(pool)
         summary = await checker.get_balance_summary(api_key)
         
         # Also get total profit from actual trades
-        conn = await db_pool.acquire()
-        trade_stats = await conn.fetchrow("""
-            SELECT 
-                COALESCE(SUM(t.profit_usd), 0) as total_profit,
-                COUNT(*) as total_trades
-            FROM trades t
-            JOIN follower_users fu ON t.user_id = fu.id
-            WHERE fu.api_key = $1
-        """, api_key)
-        await db_pool.release(conn)
-        await db_pool.close()
+        async with pool.acquire() as conn:
+            trade_stats = await conn.fetchrow("""
+                SELECT 
+                    COALESCE(SUM(t.profit_usd), 0) as total_profit,
+                    COUNT(*) as total_trades
+                FROM trades t
+                JOIN follower_users fu ON t.user_id = fu.id
+                WHERE fu.api_key = $1
+            """, api_key)
         
         if not summary:
             return {
@@ -306,14 +259,9 @@ async def get_transactions(request: Request):
     try:
         from balance_checker import BalanceChecker
         
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-        
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        checker = BalanceChecker(db_pool)
+        pool = await get_pool()
+        checker = BalanceChecker(pool)
         transactions = await checker.get_transaction_history(api_key, limit)
-        await db_pool.close()
         
         return {
             "status": "success",
@@ -369,14 +317,9 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
     try:
         from balance_checker import BalanceChecker
         
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-        
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        checker = BalanceChecker(db_pool)
+        pool = await get_pool()
+        checker = BalanceChecker(pool)
         summary = await checker.get_balance_summary(api_key)
-        await db_pool.close()
         
         if not summary:
             return {
@@ -384,10 +327,9 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
                 "message": "Portfolio not initialized"
             }
         
-        conn = await asyncpg.connect(DATABASE_URL)
-        
-        # Calculate date range based on period
-        now = datetime.utcnow()
+        async with pool.acquire() as conn:
+            # Calculate date range based on period
+            now = datetime.utcnow()
         if period == "7d":
             start_date = now - timedelta(days=7)
             period_label = "Last 7 Days"
@@ -428,7 +370,7 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             WHERE fu.api_key = $1
         """, api_key)
         
-        await conn.close()
+        await pool.release(conn)
         
         total_trades = len(trades_query)
         
@@ -637,42 +579,35 @@ async def get_equity_curve(request: Request):
     try:
         from balance_checker import BalanceChecker
         
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+        pool = await get_pool()
         
         # Get initial capital from balance summary
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        checker = BalanceChecker(db_pool)
+        checker = BalanceChecker(pool)
         summary = await checker.get_balance_summary(api_key)
-        await db_pool.close()
         
         initial_capital = summary.get('initial_capital', 0) if summary else 0
         if initial_capital <= 0:
             initial_capital = summary.get('current_value', 1000) if summary else 1000
         
         # Get all trades sorted by time (from trades table, not portfolio_trades)
-        conn = await asyncpg.connect(DATABASE_URL)
-        
-        trades = await conn.fetch("""
-            SELECT 
-                t.profit_usd as pnl_usd,
-                t.closed_at as exit_time,
-                t.symbol,
-                t.side
-            FROM trades t
-            JOIN follower_users fu ON t.user_id = fu.id
-            WHERE fu.api_key = $1
-            AND t.closed_at IS NOT NULL
-            ORDER BY t.closed_at ASC
-        """, api_key)
-        
-        # Get portfolio start date
-        start_date = await conn.fetchval("""
-            SELECT created_at FROM follower_users WHERE api_key = $1
-        """, api_key)
-        
-        await conn.close()
+        async with pool.acquire() as conn:
+            trades = await conn.fetch("""
+                SELECT 
+                    t.profit_usd as pnl_usd,
+                    t.closed_at as exit_time,
+                    t.symbol,
+                    t.side
+                FROM trades t
+                JOIN follower_users fu ON t.user_id = fu.id
+                WHERE fu.api_key = $1
+                AND t.closed_at IS NOT NULL
+                ORDER BY t.closed_at ASC
+            """, api_key)
+            
+            # Get portfolio start date
+            start_date = await conn.fetchval("""
+                SELECT created_at FROM follower_users WHERE api_key = $1
+            """, api_key)
         
         if not trades:
             return {
@@ -782,12 +717,10 @@ async def export_monthly_trades(request: Request, key: str, year: int, month: in
     - Individual trade details
     - Net P&L summary at bottom
     """
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    pool = await get_pool()
     
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await pool.acquire()
         
         # Verify user exists
         user = await conn.fetchrow(
@@ -796,7 +729,7 @@ async def export_monthly_trades(request: Request, key: str, year: int, month: in
         )
         
         if not user:
-            await conn.close()
+            await pool.release(conn)
             raise HTTPException(status_code=404, detail="User not found")
         
         # Get trades for the specified month
@@ -825,7 +758,7 @@ async def export_monthly_trades(request: Request, key: str, year: int, month: in
             ORDER BY closed_at ASC
         """, user['id'], start_date, end_date)
         
-        await conn.close()
+        await pool.release(conn)
         
         # Create CSV
         output = io.StringIO()
@@ -918,12 +851,10 @@ async def export_yearly_trades(request: Request, key: str, year: int):
     - Monthly breakdown
     - Yearly summary
     """
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    pool = await get_pool()
     
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await pool.acquire()
         
         # Verify user exists
         user = await conn.fetchrow(
@@ -932,7 +863,7 @@ async def export_yearly_trades(request: Request, key: str, year: int):
         )
         
         if not user:
-            await conn.close()
+            await pool.release(conn)
             raise HTTPException(status_code=404, detail="User not found")
         
         # Get all trades for the year
@@ -958,7 +889,7 @@ async def export_yearly_trades(request: Request, key: str, year: int):
             ORDER BY closed_at ASC
         """, user['id'], start_date, end_date)
         
-        await conn.close()
+        await pool.release(conn)
         
         # Create CSV
         output = io.StringIO()
