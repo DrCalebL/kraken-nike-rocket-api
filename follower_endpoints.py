@@ -25,7 +25,7 @@ Updated: November 24, 2025
 from fastapi import APIRouter, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict
 import os
 import secrets
@@ -113,6 +113,19 @@ class PaymentCreate(BaseModel):
 class ExecutionConfirmation(BaseModel):
     """Confirm signal execution"""
     delivery_id: int
+
+
+class ExecutionConfirmRequest(BaseModel):
+    """Confirm signal execution with details (BUG #5 FIX)"""
+    delivery_id: int
+    signal_id: Optional[str] = None
+    executed_at: Optional[str] = None
+    execution_price: Optional[float] = None
+
+
+class RetryFailedSignalRequest(BaseModel):
+    """Request to retry a failed signal (ISSUE #2)"""
+    failed_signal_id: int
 
 
 class SetupAgentRequest(BaseModel):
@@ -242,6 +255,10 @@ async def get_latest_signal(
     Called by: Follower agents every 10 seconds
     Auth: Requires user API key
     Returns: Latest unacknowledged signal, or null
+    
+    FIXES APPLIED (Nov 27, 2025):
+    - BUG #3: Now uses timezone-aware datetime comparison
+    - BUG #2: Now returns risk_pct in signal response
     """
     try:
         # Check if user has access
@@ -253,9 +270,11 @@ async def get_latest_signal(
             }
         
         # Get latest unacknowledged signal for this user
+        # ISSUE #1 FIX: Also exclude failed signals
         delivery = db.query(SignalDelivery).join(Signal).filter(
             SignalDelivery.user_id == user.id,
-            SignalDelivery.acknowledged == False
+            SignalDelivery.acknowledged == False,
+            SignalDelivery.failed == False  # Don't return failed signals
         ).order_by(Signal.created_at.desc()).first()
         
         if not delivery:
@@ -265,8 +284,15 @@ async def get_latest_signal(
                 "message": "No new signals"
             }
         
-        # Check if signal is expired (older than 15 minutes)
-        signal_age_seconds = (datetime.utcnow() - delivery.signal.created_at).total_seconds()
+        # BUG #3 FIX: Use timezone-aware datetime comparison
+        now_utc = datetime.now(timezone.utc)
+        signal_created = delivery.signal.created_at
+        
+        # Make signal_created timezone-aware if it isn't
+        if signal_created.tzinfo is None:
+            signal_created = signal_created.replace(tzinfo=timezone.utc)
+        
+        signal_age_seconds = (now_utc - signal_created).total_seconds()
         signal_age_minutes = signal_age_seconds / 60
         
         if signal_age_minutes > SIGNAL_EXPIRATION_MINUTES:
@@ -285,7 +311,7 @@ async def get_latest_signal(
                 "message": f"Signal expired ({signal_age_minutes:.0f} min old)"
             }
         
-        # Return signal for execution
+        # Return signal for execution (BUG #2 FIX: include risk_pct)
         return {
             "access_granted": True,
             "signal": {
@@ -297,6 +323,7 @@ async def get_latest_signal(
                 "stop_loss": delivery.signal.stop_loss,
                 "take_profit": delivery.signal.take_profit,
                 "leverage": delivery.signal.leverage,
+                "risk_pct": getattr(delivery.signal, 'risk_pct', 0.02),  # Include risk percentage!
                 "timeframe": delivery.signal.timeframe,
                 "trend_strength": delivery.signal.trend_strength,
                 "volatility": delivery.signal.volatility,
@@ -348,6 +375,258 @@ async def acknowledge_signal(
     
     except Exception as e:
         logger.error(f"❌ Error acknowledging signal: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== BUG #5 FIX: Missing /api/confirm-execution endpoint ====================
+
+@router.post("/api/confirm-execution")
+async def confirm_execution(
+    data: ExecutionConfirmRequest,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Confirm successful signal execution (two-phase acknowledgment)
+    
+    BUG #5 FIX: This endpoint was missing, causing 404 errors and potential duplicate trades.
+    
+    Called by: Follower agent after successfully executing trade
+    Auth: Requires user API key in header
+    
+    Purpose:
+    - Marks signal as executed (prevents re-delivery)
+    - Records execution timestamp and price
+    - Idempotent - safe to call multiple times
+    """
+    try:
+        # Verify API key
+        if not x_api_key:
+            raise HTTPException(status_code=401, detail="API key required in X-API-Key header")
+        
+        user = db.query(User).filter(User.api_key == x_api_key).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Invalid API key")
+        
+        # Find delivery
+        delivery = db.query(SignalDelivery).filter(
+            SignalDelivery.id == data.delivery_id,
+            SignalDelivery.user_id == user.id
+        ).first()
+        
+        if not delivery:
+            raise HTTPException(status_code=404, detail="Delivery not found")
+        
+        # Check if already confirmed (idempotent)
+        if getattr(delivery, 'executed', False):
+            logger.info(f"✓ Signal {data.delivery_id} already confirmed for {user.email}")
+            return {
+                "status": "already_confirmed",
+                "message": "Signal was already confirmed",
+                "delivery_id": data.delivery_id
+            }
+        
+        # Parse execution timestamp
+        executed_at = datetime.utcnow()
+        if data.executed_at:
+            try:
+                executed_at = datetime.fromisoformat(data.executed_at.replace('Z', '+00:00'))
+            except:
+                pass  # Use default
+        
+        # Mark as acknowledged AND executed
+        delivery.acknowledged = True
+        delivery.acknowledged_at = executed_at
+        
+        # Set executed if column exists
+        if hasattr(delivery, 'executed'):
+            delivery.executed = True
+        if hasattr(delivery, 'executed_at'):
+            delivery.executed_at = executed_at
+        if hasattr(delivery, 'execution_price') and data.execution_price:
+            delivery.execution_price = data.execution_price
+        
+        db.commit()
+        
+        logger.info(f"✅ Signal execution confirmed:")
+        logger.info(f"   User: {user.email}")
+        logger.info(f"   Delivery ID: {data.delivery_id}")
+        logger.info(f"   Signal ID: {data.signal_id}")
+        
+        return {
+            "status": "confirmed",
+            "message": "Signal execution confirmed",
+            "delivery_id": data.delivery_id,
+            "executed_at": executed_at.isoformat()
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error confirming execution: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== ISSUE #2 FIX: Failed Signals Retry Queue ====================
+
+@router.post("/api/mark-signal-failed")
+async def mark_signal_failed(
+    delivery_id: int,
+    failure_reason: str,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Mark a signal delivery as failed for later retry (ISSUE #2)
+    
+    Called by: Follower agent when all retry attempts fail
+    Purpose: Allows admin to review and retry failed signals
+    """
+    try:
+        if not x_api_key:
+            raise HTTPException(status_code=401, detail="API key required")
+        
+        user = db.query(User).filter(User.api_key == x_api_key).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Invalid API key")
+        
+        delivery = db.query(SignalDelivery).filter(
+            SignalDelivery.id == delivery_id,
+            SignalDelivery.user_id == user.id
+        ).first()
+        
+        if not delivery:
+            raise HTTPException(status_code=404, detail="Delivery not found")
+        
+        # Mark as failed
+        delivery.failed = True
+        delivery.failure_reason = failure_reason
+        if hasattr(delivery, 'retry_count'):
+            delivery.retry_count = (delivery.retry_count or 0) + 1
+        
+        db.commit()
+        
+        logger.warning(f"⚠️ Signal marked as failed:")
+        logger.warning(f"   User: {user.email}")
+        logger.warning(f"   Delivery ID: {delivery_id}")
+        logger.warning(f"   Reason: {failure_reason}")
+        
+        return {
+            "status": "marked_failed",
+            "delivery_id": delivery_id,
+            "retry_count": getattr(delivery, 'retry_count', 1)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error marking signal failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/failed-signals")
+async def get_failed_signals(
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """
+    Get list of failed signals for a user (ISSUE #2)
+    
+    Called by: Dashboard or admin panel
+    Purpose: Review and retry failed trades
+    """
+    try:
+        if not x_api_key:
+            raise HTTPException(status_code=401, detail="API key required")
+        
+        user = db.query(User).filter(User.api_key == x_api_key).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Invalid API key")
+        
+        failed_deliveries = db.query(SignalDelivery).join(Signal).filter(
+            SignalDelivery.user_id == user.id,
+            SignalDelivery.failed == True
+        ).order_by(Signal.created_at.desc()).limit(limit).all()
+        
+        signals = []
+        for delivery in failed_deliveries:
+            signals.append({
+                "delivery_id": delivery.id,
+                "signal_id": delivery.signal.signal_id,
+                "action": delivery.signal.action,
+                "symbol": delivery.signal.symbol,
+                "entry_price": delivery.signal.entry_price,
+                "failure_reason": getattr(delivery, 'failure_reason', None),
+                "retry_count": getattr(delivery, 'retry_count', 0),
+                "created_at": delivery.signal.created_at.isoformat()
+            })
+        
+        return {
+            "status": "success",
+            "failed_signals": signals,
+            "count": len(signals)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error getting failed signals: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/retry-failed-signal")
+async def retry_failed_signal(
+    data: RetryFailedSignalRequest,
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    db: Session = Depends(get_db)
+):
+    """
+    Reset a failed signal for retry (ISSUE #2)
+    
+    Called by: Admin or user dashboard
+    Purpose: Allow retry of failed trades
+    """
+    try:
+        if not x_api_key:
+            raise HTTPException(status_code=401, detail="API key required")
+        
+        user = db.query(User).filter(User.api_key == x_api_key).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Invalid API key")
+        
+        delivery = db.query(SignalDelivery).filter(
+            SignalDelivery.id == data.failed_signal_id,
+            SignalDelivery.user_id == user.id,
+            SignalDelivery.failed == True
+        ).first()
+        
+        if not delivery:
+            raise HTTPException(status_code=404, detail="Failed signal not found")
+        
+        # Reset for retry
+        delivery.failed = False
+        delivery.failure_reason = None
+        delivery.acknowledged = False
+        if hasattr(delivery, 'executed'):
+            delivery.executed = False
+        
+        db.commit()
+        
+        logger.info(f"🔄 Signal reset for retry:")
+        logger.info(f"   User: {user.email}")
+        logger.info(f"   Delivery ID: {data.failed_signal_id}")
+        
+        return {
+            "status": "reset_for_retry",
+            "delivery_id": data.failed_signal_id,
+            "message": "Signal will be delivered on next poll"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error retrying signal: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
