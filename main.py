@@ -84,6 +84,23 @@ if DATABASE_URL:
     engine = create_engine(DATABASE_URL)
     init_db(engine)
     init_portfolio_db(engine)
+    
+    # Run schema migrations BEFORE any ORM queries
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            ALTER TABLE follower_users 
+            ADD COLUMN IF NOT EXISTS fee_tier VARCHAR(20) DEFAULT 'standard'
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database schema up to date")
+    except Exception as e:
+        print(f"Note: Schema migration - {e}")
+    
     print("✅ Database initialized")
 else:
     print("⚠️ DATABASE_URL not set - database features disabled")
