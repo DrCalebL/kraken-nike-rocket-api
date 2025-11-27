@@ -543,9 +543,9 @@ class PositionMonitor:
                 await conn.execute("""
                     INSERT INTO trades 
                     (user_id, trade_id, kraken_order_id, opened_at, closed_at, 
-                     symbol, side, entry_price, exit_price, position_size, 
+                     symbol, side, entry_price, exit_price, position_size, leverage,
                      profit_usd, fee_charged, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 """,
                     user_id,
                     trade_id,
@@ -557,6 +557,7 @@ class PositionMonitor:
                     trade.get('price', 0),
                     trade.get('price', 0),  # Same as entry for recovered trades
                     trade.get('amount', 0),
+                    1.0,  # Default leverage for recovered trades
                     0.0,  # Unknown P&L
                     0.0,  # No fee until P&L known
                     f"RECOVERED from exchange history - needs review ({fee_tier} tier)"
