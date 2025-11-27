@@ -173,7 +173,7 @@ async def health():
 
 # Admin Dashboard (NEW!)
 @app.get("/admin", response_class=HTMLResponse)
-@limiter.limit("5/minute", "20/hour")  # Prevent brute force password guessing
+@limiter.limit("5/minute;20/hour")  # Prevent brute force password guessing
 async def admin_dashboard(request: Request, password: str = ""):
     """
     Admin dashboard to monitor hosted follower agents
@@ -345,7 +345,7 @@ async def admin_dashboard(request: Request, password: str = ""):
 
 # Database Reset Endpoint (NEW!)
 @app.post("/admin/reset-database")
-@limiter.limit("3/minute", "10/hour")  # Prevent abuse of dangerous endpoint
+@limiter.limit("3/minute;10/hour")  # Prevent abuse of dangerous endpoint
 async def reset_database(request: Request, password: str = ""):
     """
     DANGER ZONE: Reset entire database
