@@ -12,11 +12,16 @@ Updated: November 24, 2025 - WITH HOSTED TRADING
 from fastapi import FastAPI, Request, HTTPException, Header
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from sqlalchemy import create_engine
 import os
 import asyncio
 import asyncpg
+
+# Rate limiting
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 # Import follower system
 from follower_models import init_db
@@ -74,6 +79,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ═══════════════════════════════════════════════════════════════
+# RATE LIMITING - Prevent abuse and brute force attacks
+# ═══════════════════════════════════════════════════════════════
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
+app.state.limiter = limiter
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "status": "error",
+            "message": "Too many requests. Please slow down.",
+            "retry_after": str(exc.detail)
+        }
+    )
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -151,7 +173,8 @@ async def health():
 
 # Admin Dashboard (NEW!)
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard(password: str = ""):
+@limiter.limit("5/minute", "20/hour")  # Prevent brute force password guessing
+async def admin_dashboard(request: Request, password: str = ""):
     """
     Admin dashboard to monitor hosted follower agents
     
@@ -322,7 +345,8 @@ async def admin_dashboard(password: str = ""):
 
 # Database Reset Endpoint (NEW!)
 @app.post("/admin/reset-database")
-async def reset_database(password: str = ""):
+@limiter.limit("3/minute", "10/hour")  # Prevent abuse of dangerous endpoint
+async def reset_database(request: Request, password: str = ""):
     """
     DANGER ZONE: Reset entire database
     
@@ -456,6 +480,7 @@ async def delete_review_position(
 
 
 @app.post("/admin/update-user-tier")
+@limiter.limit("10/minute")  # Admin action rate limit
 async def update_user_tier_endpoint(
     request: Request,
     x_admin_key: Optional[str] = Header(None)
