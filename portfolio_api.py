@@ -734,3 +734,303 @@ async def get_equity_curve(request: Request):
             "total_trades": 0,
             "total_pnl": 0
         }
+
+
+# ==================== TRADE EXPORT ENDPOINTS ====================
+
+from fastapi.responses import StreamingResponse
+import io
+import csv
+
+@router.get("/portfolio/trades/monthly-csv")
+async def export_monthly_trades(request: Request, key: str, year: int, month: int):
+    """
+    Export monthly trades as CSV for customer dashboard
+    
+    Includes:
+    - Individual trade details
+    - Net P&L summary at bottom
+    """
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Verify user exists
+        user = await conn.fetchrow(
+            "SELECT id, email, fee_tier FROM follower_users WHERE api_key = $1",
+            key
+        )
+        
+        if not user:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get trades for the specified month
+        start_date = datetime(year, month, 1)
+        if month == 12:
+            end_date = datetime(year + 1, 1, 1)
+        else:
+            end_date = datetime(year, month + 1, 1)
+        
+        trades = await conn.fetch("""
+            SELECT 
+                closed_at,
+                symbol,
+                side,
+                entry_price,
+                exit_price,
+                position_size,
+                leverage,
+                profit_usd,
+                profit_percent,
+                notes
+            FROM trades
+            WHERE user_id = $1
+            AND closed_at >= $2
+            AND closed_at < $3
+            ORDER BY closed_at ASC
+        """, user['id'], start_date, end_date)
+        
+        await conn.close()
+        
+        # Create CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        month_name = start_date.strftime('%B %Y')
+        writer.writerow([f"Trade History - {month_name}"])
+        writer.writerow([f"User: {user['email']}"])
+        writer.writerow([f"Fee Tier: {user['fee_tier'] or 'standard'}"])
+        writer.writerow([])
+        
+        # Column headers
+        writer.writerow([
+            'Date (UTC)', 'Symbol', 'Side', 'Entry Price', 'Exit Price',
+            'Position Size', 'Leverage', 'P&L ($)', 'P&L (%)', 'Notes'
+        ])
+        
+        # Trade rows
+        total_pnl = 0
+        winning_trades = 0
+        losing_trades = 0
+        
+        for trade in trades:
+            pnl = float(trade['profit_usd'] or 0)
+            total_pnl += pnl
+            
+            if pnl > 0:
+                winning_trades += 1
+            elif pnl < 0:
+                losing_trades += 1
+            
+            writer.writerow([
+                trade['closed_at'].strftime('%Y-%m-%d %H:%M:%S'),
+                trade['symbol'],
+                trade['side'],
+                f"${trade['entry_price']:.4f}",
+                f"${trade['exit_price']:.4f}",
+                trade['position_size'],
+                f"{trade['leverage']}x",
+                f"${pnl:+.2f}",
+                f"{trade['profit_percent']:+.2f}%",
+                trade['notes'] or ''
+            ])
+        
+        # Summary section
+        writer.writerow([])
+        writer.writerow(['=' * 50])
+        writer.writerow(['MONTHLY SUMMARY'])
+        writer.writerow(['=' * 50])
+        writer.writerow(['Total Trades', len(trades)])
+        writer.writerow(['Winning Trades', winning_trades])
+        writer.writerow(['Losing Trades', losing_trades])
+        writer.writerow(['Win Rate', f"{(winning_trades/len(trades)*100):.1f}%" if trades else "N/A"])
+        writer.writerow([])
+        writer.writerow(['NET P&L', f"${total_pnl:+.2f}"])
+        
+        # Calculate fee based on tier
+        fee_rates = {'team': 0.0, 'vip': 0.05, 'standard': 0.10}
+        fee_rate = fee_rates.get(user['fee_tier'] or 'standard', 0.10)
+        fee_due = max(0, total_pnl * fee_rate) if total_pnl > 0 else 0
+        
+        writer.writerow(['Fee Rate', f"{int(fee_rate * 100)}%"])
+        writer.writerow(['Fee Due', f"${fee_due:.2f}"])
+        
+        # Prepare response
+        output.seek(0)
+        filename = f"trades_{year}_{month:02d}_{user['email'].split('@')[0]}.csv"
+        
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error exporting monthly trades: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/portfolio/trades/yearly-csv")
+async def export_yearly_trades(request: Request, key: str, year: int):
+    """
+    Export yearly trades as CSV for customer dashboard
+    
+    Includes:
+    - All trades for the year
+    - Monthly breakdown
+    - Yearly summary
+    """
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Verify user exists
+        user = await conn.fetchrow(
+            "SELECT id, email, fee_tier FROM follower_users WHERE api_key = $1",
+            key
+        )
+        
+        if not user:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get all trades for the year
+        start_date = datetime(year, 1, 1)
+        end_date = datetime(year + 1, 1, 1)
+        
+        trades = await conn.fetch("""
+            SELECT 
+                closed_at,
+                symbol,
+                side,
+                entry_price,
+                exit_price,
+                position_size,
+                leverage,
+                profit_usd,
+                profit_percent,
+                notes
+            FROM trades
+            WHERE user_id = $1
+            AND closed_at >= $2
+            AND closed_at < $3
+            ORDER BY closed_at ASC
+        """, user['id'], start_date, end_date)
+        
+        await conn.close()
+        
+        # Create CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow([f"Trade History - {year}"])
+        writer.writerow([f"User: {user['email']}"])
+        writer.writerow([f"Fee Tier: {user['fee_tier'] or 'standard'}"])
+        writer.writerow([])
+        
+        # Column headers
+        writer.writerow([
+            'Date (UTC)', 'Symbol', 'Side', 'Entry Price', 'Exit Price',
+            'Position Size', 'Leverage', 'P&L ($)', 'P&L (%)', 'Notes'
+        ])
+        
+        # Track monthly stats
+        monthly_pnl = {}
+        total_pnl = 0
+        winning_trades = 0
+        losing_trades = 0
+        
+        for trade in trades:
+            pnl = float(trade['profit_usd'] or 0)
+            total_pnl += pnl
+            
+            # Track by month
+            month_key = trade['closed_at'].strftime('%Y-%m')
+            if month_key not in monthly_pnl:
+                monthly_pnl[month_key] = {'pnl': 0, 'trades': 0, 'wins': 0}
+            monthly_pnl[month_key]['pnl'] += pnl
+            monthly_pnl[month_key]['trades'] += 1
+            
+            if pnl > 0:
+                winning_trades += 1
+                monthly_pnl[month_key]['wins'] += 1
+            elif pnl < 0:
+                losing_trades += 1
+            
+            writer.writerow([
+                trade['closed_at'].strftime('%Y-%m-%d %H:%M:%S'),
+                trade['symbol'],
+                trade['side'],
+                f"${trade['entry_price']:.4f}",
+                f"${trade['exit_price']:.4f}",
+                trade['position_size'],
+                f"{trade['leverage']}x",
+                f"${pnl:+.2f}",
+                f"{trade['profit_percent']:+.2f}%",
+                trade['notes'] or ''
+            ])
+        
+        # Monthly breakdown
+        writer.writerow([])
+        writer.writerow(['=' * 50])
+        writer.writerow(['MONTHLY BREAKDOWN'])
+        writer.writerow(['=' * 50])
+        writer.writerow(['Month', 'Trades', 'Wins', 'Win Rate', 'P&L'])
+        
+        for month_key in sorted(monthly_pnl.keys()):
+            m = monthly_pnl[month_key]
+            win_rate = (m['wins'] / m['trades'] * 100) if m['trades'] > 0 else 0
+            writer.writerow([
+                month_key,
+                m['trades'],
+                m['wins'],
+                f"{win_rate:.1f}%",
+                f"${m['pnl']:+.2f}"
+            ])
+        
+        # Yearly summary
+        writer.writerow([])
+        writer.writerow(['=' * 50])
+        writer.writerow(['YEARLY SUMMARY'])
+        writer.writerow(['=' * 50])
+        writer.writerow(['Total Trades', len(trades)])
+        writer.writerow(['Winning Trades', winning_trades])
+        writer.writerow(['Losing Trades', losing_trades])
+        writer.writerow(['Win Rate', f"{(winning_trades/len(trades)*100):.1f}%" if trades else "N/A"])
+        writer.writerow([])
+        writer.writerow(['NET P&L', f"${total_pnl:+.2f}"])
+        
+        # Calculate fee based on tier
+        fee_rates = {'team': 0.0, 'vip': 0.05, 'standard': 0.10}
+        fee_rate = fee_rates.get(user['fee_tier'] or 'standard', 0.10)
+        fee_due = max(0, total_pnl * fee_rate) if total_pnl > 0 else 0
+        
+        writer.writerow(['Fee Rate', f"{int(fee_rate * 100)}%"])
+        writer.writerow(['Estimated Annual Fee', f"${fee_due:.2f}"])
+        
+        # Prepare response
+        output.seek(0)
+        filename = f"trades_{year}_{user['email'].split('@')[0]}.csv"
+        
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error exporting yearly trades: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
