@@ -160,13 +160,14 @@ async def get_kraken_closed_trades(api_key: str, api_secret: str, since_days: in
         return []
 
 
-async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, round_trips: list, fee_tier: str = 'standard'):
+async def backfill_trades(conn, user_id: int, round_trips: list, fee_tier: str = 'standard'):
     """
-    Insert round-trip trades into portfolio_trades table
+    Insert round-trip trades into trades table (linked to follower_users)
     
     Args:
-        portfolio_user_id: ID in portfolio_users table (for trades FK)
-        follower_user_id: ID in follower_users table (for fee tracking)
+        user_id: ID in follower_users table
+        round_trips: List of trade dicts from Kraken
+        fee_tier: User's fee tier for calculating fees
     """
     fee_rates = {'team': 0.0, 'vip': 0.05, 'standard': 0.10}
     fee_rate = fee_rates.get(fee_tier, 0.10)
@@ -178,11 +179,11 @@ async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, r
     for trade in round_trips:
         # Check if trade already exists (avoid duplicates)
         existing = await conn.fetchrow("""
-            SELECT id FROM portfolio_trades 
+            SELECT id FROM trades 
             WHERE user_id = $1 
             AND symbol = $2 
-            AND ABS(EXTRACT(EPOCH FROM exit_time) - $3) < 60
-        """, portfolio_user_id, trade['symbol'], trade['exit_time'] / 1000)
+            AND ABS(EXTRACT(EPOCH FROM closed_at) - $3) < 60
+        """, user_id, trade['symbol'], trade['exit_time'] / 1000)
         
         if existing:
             print(f"  ⏭️ Skipping duplicate: {trade['symbol']} @ {datetime.fromtimestamp(trade['exit_time']/1000)}")
@@ -191,20 +192,15 @@ async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, r
         # Calculate fee (only on profits)
         fee_charged = max(0, trade['pnl_usd'] * fee_rate) if trade['pnl_usd'] > 0 else 0
         
-        # Insert trade into portfolio_trades table
-        # Schema: id, user_id, symbol, side, entry_price, exit_price, quantity, 
-        #         leverage, entry_time, exit_time, pnl_usd, pnl_percent, 
-        #         account_balance_at_entry, status, created_at
-        status = 'WIN' if trade['pnl_usd'] > 0 else 'LOSS'
-        
+        # Insert trade into trades table
         await conn.execute("""
-            INSERT INTO portfolio_trades (
+            INSERT INTO trades (
                 user_id, symbol, side, entry_price, exit_price,
-                quantity, leverage, entry_time, exit_time, 
-                pnl_usd, pnl_percent, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                position_size, leverage, opened_at, closed_at, 
+                profit_usd, profit_percent, fee_charged, notes
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         """,
-            portfolio_user_id,
+            user_id,
             trade['symbol'],
             trade['side'].upper(),
             trade['entry_price'],
@@ -215,16 +211,15 @@ async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, r
             datetime.fromtimestamp(trade['exit_time'] / 1000),
             trade['pnl_usd'],
             trade['pnl_pct'],
-            status
+            fee_charged,
+            'Reconciled from Kraken'
         )
         
         inserted += 1
         total_pnl += trade['pnl_usd']
         total_fees += fee_charged
     
-    # Update follower_users tracking (using follower_user_id)
-    # Note: total_fees_paid is updated when user PAYS, not when trades are recorded
-    # Here we only update monthly_fee_due (amount owed)
+    # Update follower_users tracking
     if inserted > 0:
         await conn.execute("""
             UPDATE follower_users
@@ -235,7 +230,7 @@ async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, r
                 monthly_trades = COALESCE(monthly_trades, 0) + $2,
                 monthly_fee_due = COALESCE(monthly_fee_due, 0) + $3
             WHERE id = $4
-        """, total_pnl, inserted, total_fees, follower_user_id)
+        """, total_pnl, inserted, total_fees, user_id)
     
     return inserted, total_pnl, total_fees
 
@@ -286,26 +281,10 @@ async def reconcile_all_users():
             
             print(f"   📊 Found {len(round_trips)} round-trip trades")
             
-            # Find corresponding portfolio_user by api_key
-            portfolio_user = await conn.fetchrow("""
-                SELECT id FROM portfolio_users WHERE api_key = $1
-            """, user['api_key'])
-            
-            if not portfolio_user:
-                print(f"   ⚠️ No portfolio_user found, creating one...")
-                portfolio_user = await conn.fetchrow("""
-                    INSERT INTO portfolio_users (api_key, initial_capital, current_balance)
-                    VALUES ($1, 0, 0)
-                    RETURNING id
-                """, user['api_key'])
-            
-            portfolio_user_id = portfolio_user['id']
-            
-            # Backfill into database
+            # Insert directly into trades table using follower_users.id
             inserted, total_pnl, total_fees = await backfill_trades(
                 conn, 
-                portfolio_user_id,  # portfolio_users.id for trades FK
-                user['id'],  # follower_users.id for fee tracking
+                user['id'],
                 round_trips,
                 user['fee_tier'] or 'standard'
             )
@@ -323,15 +302,15 @@ async def reconcile_all_users():
 
 async def reconcile_single_user(user_id: int):
     """
-    Reconcile trades for a single user by ID
+    Reconcile trades for a single user by ID (follower_users.id)
     """
     print(f"🔄 Reconciling user {user_id}...")
     
     pool = await asyncpg.create_pool(DATABASE_URL)
     
     async with pool.acquire() as conn:
-        # Get follower_user for credentials
-        follower_user = await conn.fetchrow("""
+        # Get user from follower_users
+        user = await conn.fetchrow("""
             SELECT 
                 id, email, api_key, fee_tier,
                 kraken_api_key_encrypted, kraken_api_secret_encrypted
@@ -339,32 +318,15 @@ async def reconcile_single_user(user_id: int):
             WHERE id = $1
         """, user_id)
         
-        if not follower_user:
-            print(f"❌ Follower user {user_id} not found")
+        if not user:
+            print(f"❌ User {user_id} not found")
             await pool.close()
             return
         
-        print(f"👤 User: {follower_user['email']}")
+        print(f"👤 User: {user['email']}")
         
-        # Find corresponding portfolio_user by api_key
-        portfolio_user = await conn.fetchrow("""
-            SELECT id FROM portfolio_users WHERE api_key = $1
-        """, follower_user['api_key'])
-        
-        if not portfolio_user:
-            print(f"⚠️ No portfolio_user found for api_key, creating one...")
-            # Create portfolio_user if doesn't exist
-            portfolio_user = await conn.fetchrow("""
-                INSERT INTO portfolio_users (api_key, initial_capital, current_balance)
-                VALUES ($1, 0, 0)
-                RETURNING id
-            """, follower_user['api_key'])
-        
-        portfolio_user_id = portfolio_user['id']
-        print(f"   Portfolio user ID: {portfolio_user_id}")
-        
-        api_key = decrypt_credential(follower_user['kraken_api_key_encrypted'])
-        api_secret = decrypt_credential(follower_user['kraken_api_secret_encrypted'])
+        api_key = decrypt_credential(user['kraken_api_key_encrypted'])
+        api_secret = decrypt_credential(user['kraken_api_secret_encrypted'])
         
         if not api_key or not api_secret:
             print("❌ Could not decrypt credentials")
@@ -378,13 +340,14 @@ async def reconcile_single_user(user_id: int):
             await pool.close()
             return
         
-        # Use portfolio_user_id for inserting trades, follower_user.id for fee tracking
+        print(f"📊 Found {len(round_trips)} round-trip trades")
+        
+        # Insert directly into trades table using follower_users.id
         inserted, total_pnl, total_fees = await backfill_trades(
             conn, 
-            portfolio_user_id,  # portfolio_users.id for trades FK
-            user_id,  # follower_users.id for fee tracking
+            user_id,
             round_trips,
-            follower_user['fee_tier'] or 'standard'
+            user['fee_tier'] or 'standard'
         )
         
         print(f"\n✅ Inserted {inserted} trades | P&L: ${total_pnl:.2f} | Fees: ${total_fees:.2f}")
