@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import asyncpg
 import os
+import statistics
 from cryptography.fernet import Fernet
 
 router = APIRouter()
@@ -452,6 +453,7 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         # ═══════════════════════════════════════════════════════════════
         # FIXED: Read from trades table (copytrade results)
         # ═══════════════════════════════════════════════════════════════
+        # Period-specific trades
         trades_query = await conn.fetch("""
             SELECT 
                 t.profit_usd as pnl_usd,
@@ -466,6 +468,19 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             ORDER BY t.closed_at DESC
         """, api_key, start_date)
         
+        # ALL-TIME trades (for Profit Factor, Sharpe Ratio, Days Active)
+        all_trades_query = await conn.fetch("""
+            SELECT 
+                t.profit_usd as pnl_usd,
+                t.profit_percent as pnl_percent,
+                t.closed_at as exit_time,
+                t.opened_at as entry_time
+            FROM trades t
+            JOIN follower_users fu ON t.user_id = fu.id
+            WHERE fu.api_key = $1
+            ORDER BY t.closed_at DESC
+        """, api_key)
+        
         first_trade = await conn.fetchval("""
             SELECT MIN(t.opened_at)
             FROM trades t
@@ -476,6 +491,39 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         await conn.close()
         
         total_trades = len(trades_query)
+        all_time_total_trades = len(all_trades_query)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ALL-TIME CALCULATIONS (for Profit Factor, Sharpe, Days Active)
+        # ═══════════════════════════════════════════════════════════════
+        all_time_days_active = max(1, (now - first_trade).days) if first_trade else 0
+        
+        if all_time_total_trades > 0:
+            all_pnl_values = [float(t['pnl_usd'] or 0) for t in all_trades_query]
+            all_winning_pnl = [p for p in all_pnl_values if p > 0]
+            all_losing_pnl = [p for p in all_pnl_values if p < 0]
+            all_total_wins = sum(all_winning_pnl) if all_winning_pnl else 0
+            all_total_losses = abs(sum(all_losing_pnl)) if all_losing_pnl else 0
+            
+            # All-time Profit Factor
+            if all_total_losses == 0 and all_total_wins > 0:
+                all_time_profit_factor = None  # Infinite
+            elif all_total_losses == 0:
+                all_time_profit_factor = 0
+            else:
+                all_time_profit_factor = round(all_total_wins / all_total_losses, 2)
+            
+            # All-time Sharpe Ratio
+            if len(all_pnl_values) > 1:
+                all_avg_return = statistics.mean(all_pnl_values)
+                all_std_dev = statistics.stdev(all_pnl_values)
+                all_time_sharpe = (all_avg_return / all_std_dev) * (252 ** 0.5) if all_std_dev > 0 else 0
+                all_time_sharpe = round(all_time_sharpe, 2)
+            else:
+                all_time_sharpe = None
+        else:
+            all_time_profit_factor = None
+            all_time_sharpe = None
         
         if total_trades == 0:
             return {
@@ -492,7 +540,7 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
                 "winning_trades": 0,
                 "losing_trades": 0,
                 "win_rate": 0,
-                "profit_factor": None,  # N/A - no trades
+                "profit_factor": None,  # N/A - no trades in period
                 "gross_wins": 0,
                 "gross_losses": 0,
                 "best_trade": 0,
@@ -501,8 +549,12 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
                 "avg_monthly_profit": 0,
                 "max_drawdown": 0,
                 "recovery_from_dd": 100,  # No drawdown
-                "sharpe_ratio": None,  # N/A - no trades
+                "sharpe_ratio": None,  # N/A - no trades in period
                 "days_active": 0,
+                # ALL-TIME VALUES
+                "all_time_profit_factor": all_time_profit_factor,
+                "all_time_sharpe": all_time_sharpe,
+                "all_time_days_active": all_time_days_active,
                 "started_tracking": summary.get('started_tracking'),
                 "total_deposits": summary.get('total_deposits', 0),
                 "total_withdrawals": summary.get('total_withdrawals', 0)
@@ -595,7 +647,6 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         
         # 11. SHARPE RATIO
         if len(pnl_values) > 1:
-            import statistics
             avg_return = statistics.mean(pnl_values)
             std_dev = statistics.stdev(pnl_values)
             sharpe_ratio = (avg_return / std_dev) if std_dev > 0 else 0
@@ -660,28 +711,32 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             "period_label": period_label,
             "total_profit": round(period_profit, 2),
             "all_time_profit": round(summary.get('total_profit', 0), 2),
-            "roi_on_initial": round(period_roi_initial, 2),  # FIXED: Now period-specific
-            "roi_on_total": round(period_roi_total, 2),      # FIXED: Now period-specific
+            "roi_on_initial": round(period_roi_initial, 2),  # Period-specific
+            "roi_on_total": round(period_roi_total, 2),      # Period-specific
             "initial_capital": round(summary.get('initial_capital', 0), 2),
             "current_value": round(summary.get('current_value', 0), 2),
             "total_deposits": round(summary.get('total_deposits', 0), 2),
             "total_withdrawals": round(summary.get('total_withdrawals', 0), 2),
-            "total_trades": total_trades,
+            "total_trades": total_trades,  # Period-specific
             "winning_trades": winning_trades,
             "losing_trades": losing_trades,
             "win_rate": round(win_rate, 1),
-            "profit_factor": profit_factor,  # FIXED: None for infinite
-            "gross_wins": round(total_wins, 2),      # NEW: For profit factor detail
-            "gross_losses": round(total_losses, 2),  # NEW: For profit factor detail
-            "best_trade": round(best_trade, 2),
-            "worst_trade": round(worst_trade, 2),
-            "avg_trade": round(avg_trade, 2),
+            "profit_factor": profit_factor,  # Period-specific (kept for compatibility)
+            "gross_wins": round(total_wins, 2),
+            "gross_losses": round(total_losses, 2),
+            "best_trade": round(best_trade, 2),  # Period-specific
+            "worst_trade": round(worst_trade, 2),  # Period-specific
+            "avg_trade": round(avg_trade, 2),  # Period-specific
             "avg_monthly_profit": round(avg_monthly_profit, 2),
-            "max_drawdown": round(max_drawdown, 1),
-            "recovery_from_dd": round(recovery_from_dd, 1),  # NEW: Recovery percentage
-            "sharpe_ratio": round(sharpe_ratio, 2) if sharpe_ratio is not None else None,  # FIXED: None when not calculable
-            "days_active": days_active,  # FIXED: Now period-specific
-            "started_tracking": summary.get('started_tracking')  # NEW: For "Trading since..." display
+            "max_drawdown": round(max_drawdown, 1),  # Period-specific
+            "recovery_from_dd": round(recovery_from_dd, 1),
+            "sharpe_ratio": round(sharpe_ratio, 2) if sharpe_ratio is not None else None,  # Period-specific (kept for compatibility)
+            "days_active": days_active,  # Period-specific (kept for compatibility)
+            # ALL-TIME VALUES (for Profit Factor, Sharpe Ratio, Days Active display)
+            "all_time_profit_factor": all_time_profit_factor,
+            "all_time_sharpe": all_time_sharpe,
+            "all_time_days_active": all_time_days_active,
+            "started_tracking": summary.get('started_tracking')
         }
     
     except HTTPException:
