@@ -323,9 +323,10 @@ class BalanceChecker:
         api_secret: str
     ) -> Decimal:
         """
-        Get current balance from Kraken FUTURES account using CCXT
+        Get current TOTAL EQUITY from Kraken FUTURES account using CCXT
         
-        UPDATED: Uses CCXT library (same as the working trading algo)
+        UPDATED: Now returns total equity (cash + unrealized P&L) instead of just cash balance
+        This matches Kraken's "Total value" display
         """
         try:
             import ccxt
@@ -348,22 +349,36 @@ class BalanceChecker:
             # Debug log
             logger.info(f"🔍 Balance response keys: {list(balance.keys())}")
             
-            # Get USD balance (Kraken Futures uses USD as margin)
-            usd_balance = 0
-            
+            # Get USD cash balance
+            usd_cash = 0
             if 'USD' in balance:
                 usd_info = balance['USD']
                 if isinstance(usd_info, dict):
-                    usd_balance = float(usd_info.get('total', 0) or 0)
+                    usd_cash = float(usd_info.get('total', 0) or 0)
                 else:
-                    usd_balance = float(usd_info or 0)
+                    usd_cash = float(usd_info or 0)
             elif 'total' in balance:
                 total_info = balance['total']
                 if isinstance(total_info, dict):
-                    usd_balance = float(total_info.get('USD', 0) or 0)
+                    usd_cash = float(total_info.get('USD', 0) or 0)
             
-            logger.info(f"✅ Retrieved Kraken Futures balance: ${usd_balance:.2f} USD")
-            return Decimal(str(usd_balance))
+            # Fetch open positions to get unrealized P&L
+            unrealized_pnl = 0
+            try:
+                positions = await asyncio.to_thread(exchange.fetch_positions)
+                for pos in positions:
+                    if pos and pos.get('contracts', 0) != 0:
+                        pnl = float(pos.get('unrealizedPnl', 0) or 0)
+                        unrealized_pnl += pnl
+                        logger.info(f"📊 Position {pos.get('symbol')}: unrealized P&L ${pnl:.2f}")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch positions for unrealized P&L: {e}")
+            
+            # Total equity = cash + unrealized P&L
+            total_equity = usd_cash + unrealized_pnl
+            
+            logger.info(f"✅ Kraken Futures: Cash ${usd_cash:.2f} + Unrealized ${unrealized_pnl:.2f} = Total ${total_equity:.2f}")
+            return Decimal(str(total_equity))
             
         except Exception as e:
             logger.error(f"❌ Error fetching Kraken balance: {e}")
