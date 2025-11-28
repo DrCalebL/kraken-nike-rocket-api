@@ -9,19 +9,28 @@ Key changes from v1:
 - Aggregates fills into positions with weighted avg entry
 - Creates ONE trade record when position closes (not per-fill)
 
+CRITICAL v2.1 UPDATE - SIGNAL MATCHING:
+- Only tracks trades that match a Nike Rocket signal
+- Manual/user trades are SKIPPED (no fees charged)
+- This ensures users aren't charged for their own trades
+
 This ensures:
 - Dashboard shows "1 position" not "10 trades"
 - Accurate weighted-average entry price
 - Clean P&L calculation on close
 - Better stats that reflect actual round-trip performance
+- Users only pay fees on copytraded signals
 
 Flow:
 1. Scan exchange history → record_fill() for each execution
 2. sync_user_position() aggregates fills by symbol → open_positions
-3. When position closes → calculate final P&L → ONE trade record
+3. When position closes:
+   a. Check if it matches a Nike Rocket signal
+   b. If YES → calculate P&L → record trade → charge fees
+   c. If NO → skip recording (manual trade, no fees)
 
 Author: Nike Rocket Team
-Version: 2.0 (Position-based)
+Version: 2.1 (Signal-matched tracking)
 """
 
 import asyncio
@@ -89,6 +98,52 @@ class PositionMonitor:
         except Exception as e:
             self.logger.error(f"Failed to create exchange: {e}")
             return None
+    
+    # ==================== Signal Matching ====================
+    
+    async def find_matching_signal(self, symbol: str, side: str, lookback_hours: int = 48) -> Optional[dict]:
+        """
+        Check if there's a Nike Rocket signal that matches this trade.
+        
+        CRITICAL: This ensures we only track/charge fees on copytraded positions,
+        not manual trades the user makes on their own.
+        
+        Args:
+            symbol: Trading pair (e.g., 'ADA/USD:USD', 'BTC/USD:USD')
+            side: 'long' or 'short'
+            lookback_hours: How far back to look for matching signals (default 48h)
+            
+        Returns:
+            Matching signal dict if found, None if no match (manual trade)
+        """
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Normalize symbol - extract base (e.g., 'ADA' from 'ADA/USD:USD')
+                symbol_base = symbol.split('/')[0].upper() if '/' in symbol else symbol.upper()
+                symbol_base = symbol_base.replace('PF_', '').replace('USD', '').replace(':USD', '')
+                
+                # Look for a recent signal matching this symbol and direction
+                signal = await conn.fetchrow("""
+                    SELECT id, signal_id, symbol, direction, created_at
+                    FROM signals
+                    WHERE UPPER(symbol) LIKE $1
+                      AND LOWER(direction) = LOWER($2)
+                      AND created_at >= NOW() - INTERVAL '%s hours'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """ % lookback_hours, f'%{symbol_base}%', side)
+                
+                if signal:
+                    self.logger.info(f"✅ Found matching signal: {signal['symbol']} {signal['direction']} (signal_id: {signal['signal_id']})")
+                    return dict(signal)
+                else:
+                    self.logger.info(f"⚠️ No matching signal found for {symbol} {side} - likely manual trade")
+                    return None
+                    
+        except Exception as e:
+            self.logger.error(f"Error checking for matching signal: {e}")
+            # On error, assume it's a signal trade to avoid missing fees
+            return {'id': None, 'signal_id': 'unknown'}
     
     # ==================== Fill Recording (Audit Trail) ====================
     
@@ -489,6 +544,9 @@ class PositionMonitor:
         """
         Record a closed position as ONE trade with actual P&L.
         
+        IMPORTANT: Only records trades that match a Nike Rocket signal.
+        Manual trades are skipped to avoid charging fees on user's own trades.
+        
         Uses aggregated position data (avg entry, total size) for accurate P&L.
         """
         try:
@@ -498,10 +556,55 @@ class PositionMonitor:
             fill_count = position.get('fill_count') or 1
             leverage = position.get('leverage', 1)
             side = position.get('side')
+            symbol = position['symbol']
             
             if not entry_price or not position_size:
                 self.logger.error("Missing entry price or position size")
                 return False
+            
+            # ==================== SIGNAL MATCHING CHECK ====================
+            # Check if this trade matches a Nike Rocket signal
+            # If the position already has a signal_id (from open_positions), use it
+            # Otherwise, try to find a matching signal in the signals table
+            
+            signal_id = position.get('signal_id')
+            
+            if not signal_id:
+                # Position doesn't have signal_id - check signals table
+                matching_signal = await self.find_matching_signal(symbol, side)
+                
+                if not matching_signal:
+                    # No matching signal - this is a MANUAL TRADE
+                    self.logger.info(f"⏭️ SKIPPING manual trade: {symbol} {side}")
+                    self.logger.info(f"   (No Nike Rocket signal found - user's own trade)")
+                    self.logger.info(f"   Entry: ${entry_price:.4f}, Exit: ${exit_price:.4f}")
+                    
+                    # Calculate P&L for logging only (not recorded/charged)
+                    if side == 'long':
+                        manual_pnl = (exit_price - entry_price) * position_size
+                    else:
+                        manual_pnl = (entry_price - exit_price) * position_size
+                    self.logger.info(f"   P&L (not tracked): ${manual_pnl:+.2f}")
+                    
+                    # Still mark fills and position as processed to avoid reprocessing
+                    async with self.db_pool.acquire() as conn:
+                        if position.get('id'):
+                            await conn.execute("""
+                                UPDATE position_fills 
+                                SET position_id = $1
+                                WHERE user_id = $2 AND symbol = $3 AND position_id IS NULL
+                            """, position['id'], position['user_id'], symbol)
+                            
+                            await conn.execute("""
+                                UPDATE open_positions SET status = 'closed_manual' WHERE id = $1
+                            """, position['id'])
+                    
+                    return False  # Not recorded (manual trade)
+                
+                signal_id = matching_signal.get('signal_id') or matching_signal.get('id')
+            
+            # ==================== PROCEED WITH RECORDING ====================
+            # This is a Nike Rocket signal trade - record it and charge fees
             
             # Calculate P&L
             if side == 'long':
@@ -534,12 +637,12 @@ class PositionMonitor:
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 """,
                     position['user_id'],
-                    position.get('signal_id'),
+                    str(signal_id) if signal_id else None,
                     trade_id,
                     position.get('entry_order_id'),
                     position.get('opened_at') or position.get('first_fill_at'),
                     closed_at,
-                    position['symbol'],
+                    symbol,
                     side,
                     entry_price,
                     exit_price,
@@ -549,7 +652,7 @@ class PositionMonitor:
                     profit_percent,
                     exit_type,
                     fee_charged,
-                    f"Aggregated from {fill_count} fills. Avg entry: ${entry_price:.4f}"
+                    f"Signal trade. Aggregated from {fill_count} fills. Avg entry: ${entry_price:.4f}"
                 )
                 
                 # Update user stats
@@ -562,20 +665,21 @@ class PositionMonitor:
                 """, profit_usd, fee_charged, position['user_id'])
                 
                 # Mark fills as assigned to this position (audit trail)
-                await conn.execute("""
-                    UPDATE position_fills 
-                    SET position_id = $1
-                    WHERE user_id = $2 AND symbol = $3 AND position_id IS NULL
-                """, position['id'], position['user_id'], position['symbol'])
-                
-                # Mark position as closed
-                await conn.execute("""
-                    UPDATE open_positions SET status = 'closed' WHERE id = $1
-                """, position['id'])
+                if position.get('id'):
+                    await conn.execute("""
+                        UPDATE position_fills 
+                        SET position_id = $1
+                        WHERE user_id = $2 AND symbol = $3 AND position_id IS NULL
+                    """, position['id'], position['user_id'], symbol)
+                    
+                    # Mark position as closed
+                    await conn.execute("""
+                        UPDATE open_positions SET status = 'closed' WHERE id = $1
+                    """, position['id'])
             
             # Log result
             emoji = "🟢" if profit_usd >= 0 else "🔴"
-            self.logger.info(f"{emoji} Position closed: {position['symbol']} {side}")
+            self.logger.info(f"{emoji} SIGNAL TRADE closed: {symbol} {side}")
             self.logger.info(f"   Entry: ${entry_price:.4f} (avg from {fill_count} fills)")
             self.logger.info(f"   Exit: ${exit_price:.4f} ({exit_type})")
             self.logger.info(f"   Size: {position_size:.2f} contracts")
