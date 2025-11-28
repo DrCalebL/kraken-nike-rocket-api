@@ -497,6 +497,7 @@ class PositionMonitor:
             self.logger.info(f"📭 No open positions found in Kraken API response")
             
             # No position found - check which order filled
+            exit_type = 'UNKNOWN'
             try:
                 open_orders = exchange.fetch_open_orders(kraken_symbol)
                 tp_exists = any(o['id'] == tp_order_id for o in open_orders)
@@ -511,12 +512,12 @@ class PositionMonitor:
                 elif tp_exists and not sl_exists:
                     exit_type = 'SL'
                 else:
-                    self.logger.warning(f"⚠️ Both TP/SL canceled for {kraken_symbol} - manual close?")
-                    return {'closed': False, 'manual_close': True}
+                    # Both orders gone - could be TP filled (which also cancels SL)
+                    # Don't assume manual close - check recent trades below
+                    self.logger.info(f"📊 Both TP/SL orders completed for {kraken_symbol} - checking trades for exit price")
                     
             except Exception as e:
                 self.logger.warning(f"Could not check open orders: {e}")
-                exit_type = 'UNKNOWN'
             
             # Get exit price from recent trades
             exit_price = None
