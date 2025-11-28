@@ -222,14 +222,15 @@ async def backfill_trades(conn, portfolio_user_id: int, follower_user_id: int, r
         total_pnl += trade['pnl_usd']
         total_fees += fee_charged
     
-    # Update follower_users fee tracking (using follower_user_id)
+    # Update follower_users tracking (using follower_user_id)
+    # Note: total_fees_paid is updated when user PAYS, not when trades are recorded
+    # Here we only update monthly_fee_due (amount owed)
     if inserted > 0:
         await conn.execute("""
             UPDATE follower_users
             SET 
                 total_profit = COALESCE(total_profit, 0) + $1,
                 total_trades = COALESCE(total_trades, 0) + $2,
-                total_fees = COALESCE(total_fees, 0) + $3,
                 monthly_profit = COALESCE(monthly_profit, 0) + $1,
                 monthly_trades = COALESCE(monthly_trades, 0) + $2,
                 monthly_fee_due = COALESCE(monthly_fee_due, 0) + $3
