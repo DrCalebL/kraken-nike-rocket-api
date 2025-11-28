@@ -1594,8 +1594,9 @@ async def portfolio_dashboard(request: Request):
                 
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 25px;">
                     <div class="overview-card">
-                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Current Value</div>
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;" title="Total portfolio value including unrealized P&amp;L from all open positions">Current Value <span style="font-size: 11px; opacity: 0.7;">ℹ️</span></div>
                         <div id="current-value" style="font-size: 32px; font-weight: bold; color: #10b981;">$0</div>
+                        <div style="font-size: 10px; color: #9ca3af; margin-top: 3px;">Includes unrealized P&amp;L</div>
                     </div>
                     
                     <div class="overview-card">
@@ -1609,8 +1610,9 @@ async def portfolio_dashboard(request: Request):
                     </div>
                     
                     <div class="overview-card">
-                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;">Total Profit</div>
+                        <div style="color: #6b7280; font-size: 14px; margin-bottom: 5px;" title="Realized P&amp;L from closed signal trades only. Excludes unrealized P&amp;L and manual trades.">Total Profit <span style="font-size: 11px; opacity: 0.7;">ℹ️</span></div>
                         <div id="total-profit-overview" style="font-size: 28px; font-weight: 600; color: #10b981;">$0</div>
+                        <div style="font-size: 10px; color: #9ca3af; margin-top: 3px;">Realized from closed signal trades</div>
                     </div>
                 </div>
                 
@@ -1721,6 +1723,7 @@ async def portfolio_dashboard(request: Request):
                 
                 <div class="hero-profit" id="total-profit">$0</div>
                 <div class="hero-label" id="profit-label">Total Profit</div>
+                <div style="font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 5px;">Realized P&amp;L from closed signal trades only</div>
                 <div class="hero-subtext" id="time-tracking">Trading since...</div>
                 
                 <!-- Social Sharing Buttons (NEW!) -->
@@ -1925,7 +1928,7 @@ async def portfolio_dashboard(request: Request):
                             📈 Trading Equity Curve
                         </h2>
                         <p style="margin: 5px 0 0 0; font-size: 13px; color: #6b7280;">
-                            Pure trading performance (excludes deposits/withdrawals)
+                            Realized P&amp;L from closed signal trades (excludes unrealized P&amp;L, manual trades, deposits/withdrawals)
                         </p>
                     </div>
                     <div style="display: flex; gap: 10px; align-items: center;">
@@ -2241,6 +2244,8 @@ async def portfolio_dashboard(request: Request):
                     await loadTransactionHistory();
                     // Load equity curve chart
                     await loadEquityCurve();
+                    // Load performance stats for default 30d period (fixes hero section showing $0)
+                    await changePeriod();
                     // Check agent status
                     await checkAgentStatus();
                 }} else if (data.status === 'not_initialized') {{
