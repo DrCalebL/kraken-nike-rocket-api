@@ -1581,6 +1581,72 @@ async def portfolio_dashboard(request: Request):
         button:disabled {{
             transform: none !important;
         }}
+        
+        /* ═══════════════════════════════════════════════════════════════ */
+        /* Mobile Responsive Styles */
+        /* ═══════════════════════════════════════════════════════════════ */
+        
+        .section-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 15px;
+            margin-bottom: 20px;
+        }}
+        
+        .section-header-actions {{
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-shrink: 0;
+        }}
+        
+        .export-grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }}
+        
+        @media (max-width: 768px) {{
+            body {{
+                padding: 10px;
+            }}
+            
+            .section-header {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            
+            .section-header-actions {{
+                width: 100%;
+                justify-content: flex-start;
+                flex-wrap: wrap;
+            }}
+            
+            .export-grid {{
+                grid-template-columns: 1fr;
+            }}
+            
+            .logout-btn {{
+                position: static !important;
+                display: block;
+                width: 100%;
+                margin-bottom: 15px;
+                text-align: center;
+            }}
+            
+            .portfolio-overview,
+            .transaction-history,
+            .trade-export {{
+                padding: 20px !important;
+            }}
+            
+            .portfolio-overview h2,
+            .transaction-history h2,
+            .trade-export h2 {{
+                font-size: 20px !important;
+            }}
+        }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -1977,7 +2043,7 @@ async def portfolio_dashboard(request: Request):
                 margin-top: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             ">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <div class="section-header">
                     <div>
                         <h2 style="margin: 0; color: #667eea; font-size: 24px;">
                             📈 Trading Equity Curve
@@ -1986,7 +2052,7 @@ async def portfolio_dashboard(request: Request):
                             Realized P&amp;L from closed signal trades (excludes unrealized P&amp;L, manual trades, deposits/withdrawals)
                         </p>
                     </div>
-                    <div style="display: flex; gap: 10px; align-items: center;">
+                    <div class="section-header-actions">
                         <span id="equity-stats" style="font-size: 13px; color: #6b7280;"></span>
                         <button onclick="loadEquityCurve()" style="
                             background: #667eea;
@@ -2047,7 +2113,7 @@ async def portfolio_dashboard(request: Request):
                 margin-top: 30px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.1);
             ">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <div class="section-header">
                     <h2 style="margin: 0; color: #667eea; font-size: 24px;">
                         📜 Transaction History
                     </h2>
@@ -2086,7 +2152,7 @@ async def portfolio_dashboard(request: Request):
                     📊 Export Trade History
                 </h2>
                 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div class="export-grid">
                     <!-- Monthly Export -->
                     <div style="background: #f9fafb; padding: 20px; border-radius: 8px;">
                         <h3 style="margin: 0 0 15px 0; color: #374151; font-size: 18px;">📅 Monthly Report</h3>
