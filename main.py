@@ -2446,7 +2446,15 @@ async def portfolio_dashboard(request: Request):
         }}
         
         function updateDashboard(stats) {{
-            document.getElementById('profit-label').textContent = `${{stats.period}} Profit`;
+            // Update profit label with readable period
+            const periodDisplayLabels = {{
+                '7d': '7d',
+                '30d': '30d',
+                '90d': '90d',
+                '1y': '1y',
+                'all': 'All-Time'
+            }};
+            document.getElementById('profit-label').textContent = `${{periodDisplayLabels[stats.period] || stats.period}} Profit`;
             
             // Handle negative total profit
             const totalProfit = stats.total_profit || 0;
