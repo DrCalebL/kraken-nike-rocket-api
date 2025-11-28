@@ -1438,6 +1438,61 @@ async def portfolio_dashboard(request: Request):
             border-radius: 16px;
             padding: 24px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            position: relative;
+            cursor: help;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        
+        .stat-card:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }}
+        
+        .stat-card .tooltip {{
+            visibility: hidden;
+            opacity: 0;
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1f2937;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 400;
+            white-space: normal;
+            width: 250px;
+            text-align: left;
+            z-index: 1000;
+            margin-bottom: 10px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: opacity 0.2s, visibility 0.2s;
+            line-height: 1.5;
+        }}
+        
+        .stat-card .tooltip::after {{
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 8px solid transparent;
+            border-top-color: #1f2937;
+        }}
+        
+        .stat-card:hover .tooltip {{
+            visibility: visible;
+            opacity: 1;
+        }}
+        
+        .tooltip-formula {{
+            background: rgba(255,255,255,0.1);
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-top: 8px;
+            font-family: monospace;
+            font-size: 12px;
         }}
         
         .stat-label {{
@@ -1988,46 +2043,82 @@ async def portfolio_dashboard(request: Request):
             
             <div class="stats-grid">
                 <div class="stat-card">
+                    <div class="tooltip">
+                        How much profit you made compared to your starting balance.
+                        <div class="tooltip-formula">Profit ÷ Initial Capital × 100</div>
+                    </div>
                     <div class="stat-label" id="label-roi-initial">ROI on Initial Capital</div>
                     <div class="stat-value" id="roi-initial">0%</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        How much profit you made compared to your total invested (including deposits minus withdrawals).
+                        <div class="tooltip-formula">Profit ÷ (Initial + Deposits - Withdrawals) × 100</div>
+                    </div>
                     <div class="stat-label" id="label-roi-total">ROI on Total Capital</div>
                     <div class="stat-value" id="roi-total">0%</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        How much you win vs how much you lose. Above 1.0 means you're profitable. ∞ means no losses yet!
+                        <div class="tooltip-formula">Total $ Won ÷ Total $ Lost</div>
+                    </div>
                     <div class="stat-label">Profit Factor <span style="opacity: 0.6; font-size: 11px;">(All Time)</span></div>
                     <div class="stat-value" id="profit-factor">0x</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Your single most profitable trade in this period.
+                        <div class="tooltip-formula">MAX(trade profits)</div>
+                    </div>
                     <div class="stat-label" id="label-best-trade">Best Trade</div>
                     <div class="stat-value" id="best-trade">$0</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Average profit/loss per trade in this period.
+                        <div class="tooltip-formula">Total Profit ÷ Number of Trades</div>
+                    </div>
                     <div class="stat-label" id="label-avg-trade">Avg Trade</div>
                     <div class="stat-value" id="avg-trade">$0</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Number of completed trades in this period.
+                        <div class="tooltip-formula">COUNT(closed trades)</div>
+                    </div>
                     <div class="stat-label" id="label-total-trades">Total Trades</div>
                     <div class="stat-value" id="total-trades">0</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Largest peak-to-valley drop in your portfolio. Lower is better!
+                        <div class="tooltip-formula">(Peak Value - Lowest Point) ÷ Peak × 100</div>
+                    </div>
                     <div class="stat-label" id="label-max-dd">Max Drawdown</div>
                     <div class="stat-value" id="max-dd">0%</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Risk-adjusted return. Above 1.0 is good, above 2.0 is great! N/A if less than 2 trades.
+                        <div class="tooltip-formula">Avg Return ÷ Volatility × √252</div>
+                    </div>
                     <div class="stat-label">Sharpe Ratio <span style="opacity: 0.6; font-size: 11px;">(All Time)</span></div>
                     <div class="stat-value" id="sharpe">0.0</div>
                 </div>
                 
                 <div class="stat-card">
+                    <div class="tooltip">
+                        Days since your very first trade with Nike Rocket.
+                        <div class="tooltip-formula">Today - First Trade Date</div>
+                    </div>
                     <div class="stat-label">Days Active <span style="opacity: 0.6; font-size: 11px;">(All Time)</span></div>
                     <div class="stat-value" id="days-active">0</div>
                 </div>
