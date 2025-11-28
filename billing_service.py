@@ -459,17 +459,35 @@ class BillingServiceV2:
                     WHERE invoice_id = $1
                 """, charge_id)
                 
-                # Clear pending invoice from user
+                # Clear pending invoice AND reactivate agent if suspended for non-payment
                 await conn.execute("""
                     UPDATE follower_users SET
                         pending_invoice_id = NULL,
                         pending_invoice_amount = 0,
                         invoice_due_date = NULL,
-                        total_fees_paid = COALESCE(total_fees_paid, 0) + $1
+                        total_fees_paid = COALESCE(total_fees_paid, 0) + $1,
+                        -- REACTIVATE if suspended for non-payment
+                        agent_active = CASE 
+                            WHEN suspension_reason = 'Unpaid invoice - agent paused' THEN true 
+                            ELSE agent_active 
+                        END,
+                        access_granted = CASE 
+                            WHEN suspension_reason = 'Unpaid invoice - agent paused' THEN true 
+                            ELSE access_granted 
+                        END,
+                        suspended_at = CASE 
+                            WHEN suspension_reason = 'Unpaid invoice - agent paused' THEN NULL 
+                            ELSE suspended_at 
+                        END,
+                        suspension_reason = CASE 
+                            WHEN suspension_reason = 'Unpaid invoice - agent paused' THEN NULL 
+                            ELSE suspension_reason 
+                        END
                     WHERE id = $2
                 """, float(invoice['amount_usd']), invoice['user_id'])
                 
                 self.logger.info(f"✅ Payment confirmed for user {invoice['user_id']}: ${invoice['amount_usd']:.2f}")
+                self.logger.info(f"🔄 Agent reactivated (if was suspended for non-payment)")
                 
                 # Send confirmation email
                 self._send_payment_confirmation_email(
