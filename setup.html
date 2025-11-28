@@ -349,7 +349,7 @@
             </div>
             <div class="checklist-item">
                 <input type="checkbox" id="check3">
-                <label for="check3">Created <strong>Futures API keys</strong> (not regular Spot keys!)</label>
+                <label for="check3">Created <strong>Futures API keys</strong> (not regular Spot keys — see Step 2 below for required API settings)</label>
             </div>
             <div class="checklist-item">
                 <input type="checkbox" id="check4">
@@ -406,10 +406,11 @@
         <div class="step">
             <h3>🔑 Step 2: Kraken Futures API Credentials</h3>
             <p>Create API key at: <a href="https://pro.kraken.com/app/settings/api" target="_blank" class="link">Kraken Pro → Settings → API → Futures</a></p>
-            <p style="margin-top: 8px;">Required permissions:</p>
+            <p style="margin-top: 8px;">Required settings:</p>
             <ul>
                 <li><code>General API: Full access</code> ✅</li>
                 <li><code>Transfers API: No access</code> ⛔ (keeps your funds safe!)</li>
+                <li><code>IP Address Restrictions: Off</code> 🌐 (our servers use rotating IPs)</li>
             </ul>
         </div>
         
