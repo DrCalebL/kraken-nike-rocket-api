@@ -355,24 +355,48 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         raise HTTPException(status_code=401, detail="API key required")
     
     try:
-        from balance_checker import BalanceChecker
-        
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
             DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
         
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
-        checker = BalanceChecker(db_pool)
-        summary = await checker.get_balance_summary(api_key)
-        await db_pool.close()
+        conn = await asyncpg.connect(DATABASE_URL)
         
-        if not summary:
+        # Get user info directly from follower_users
+        user_row = await conn.fetchrow("""
+            SELECT id, initial_capital, last_known_balance, portfolio_initialized
+            FROM follower_users
+            WHERE api_key = $1
+        """, api_key)
+        
+        if not user_row:
+            await conn.close()
             return {
                 "status": "no_data",
-                "message": "Portfolio not initialized"
+                "message": "User not found"
             }
         
-        conn = await asyncpg.connect(DATABASE_URL)
+        user_id = user_row['id']
+        initial_capital = float(user_row['initial_capital'] or 0)
+        current_value = float(user_row['last_known_balance'] or 0)
+        
+        # Get total profit from trades
+        profit_result = await conn.fetchval("""
+            SELECT COALESCE(SUM(profit_usd), 0)
+            FROM trades
+            WHERE user_id = $1 AND closed_at IS NOT NULL
+        """, user_id)
+        total_profit = float(profit_result or 0)
+        
+        # Build summary dict
+        summary = {
+            'initial_capital': initial_capital,
+            'total_deposits': 0,
+            'total_withdrawals': 0,
+            'total_profit': total_profit,
+            'current_value': current_value if current_value > 0 else initial_capital + total_profit,
+            'roi_on_initial': (total_profit / initial_capital * 100) if initial_capital > 0 else 0,
+            'roi_on_total': (total_profit / initial_capital * 100) if initial_capital > 0 else 0
+        }
         
         # Calculate date range based on period
         now = datetime.utcnow()
