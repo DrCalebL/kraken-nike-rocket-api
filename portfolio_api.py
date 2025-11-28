@@ -22,6 +22,33 @@ else:
     cipher = None
 
 
+async def validate_api_key(api_key: str, db_pool=None) -> dict:
+    """Validate API key exists in database. Returns user dict or raises HTTPException."""
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    
+    close_pool = False
+    if db_pool is None:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        close_pool = True
+    
+    conn = await db_pool.acquire()
+    user = await conn.fetchrow(
+        "SELECT id, portfolio_initialized FROM follower_users WHERE api_key = $1",
+        api_key
+    )
+    await db_pool.release(conn)
+    
+    if close_pool:
+        await db_pool.close()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return dict(user)
+
+
 def decrypt_credentials(encrypted_key: str, encrypted_secret: str) -> tuple:
     """Decrypt Kraken API credentials"""
     if not cipher or not encrypted_key or not encrypted_secret:
@@ -101,7 +128,7 @@ async def initialize_portfolio_autodetect(request: Request):
     """
     Initialize portfolio tracking - AUTO-DETECTS initial capital from Kraken
     
-    SIMPLIFIED: Only uses follower_users table
+    CONSOLIDATED: Updates both follower_users (primary) and portfolio_users (backwards compat)
     """
     api_key = request.headers.get("X-API-Key")
     
@@ -124,14 +151,19 @@ async def initialize_portfolio_autodetect(request: Request):
                 "message": "Please set up your trading agent first."
             }
         
-        # Check if already initialized in follower_users
+        # Check if already initialized in either table
+        existing = await conn.fetchrow(
+            "SELECT * FROM portfolio_users WHERE api_key = $1",
+            api_key
+        )
+        
         fu_existing = await conn.fetchrow(
             "SELECT portfolio_initialized, initial_capital FROM follower_users WHERE api_key = $1",
             api_key
         )
         
-        if fu_existing and fu_existing['portfolio_initialized']:
-            initial_cap = fu_existing['initial_capital']
+        if existing or (fu_existing and fu_existing['portfolio_initialized']):
+            initial_cap = existing['initial_capital'] if existing else fu_existing['initial_capital']
             await conn.close()
             return {
                 "status": "already_initialized",
@@ -168,7 +200,7 @@ async def initialize_portfolio_autodetect(request: Request):
         
         initial_capital = float(kraken_balance)
         
-        # Update follower_users (primary source of truth)
+        # CONSOLIDATED: Update follower_users (primary source of truth)
         await conn.execute("""
             UPDATE follower_users SET
                 initial_capital = $1,
@@ -177,6 +209,13 @@ async def initialize_portfolio_autodetect(request: Request):
                 started_tracking_at = CURRENT_TIMESTAMP
             WHERE api_key = $2
         """, initial_capital, api_key)
+        
+        # BACKWARDS COMPAT: Also insert into portfolio_users
+        await conn.execute("""
+            INSERT INTO portfolio_users (api_key, initial_capital, created_at, last_known_balance)
+            VALUES ($1, $2, CURRENT_TIMESTAMP, $2)
+            ON CONFLICT (api_key) DO NOTHING
+        """, api_key, initial_capital)
         
         # Get user_id for proper FK
         user_id = await conn.fetchval(
@@ -224,6 +263,19 @@ async def get_balance_summary(request: Request):
             DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
         
         db_pool = await asyncpg.create_pool(DATABASE_URL)
+        
+        # First validate the API key exists
+        conn = await db_pool.acquire()
+        user = await conn.fetchrow(
+            "SELECT id, portfolio_initialized FROM follower_users WHERE api_key = $1",
+            api_key
+        )
+        await db_pool.release(conn)
+        
+        if not user:
+            await db_pool.close()
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        
         checker = BalanceChecker(db_pool)
         summary = await checker.get_balance_summary(api_key)
         
@@ -265,21 +317,11 @@ async def get_balance_summary(request: Request):
             **summary
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in balance summary: {e}")
-        return {
-            "status": "success",
-            "initial_capital": 0,
-            "total_deposits": 0,
-            "total_withdrawals": 0,
-            "net_deposits": 0,
-            "total_capital": 0,
-            "total_profit": 0,
-            "current_value": 0,
-            "roi_on_initial": 0,
-            "roi_on_total": 0,
-            "last_balance_check": None
-        }
+        raise HTTPException(status_code=500, detail="Error retrieving balance summary")
 
 
 @router.get("/api/portfolio/transactions")
@@ -299,6 +341,19 @@ async def get_transactions(request: Request):
             DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
         
         db_pool = await asyncpg.create_pool(DATABASE_URL)
+        
+        # Validate API key exists
+        conn = await db_pool.acquire()
+        user = await conn.fetchrow(
+            "SELECT id FROM follower_users WHERE api_key = $1",
+            api_key
+        )
+        await db_pool.release(conn)
+        
+        if not user:
+            await db_pool.close()
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        
         checker = BalanceChecker(db_pool)
         transactions = await checker.get_transaction_history(api_key, limit)
         await db_pool.close()
@@ -307,13 +362,12 @@ async def get_transactions(request: Request):
             "status": "success",
             "transactions": transactions
         }
-        
+    
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error loading transactions: {e}")
-        return {
-            "status": "success",
-            "transactions": []
-        }
+        raise HTTPException(status_code=500, detail="Error loading transactions")
 
 
 @router.get("/api/portfolio/stats")
@@ -355,48 +409,27 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         raise HTTPException(status_code=401, detail="API key required")
     
     try:
+        # Validate API key first
+        await validate_api_key(api_key)
+        
+        from balance_checker import BalanceChecker
+        
         DATABASE_URL = os.getenv("DATABASE_URL")
         if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
             DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
         
-        conn = await asyncpg.connect(DATABASE_URL)
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        checker = BalanceChecker(db_pool)
+        summary = await checker.get_balance_summary(api_key)
+        await db_pool.close()
         
-        # Get user info directly from follower_users
-        user_row = await conn.fetchrow("""
-            SELECT id, initial_capital, last_known_balance, portfolio_initialized
-            FROM follower_users
-            WHERE api_key = $1
-        """, api_key)
-        
-        if not user_row:
-            await conn.close()
+        if not summary:
             return {
                 "status": "no_data",
-                "message": "User not found"
+                "message": "Portfolio not initialized"
             }
         
-        user_id = user_row['id']
-        initial_capital = float(user_row['initial_capital'] or 0)
-        current_value = float(user_row['last_known_balance'] or 0)
-        
-        # Get total profit from trades
-        profit_result = await conn.fetchval("""
-            SELECT COALESCE(SUM(profit_usd), 0)
-            FROM trades
-            WHERE user_id = $1 AND closed_at IS NOT NULL
-        """, user_id)
-        total_profit = float(profit_result or 0)
-        
-        # Build summary dict
-        summary = {
-            'initial_capital': initial_capital,
-            'total_deposits': 0,
-            'total_withdrawals': 0,
-            'total_profit': total_profit,
-            'current_value': current_value if current_value > 0 else initial_capital + total_profit,
-            'roi_on_initial': (total_profit / initial_capital * 100) if initial_capital > 0 else 0,
-            'roi_on_total': (total_profit / initial_capital * 100) if initial_capital > 0 else 0
-        }
+        conn = await asyncpg.connect(DATABASE_URL)
         
         # Calculate date range based on period
         now = datetime.utcnow()
@@ -451,22 +484,26 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
                 "period_label": period_label,
                 "total_profit": 0,
                 "all_time_profit": summary.get('total_profit', 0),
-                "roi_on_initial": summary.get('roi_on_initial', 0),
-                "roi_on_total": summary.get('roi_on_total', 0),
+                "roi_on_initial": 0,  # No trades in period = 0% ROI
+                "roi_on_total": 0,
                 "initial_capital": summary.get('initial_capital', 0),
                 "current_value": summary.get('current_value', 0),
                 "total_trades": 0,
                 "winning_trades": 0,
                 "losing_trades": 0,
                 "win_rate": 0,
-                "profit_factor": 0,
+                "profit_factor": None,  # N/A - no trades
+                "gross_wins": 0,
+                "gross_losses": 0,
                 "best_trade": 0,
                 "worst_trade": 0,
                 "avg_trade": 0,
                 "avg_monthly_profit": 0,
                 "max_drawdown": 0,
-                "sharpe_ratio": 0,
+                "recovery_from_dd": 100,  # No drawdown
+                "sharpe_ratio": None,  # N/A - no trades
                 "days_active": 0,
+                "started_tracking": summary.get('started_tracking'),
                 "total_deposits": summary.get('total_deposits', 0),
                 "total_withdrawals": summary.get('total_withdrawals', 0)
             }
@@ -486,10 +523,9 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
         # 3. WIN RATE = (wins / total) × 100
         win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
         
-        # 4. PROFIT FACTOR = SUM(wins) / ABS(SUM(losses))
+        # 4. PROFIT FACTOR - calculated later with proper null handling
         total_wins = sum(winning_pnl) if winning_pnl else 0
         total_losses = abs(sum(losing_pnl)) if losing_pnl else 0
-        profit_factor = (total_wins / total_losses) if total_losses > 0 else (999 if total_wins > 0 else 0)
         
         # 5. BEST TRADE = MAX(pnl_usd)
         best_trade = max(pnl_values) if pnl_values else 0
@@ -565,7 +601,58 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             sharpe_ratio = (avg_return / std_dev) if std_dev > 0 else 0
             sharpe_ratio = sharpe_ratio * (252 ** 0.5)
         else:
-            sharpe_ratio = 0
+            sharpe_ratio = None  # Not calculable with < 2 trades
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIXED: Calculate PERIOD-SPECIFIC ROI (not all-time)
+        # ═══════════════════════════════════════════════════════════════
+        initial_capital = summary.get('initial_capital', 0)
+        total_deposits = summary.get('total_deposits', 0)
+        total_withdrawals = summary.get('total_withdrawals', 0)
+        total_capital = initial_capital + total_deposits - total_withdrawals
+        
+        # Period ROI = (period_profit / capital) × 100
+        period_roi_initial = (period_profit / initial_capital * 100) if initial_capital > 0 else 0
+        period_roi_total = (period_profit / total_capital * 100) if total_capital > 0 else 0
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIXED: Calculate PERIOD-SPECIFIC Days Active
+        # ═══════════════════════════════════════════════════════════════
+        # Get first trade within the selected period
+        first_trade_in_period = None
+        if trades_sorted:
+            first_trade_in_period = trades_sorted[0]['entry_time']
+        
+        if period == "all" and first_trade:
+            # All-time: days since very first trade
+            days_active = max(1, (now - first_trade).days)
+        elif first_trade_in_period:
+            # Period-specific: days since first trade in period (min 1)
+            days_active = max(1, (now - first_trade_in_period).days)
+        else:
+            # No trades in period
+            days_active = 0
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FIXED: Handle edge cases for display
+        # ═══════════════════════════════════════════════════════════════
+        # Profit Factor: None when no losses (frontend will show "∞")
+        if total_losses == 0 and total_wins > 0:
+            profit_factor = None  # Infinite - frontend handles display
+        elif total_losses == 0:
+            profit_factor = 0
+        else:
+            profit_factor = round(total_wins / total_losses, 2)
+        
+        # Calculate recovery from drawdown
+        # If we're at a new high, recovery = 100%
+        # If we're still in drawdown, recovery = how much we've recovered
+        current_equity = equity_curve[-1] if equity_curve else initial_capital
+        if max_drawdown > 0 and running_peak > 0:
+            current_drawdown = (running_peak - current_equity) / running_peak * 100
+            recovery_from_dd = max(0, (max_drawdown - current_drawdown) / max_drawdown * 100) if max_drawdown > 0 else 100
+        else:
+            recovery_from_dd = 100  # No drawdown = fully recovered
         
         return {
             "status": "success",
@@ -573,8 +660,8 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             "period_label": period_label,
             "total_profit": round(period_profit, 2),
             "all_time_profit": round(summary.get('total_profit', 0), 2),
-            "roi_on_initial": round(summary.get('roi_on_initial', 0), 2),
-            "roi_on_total": round(summary.get('roi_on_total', 0), 2),
+            "roi_on_initial": round(period_roi_initial, 2),  # FIXED: Now period-specific
+            "roi_on_total": round(period_roi_total, 2),      # FIXED: Now period-specific
             "initial_capital": round(summary.get('initial_capital', 0), 2),
             "current_value": round(summary.get('current_value', 0), 2),
             "total_deposits": round(summary.get('total_deposits', 0), 2),
@@ -583,24 +670,27 @@ async def get_portfolio_stats(request: Request, period: str = "30d"):
             "winning_trades": winning_trades,
             "losing_trades": losing_trades,
             "win_rate": round(win_rate, 1),
-            "profit_factor": round(profit_factor, 2),
+            "profit_factor": profit_factor,  # FIXED: None for infinite
+            "gross_wins": round(total_wins, 2),      # NEW: For profit factor detail
+            "gross_losses": round(total_losses, 2),  # NEW: For profit factor detail
             "best_trade": round(best_trade, 2),
             "worst_trade": round(worst_trade, 2),
             "avg_trade": round(avg_trade, 2),
             "avg_monthly_profit": round(avg_monthly_profit, 2),
             "max_drawdown": round(max_drawdown, 1),
-            "sharpe_ratio": round(sharpe_ratio, 2),
-            "days_active": days_active
+            "recovery_from_dd": round(recovery_from_dd, 1),  # NEW: Recovery percentage
+            "sharpe_ratio": round(sharpe_ratio, 2) if sharpe_ratio is not None else None,  # FIXED: None when not calculable
+            "days_active": days_active,  # FIXED: Now period-specific
+            "started_tracking": summary.get('started_tracking')  # NEW: For "Trading since..." display
         }
-        
+    
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in portfolio stats: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            "status": "no_data",
-            "message": str(e)
-        }
+        raise HTTPException(status_code=500, detail="Error loading portfolio stats")
 
 
 @router.get("/api/portfolio/equity-curve")
@@ -647,6 +737,9 @@ async def get_equity_curve(request: Request):
         raise HTTPException(status_code=401, detail="API key required")
     
     try:
+        # Validate API key first
+        await validate_api_key(api_key)
+        
         from balance_checker import BalanceChecker
         
         DATABASE_URL = os.getenv("DATABASE_URL")
@@ -760,23 +853,14 @@ async def get_equity_curve(request: Request):
             "total_trades": len(trades),
             "total_pnl": round(cumulative_pnl, 2)
         }
-        
+    
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error in equity curve: {e}")
         import traceback
         traceback.print_exc()
-        return {
-            "status": "error",
-            "message": str(e),
-            "equity_curve": [],
-            "initial_capital": 0,
-            "current_equity": 0,
-            "max_equity": 0,
-            "min_equity": 0,
-            "max_drawdown": 0,
-            "total_trades": 0,
-            "total_pnl": 0
-        }
+        raise HTTPException(status_code=500, detail="Error loading equity curve")
 
 
 # ==================== TRADE EXPORT ENDPOINTS ====================
