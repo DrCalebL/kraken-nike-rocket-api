@@ -1,10 +1,11 @@
 """
-Nike Rocket Position Monitor v2.1 - 30-Day Billing
-===================================================
+Nike Rocket Position Monitor v2.2 - 30-Day Billing + Error Logging
+===================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
 
-Key changes from v2.0:
+Key changes from v2.1:
+- Added error logging to error_logs table for admin dashboard visibility
 - NO IMMEDIATE FEE CHARGING - profits accumulate in billing cycle
 - Fee calculation happens at end of 30-day cycle via billing_service_30day.py
 - Trades table still records profit_usd but fee_charged is always 0
@@ -29,7 +30,7 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.1 (30-Day Billing)
+Version: 2.2 (30-Day Billing + Error Logging)
 """
 
 import asyncio
@@ -37,6 +38,7 @@ import logging
 import os
 import secrets
 import time
+import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -54,6 +56,22 @@ logger = logging.getLogger("POSITION_MONITOR")
 # Encryption for credentials
 ENCRYPTION_KEY = os.getenv("CREDENTIALS_ENCRYPTION_KEY")
 cipher = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+
+
+async def log_error_to_db(pool, api_key: str, error_type: str, error_message: str, context: Optional[Dict] = None):
+    """Log error to error_logs table for admin dashboard visibility"""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO error_logs (api_key, error_type, error_message, context) 
+                   VALUES ($1, $2, $3, $4)""",
+                api_key[:20] + "..." if api_key and len(api_key) > 20 else api_key,
+                error_type,
+                error_message[:500] if error_message else None,
+                json.dumps(context) if context else None
+            )
+    except Exception as e:
+        logger.error(f"Failed to log error to DB: {e}")
 
 
 class PositionMonitor:
@@ -141,6 +159,10 @@ class PositionMonitor:
                     
         except Exception as e:
             self.logger.error(f"Error checking for matching signal: {e}")
+            await log_error_to_db(
+                self.db_pool, "system", "SIGNAL_MATCH_ERROR",
+                str(e), {"symbol": symbol, "side": side, "function": "find_matching_signal"}
+            )
             # On error, assume it's a signal trade to avoid missing fees
             return {'id': None, 'signal_id': 'unknown'}
     
@@ -205,6 +227,10 @@ class PositionMonitor:
                 
         except Exception as e:
             self.logger.error(f"   Failed to record fill: {e}")
+            await log_error_to_db(
+                self.db_pool, str(user_id), "FILL_RECORD_ERROR",
+                str(e), {"user_id": user_id, "fill": str(fill)[:200], "function": "record_fill"}
+            )
             return False
     
     # ==================== Position Aggregation ====================
@@ -334,6 +360,10 @@ class PositionMonitor:
                     
         except Exception as e:
             self.logger.error(f"Error syncing position: {e}")
+            await log_error_to_db(
+                self.db_pool, str(user_id), "POSITION_SYNC_ERROR",
+                str(e), {"user_id": user_id, "symbol": symbol, "function": "sync_position_from_fills"}
+            )
     
     # ==================== Exchange History Scanning ====================
     
@@ -538,6 +568,10 @@ class PositionMonitor:
             
         except Exception as e:
             self.logger.error(f"Error checking position: {e}")
+            await log_error_to_db(
+                self.db_pool, user_api_key, "POSITION_CHECK_ERROR",
+                str(e), {"symbol": kraken_symbol, "function": "check_position_status"}
+            )
             return {'closed': False, 'error': str(e)}
     
     async def record_trade_close(self, position: dict, exit_price: float, exit_type: str, closed_at: datetime):
@@ -697,6 +731,10 @@ class PositionMonitor:
             self.logger.error(f"Error recording trade close: {e}")
             import traceback
             traceback.print_exc()
+            await log_error_to_db(
+                self.db_pool, str(position.get('user_id', 'unknown')), "TRADE_CLOSE_RECORD_ERROR",
+                str(e), {"position_id": position.get('id'), "symbol": position.get('symbol'), "traceback": traceback.format_exc()[:500]}
+            )
             return False
     
     async def check_position(self, position: dict):
@@ -793,6 +831,10 @@ class PositionMonitor:
             self.logger.error(f"❌ Error checking position {position['id']}: {e}")
             import traceback
             traceback.print_exc()
+            await log_error_to_db(
+                self.db_pool, position.get('user_api_key', 'unknown'), "POSITION_MONITOR_ERROR",
+                str(e), {"position_id": position['id'], "symbol": position.get('symbol'), "traceback": traceback.format_exc()[:500]}
+            )
     
     async def check_all_positions(self):
         """Check all open positions and scan for new fills"""
@@ -855,6 +897,10 @@ class PositionMonitor:
                 self.logger.error(f"❌ Error in position monitor: {e}")
                 import traceback
                 traceback.print_exc()
+                await log_error_to_db(
+                    self.db_pool, "system", "POSITION_MONITOR_LOOP_ERROR",
+                    str(e), {"check_count": check_count, "traceback": traceback.format_exc()[:500]}
+                )
                 await asyncio.sleep(10)
 
 
