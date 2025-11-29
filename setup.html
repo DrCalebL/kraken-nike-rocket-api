@@ -373,13 +373,13 @@
                         <li>Deposit USDT/USDC to your Kraken <strong>Spot</strong> account</li>
                         <li>Go to <strong>Trade</strong> → Select <strong>USDT/USD</strong> or <strong>USDC/USD</strong> pair</li>
                         <li><strong>Sell</strong> your USDT/USDC for USD</li>
-                        <li>Go to <strong>Transfer</strong> → Move USD from <strong>Spot → Futures</strong></li>
+                        <li>Go to <strong>Transfer</strong> → Move USD from <strong>Spot → Derivatives Multi-M</strong></li>
                     </ol>
                     <p style="margin-top: 12px;"><strong>If you have crypto (BTC, ETH, etc):</strong></p>
                     <ol>
                         <li>Deposit crypto to Kraken Spot</li>
                         <li>Sell for USD on Spot market</li>
-                        <li>Transfer USD to Futures wallet</li>
+                        <li>Transfer USD to Derivatives Multi-M wallet</li>
                     </ol>
                 </div>
             </div>
@@ -409,7 +409,7 @@
             <p style="margin-top: 8px;">Required settings:</p>
             <ul>
                 <li><code>General API: Full access</code> ✅</li>
-                <li><code>Transfers API: No access</code> ⛔ (keeps your funds safe!)</li>
+                <li><code>Withdrawal API: No access</code> ⛔ (keeps your funds safe!)</li>
                 <li><code>IP Address Restrictions: Off</code> 🌐 (our servers use rotating IPs)</li>
             </ul>
         </div>
@@ -421,21 +421,21 @@
         </div>
         
         <div class="input-group">
-            <label for="kraken-key">Kraken API Key:</label>
+            <label for="kraken-key">Kraken API Public Key:</label>
             <input 
                 type="text" 
                 id="kraken-key" 
-                placeholder="Your Kraken Futures API Key"
+                placeholder="Your Kraken Futures API Public Key"
                 autocomplete="off"
             >
         </div>
         
         <div class="input-group">
-            <label for="kraken-secret">Kraken API Secret:</label>
+            <label for="kraken-secret">Kraken API Private Key:</label>
             <textarea 
                 id="kraken-secret" 
                 rows="3" 
-                placeholder="Your Kraken Futures API Secret"
+                placeholder="Your Kraken Futures API Private Key"
                 autocomplete="off"
             ></textarea>
         </div>
