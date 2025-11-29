@@ -1439,7 +1439,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
         <div class="tax-reports-section">
             <h2>💰 Tax & Income Reports</h2>
             <p style="color: #9ca3af; margin-bottom: 20px; font-size: 13px;">
-                Export income data for Xero or tax filing. All amounts in USD. Fee rate: 10% of monthly profits.
+                Export income data for Xero or tax filing. All amounts in USD. Fee rate: 10% of monthly profits. <strong>Only includes actually received payments</strong> (unpaid/expired invoices excluded).
             </p>
             
             <div class="report-controls">
@@ -1730,24 +1730,24 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
                 
                 const summaryHTML = `
                     <div class="income-card">
-                        <div class="income-label">Total Fees Collected</div>
-                        <div class="income-value">$${{data.total_fees.toFixed(2)}}</div>
+                        <div class="income-label">Total Fees Received</div>
+                        <div class="income-value">$${{data.total_fees_received.toFixed(2)}}</div>
                     </div>
                     <div class="income-card">
-                        <div class="income-label">Total Trades</div>
-                        <div class="income-value">${{data.total_trades}}</div>
+                        <div class="income-label">Total Payments</div>
+                        <div class="income-value">${{data.total_payments}}</div>
                     </div>
                     <div class="income-card">
-                        <div class="income-label">Unique Users</div>
-                        <div class="income-value">${{data.unique_users}}</div>
+                        <div class="income-label">Paying Users</div>
+                        <div class="income-value">${{data.unique_users_year}}</div>
                     </div>
                     <div class="income-card">
                         <div class="income-label">Avg Fee/Month</div>
                         <div class="income-value">$${{data.avg_fee_per_month.toFixed(2)}}</div>
                     </div>
                     <div class="income-card">
-                        <div class="income-label">Avg Fee/Trade</div>
-                        <div class="income-value">$${{data.avg_fee_per_trade.toFixed(2)}}</div>
+                        <div class="income-label">Avg Fee/User</div>
+                        <div class="income-value">$${{data.avg_fee_per_user.toFixed(2)}}</div>
                     </div>
                 `;
                 
