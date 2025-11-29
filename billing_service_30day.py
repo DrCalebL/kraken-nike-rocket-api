@@ -1,6 +1,6 @@
 """
-Nike Rocket Billing Service v2 - 30-Day Rolling Cycles
-=======================================================
+Nike Rocket Billing Service v2 - 30-Day Rolling Cycles + Error Logging
+========================================================================
 
 Implements rolling 30-day billing cycles with Coinbase Commerce invoices.
 
@@ -22,12 +22,13 @@ Fee Tiers:
 Tier changes apply to NEXT billing cycle, not current.
 
 Author: Nike Rocket Team
-Version: 2.0 (30-Day Rolling)
+Version: 2.1 (30-Day Rolling + Error Logging)
 """
 
 import asyncio
 import logging
 import os
+import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, Any
@@ -53,6 +54,22 @@ REMINDER_DAYS = [3, 5, 7]  # Days after invoice to send reminders
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("BILLING")
+
+
+async def log_error_to_db(pool, api_key: str, error_type: str, error_message: str, context: Optional[Dict] = None):
+    """Log error to error_logs table for admin dashboard visibility"""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO error_logs (api_key, error_type, error_message, context) 
+                   VALUES ($1, $2, $3, $4)""",
+                api_key[:20] + "..." if api_key and len(api_key) > 20 else api_key,
+                error_type,
+                error_message[:500] if error_message else None,
+                json.dumps(context) if context else None
+            )
+    except Exception as e:
+        logger.error(f"Failed to log error to DB: {e}")
 
 
 class BillingServiceV2:
@@ -194,6 +211,10 @@ class BillingServiceV2:
                     results['cycles_ended'] += 1
                 except Exception as e:
                     self.logger.error(f"Error processing cycle for user {user['id']}: {e}")
+                    await log_error_to_db(
+                        self.db_pool, user['api_key'], "BILLING_CYCLE_ERROR",
+                        str(e), {"user_id": user['id'], "function": "check_and_process_cycles"}
+                    )
                     results['errors'] += 1
         
         self.logger.info(
@@ -415,10 +436,19 @@ class BillingServiceV2:
                 }
             else:
                 self.logger.error(f"Coinbase API error: {response.status_code} - {response.text}")
+                await log_error_to_db(
+                    self.db_pool, api_key, "COINBASE_API_ERROR",
+                    f"Status {response.status_code}: {response.text[:200]}",
+                    {"user_id": user_id, "amount": amount, "function": "create_coinbase_invoice"}
+                )
                 return None
                 
         except Exception as e:
             self.logger.error(f"Error creating Coinbase invoice: {e}")
+            await log_error_to_db(
+                self.db_pool, api_key, "COINBASE_INVOICE_ERROR",
+                str(e), {"user_id": user_id, "amount": amount, "function": "create_coinbase_invoice"}
+            )
             return None
     
     async def process_webhook_payment(self, charge_id: str, event_type: str) -> bool:
@@ -1003,6 +1033,7 @@ async def billing_scheduler_v2(db_pool: asyncpg.Pool):
     - Check for overdue invoices
     - Send reminders
     - Process suspensions
+    - Clean up old error logs (daily at midnight UTC)
     """
     logger.info("📅 Billing scheduler v2 started (30-day rolling)")
     
@@ -1019,6 +1050,16 @@ async def billing_scheduler_v2(db_pool: asyncpg.Pool):
             if now.hour % 6 == 0:
                 await billing.check_overdue_invoices()
             
+            # Daily at midnight UTC: Clean up old error logs
+            if now.hour == 0:
+                try:
+                    from admin_dashboard import cleanup_old_errors
+                    deleted = cleanup_old_errors(days=30)
+                    if deleted > 0:
+                        logger.info(f"🧹 Error log cleanup: removed {deleted} entries older than 30 days")
+                except Exception as cleanup_err:
+                    logger.warning(f"Error log cleanup failed: {cleanup_err}")
+            
             # Sleep for 1 hour
             await asyncio.sleep(3600)
             
@@ -1029,6 +1070,10 @@ async def billing_scheduler_v2(db_pool: asyncpg.Pool):
             logger.error(f"❌ Billing scheduler error: {e}")
             import traceback
             traceback.print_exc()
+            await log_error_to_db(
+                db_pool, "system", "BILLING_SCHEDULER_ERROR",
+                str(e), {"function": "billing_scheduler_v2", "traceback": traceback.format_exc()[:500]}
+            )
             await asyncio.sleep(300)  # Wait 5 min on error
 
 
