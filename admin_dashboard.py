@@ -139,7 +139,8 @@ def get_all_users_with_status() -> List[Dict]:
                     fu.total_trades,
                     fu.created_at,
                     COALESCE(fu.initial_capital, 0) as initial_capital,
-                    COALESCE(fu.last_known_balance, 0) as current_balance
+                    COALESCE(fu.last_known_balance, 0) as current_balance,
+                    fu.kraken_account_id
                 FROM follower_users fu
                 ORDER BY fu.id DESC
             """)
@@ -155,7 +156,8 @@ def get_all_users_with_status() -> List[Dict]:
                     fu.total_trades,
                     fu.created_at,
                     COALESCE(pu.initial_capital, 0) as initial_capital,
-                    COALESCE(pu.last_known_balance, 0) as current_balance
+                    COALESCE(pu.last_known_balance, 0) as current_balance,
+                    fu.kraken_account_id
                 FROM follower_users fu
                 LEFT JOIN portfolio_users pu ON fu.api_key = pu.api_key
                 ORDER BY fu.id DESC
@@ -163,7 +165,7 @@ def get_all_users_with_status() -> List[Dict]:
         
         users = []
         for row in cur.fetchall():
-            email, api_key, credentials_set, agent_active, total_profit, total_trades, created_at, initial_capital, current_balance = row
+            email, api_key, credentials_set, agent_active, total_profit, total_trades, created_at, initial_capital, current_balance, kraken_account_id = row
             
             # Determine status
             if agent_active:
@@ -190,6 +192,9 @@ def get_all_users_with_status() -> List[Dict]:
                 except:
                     pass
             
+            # Format Kraken account ID for display (show first 8 chars only)
+            kraken_id_display = kraken_account_id[:8] + '...' if kraken_account_id else None
+            
             users.append({
                 'email': email,
                 'api_key': api_key,
@@ -202,7 +207,9 @@ def get_all_users_with_status() -> List[Dict]:
                 'current_balance': float(current_balance) if current_balance else 0,
                 'roi': roi,
                 'recent_errors': recent_errors,
-                'created_at': created_at
+                'created_at': created_at,
+                'kraken_account_id': kraken_account_id,
+                'kraken_id_display': kraken_id_display
             })
         
         cur.close()
@@ -644,7 +651,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
     # User rows
     user_rows = ""
     if not users:
-        user_rows = "<tr><td colspan='8' style='text-align: center; padding: 40px; color: #9ca3af;'>No users yet</td></tr>"
+        user_rows = "<tr><td colspan='9' style='text-align: center; padding: 40px; color: #9ca3af;'>No users yet</td></tr>"
     else:
         for user in users:
             status_class = f"status-{user['agent_status']}"
@@ -659,11 +666,16 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             else:
                 error_cell = '''<span class="error-indicator error-none" title="✅ No errors in last 24h">✅</span>'''
             
+            # Kraken ID display (first 8 chars or "Not Set")
+            kraken_id = user.get('kraken_id_display', None)
+            kraken_cell = f'<span class="api-key" title="{user.get("kraken_account_id", "")}">{kraken_id}</span>' if kraken_id else '<span style="color: #6b7280;">—</span>'
+            
             user_rows += f"""
             <tr>
                 <td><span class="status-badge {status_class}">{user['status_emoji']} {user['status_text']}</span></td>
                 <td style="color: #e5e7eb;">{user['email']}</td>
                 <td class="api-key">{user['api_key'][:15]}...</td>
+                <td>{kraken_cell}</td>
                 <td style="color: #e5e7eb;">${user.get('capital', 0):.2f}</td>
                 <td style="color: #e5e7eb;">{user['total_trades']}</td>
                 <td class="{profit_class}">{profit_prefix}${abs(user['total_profit']):.2f}</td>
@@ -1565,6 +1577,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
                         <th>Status</th>
                         <th>Email</th>
                         <th>API Key</th>
+                        <th>Kraken ID</th>
                         <th>Capital</th>
                         <th>Trades</th>
                         <th>Profit</th>
