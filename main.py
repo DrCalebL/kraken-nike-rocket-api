@@ -6,12 +6,16 @@ Includes automatic deposit/withdrawal detection via balance_checker.
 Now includes 30-DAY ROLLING billing scheduler with Coinbase Commerce!
 
 FIXED VERSION with startup_delay_seconds=30 to prevent race condition.
+UPDATED: Added global exception handler for error logging.
 
 Author: Nike Rocket Team
-Updated: November 28, 2025 - WITH 30-DAY ROLLING BILLING
+Updated: November 29, 2025 - WITH ERROR LOGGING
 """
 from fastapi import FastAPI, Request, HTTPException, Header
+from fastapi.responses import JSONResponse
 from typing import Optional
+import json
+import traceback
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy import create_engine
@@ -84,6 +88,83 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ==================== GLOBAL EXCEPTION HANDLER ====================
+# Catches ALL unhandled exceptions and logs them to error_logs table
+# for visibility in the admin dashboard
+
+async def log_error_to_db_global(api_key: str, error_type: str, error_message: str, context: dict = None):
+    """Log error to error_logs table (used by global exception handler)"""
+    try:
+        db_url = os.getenv("DATABASE_URL")
+        if db_url and db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
+        
+        if not db_url:
+            return
+            
+        conn = await asyncpg.connect(db_url)
+        await conn.execute(
+            """INSERT INTO error_logs (api_key, error_type, error_message, context) 
+               VALUES ($1, $2, $3, $4)""",
+            api_key[:20] + "..." if api_key and len(api_key) > 20 else api_key,
+            error_type,
+            error_message[:500] if error_message else None,
+            json.dumps(context) if context else None
+        )
+        await conn.close()
+    except Exception as e:
+        print(f"Failed to log error to DB: {e}")
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Global exception handler - catches ALL unhandled exceptions.
+    Logs to error_logs table for admin dashboard visibility.
+    """
+    # Try to get API key from various sources
+    api_key = (
+        request.headers.get("X-API-Key") or 
+        request.query_params.get("key") or 
+        request.query_params.get("api_key") or
+        "unknown"
+    )
+    
+    # Get error details
+    error_type = type(exc).__name__
+    error_message = str(exc)
+    tb = traceback.format_exc()
+    
+    # Log to console
+    print(f"❌ UNHANDLED EXCEPTION: {error_type}: {error_message}")
+    print(f"   Endpoint: {request.method} {request.url.path}")
+    print(f"   Traceback: {tb[:500]}")
+    
+    # Log to database (async, non-blocking)
+    try:
+        await log_error_to_db_global(
+            api_key,
+            f"UNHANDLED_{error_type}",
+            error_message,
+            {
+                "endpoint": str(request.url.path),
+                "method": request.method,
+                "traceback": tb[:500]
+            }
+        )
+    except:
+        pass  # Don't fail the response if logging fails
+    
+    # Return error response
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error_type": error_type}
+    )
+
+
+# ==================== END GLOBAL EXCEPTION HANDLER ====================
 
 # Database setup
 DATABASE_URL = os.getenv("DATABASE_URL")
