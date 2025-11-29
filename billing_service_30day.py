@@ -475,6 +475,15 @@ class BillingServiceV2:
                 self.logger.warning(f"Invoice not found for charge {charge_id}")
                 return False
             
+            # IDEMPOTENCY CHECK: Don't process if already in final state
+            if invoice['status'] == 'paid':
+                self.logger.info(f"ℹ️ Invoice {charge_id} already marked as paid - skipping duplicate webhook")
+                return True
+            
+            if invoice['status'] == 'expired' and event_type in ['charge:failed', 'charge:expired']:
+                self.logger.info(f"ℹ️ Invoice {charge_id} already marked as expired - skipping duplicate webhook")
+                return True
+            
             if event_type in ['charge:confirmed', 'charge:completed']:
                 # Payment successful!
                 await conn.execute("""
