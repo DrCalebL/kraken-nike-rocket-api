@@ -550,6 +550,88 @@ def update_user_tier(user_id: int, new_tier: str) -> bool:
         conn.close()
 
 
+def cleanup_old_errors(days: int = 30) -> int:
+    """
+    Delete errors older than specified days to prevent table bloat.
+    
+    Args:
+        days: Number of days to keep errors (default 30)
+        
+    Returns:
+        Number of errors deleted
+    """
+    if not table_exists('error_logs'):
+        return 0
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            DELETE FROM error_logs 
+            WHERE timestamp < NOW() - INTERVAL '%s days'
+        """, (days,))
+        
+        deleted = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if deleted > 0:
+            print(f"🧹 Cleaned up {deleted} old error logs (older than {days} days)")
+        
+        return deleted
+    except Exception as e:
+        print(f"Error cleaning up old errors: {e}")
+        return 0
+
+
+def get_error_stats() -> Dict:
+    """Get error statistics for monitoring"""
+    if not table_exists('error_logs'):
+        return {'total': 0, 'last_24h': 0, 'last_7d': 0, 'by_type': {}}
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Total errors
+        cur.execute("SELECT COUNT(*) FROM error_logs")
+        total = cur.fetchone()[0]
+        
+        # Last 24 hours
+        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '24 hours'")
+        last_24h = cur.fetchone()[0]
+        
+        # Last 7 days
+        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '7 days'")
+        last_7d = cur.fetchone()[0]
+        
+        # By type (top 10)
+        cur.execute("""
+            SELECT error_type, COUNT(*) as cnt 
+            FROM error_logs 
+            WHERE timestamp > NOW() - INTERVAL '7 days'
+            GROUP BY error_type 
+            ORDER BY cnt DESC 
+            LIMIT 10
+        """)
+        by_type = {row[0]: row[1] for row in cur.fetchall()}
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            'total': total,
+            'last_24h': last_24h,
+            'last_7d': last_7d,
+            'by_type': by_type
+        }
+    except Exception as e:
+        print(f"Error getting error stats: {e}")
+        return {'total': 0, 'last_24h': 0, 'last_7d': 0, 'by_type': {}}
+
+
 def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, review_positions: List[Dict] = None, users_by_tier: Dict = None) -> str:
     """Generate admin dashboard HTML - Dark Theme with Error Tooltips"""
     
