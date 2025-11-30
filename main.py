@@ -253,6 +253,22 @@ async def root():
 async def health():
     return {"status": "healthy"}
 
+# Test email notification endpoint
+@app.get("/test-email")
+async def test_email():
+    """Test Resend email notifications for failsafe alerts"""
+    from order_utils import notify_admin
+    result = await notify_admin(
+        title="🧪 Test Notification",
+        details={
+            "Status": "✅ Email notifications working!",
+            "System": "Nike Rocket Failsafe Alerts",
+            "Features": "DB retry, Order retry, Signal validation"
+        },
+        level="info"
+    )
+    return {"status": "sent" if result else "failed", "to": "calebws87@gmail.com"}
+
 # Admin Dashboard (NEW!)
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(password: str = ""):
