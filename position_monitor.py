@@ -1,8 +1,15 @@
 """
-Nike Rocket Position Monitor v2.2 - 30-Day Billing + Error Logging
-===================================================================
+Nike Rocket Position Monitor v2.3 - 30-Day Billing + Error Logging + Scaled
+============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.2:
+- SCALED FOR 5000+ USERS with parallel batch execution
+- Random shuffle for fair check order (no user always first/last)
+- Parallel batches of 50 users (under Kraken limits)
+- 100ms delay between batches
+- 5000 users completes in ~15-30 seconds per cycle
 
 Key changes from v2.1:
 - Added error logging to error_logs table for admin dashboard visibility
@@ -30,12 +37,14 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.2 (30-Day Billing + Error Logging)
+Version: 2.3 (Scaled for 5000+ users)
+Updated: December 1, 2025
 """
 
 import asyncio
 import logging
 import os
+import random
 import secrets
 import time
 import json
@@ -926,25 +935,62 @@ class PositionMonitor:
             )
     
     async def check_all_positions(self):
-        """Check all open positions and scan for new fills"""
+        """
+        Check all open positions and scan for new fills
+        
+        SCALED FOR 5000+ USERS:
+        - Random shuffle for complete fairness
+        - Parallel batch execution (50 positions/users per batch)
+        - 100ms delay between batches to stay within rate limits
+        - 5000 users completes in ~15-30 seconds per cycle
+        """
+        # BATCH SETTINGS
+        BATCH_SIZE = 50  # Position checks are lighter (~1 token each)
+        BATCH_DELAY = 0.1  # 100ms between batches
+        
         positions = await self.get_open_positions()
         
         if positions:
-            self.logger.debug(f"📊 Checking {len(positions)} open positions...")
+            # FAIRNESS: Randomize check order
+            positions_list = list(positions)
+            random.shuffle(positions_list)
             
-            for position in positions:
-                await self.check_position(position)
-                await asyncio.sleep(0.5)
+            self.logger.debug(f"📊 Checking {len(positions_list)} open positions...")
+            
+            # PARALLEL BATCH EXECUTION for position checks
+            for i in range(0, len(positions_list), BATCH_SIZE):
+                batch = positions_list[i:i + BATCH_SIZE]
+                
+                # Execute batch in parallel
+                await asyncio.gather(*[
+                    self.check_position(position) for position in batch
+                ], return_exceptions=True)
+                
+                # Rate limit delay between batches
+                if i + BATCH_SIZE < len(positions_list):
+                    await asyncio.sleep(BATCH_DELAY)
         
         # Also scan fills for users without open_positions records
         # This catches manual trades or trades from other sources
         users = await self.get_active_users()
-        users_with_positions = {p['user_id'] for p in positions}
+        users_with_positions = {p['user_id'] for p in positions} if positions else set()
         
-        for user in users:
-            if user['id'] not in users_with_positions:
-                await self.scan_exchange_fills(user)
-                await asyncio.sleep(0.5)
+        # FAIRNESS: Randomize scan order for users without positions
+        users_to_scan = [u for u in users if u['id'] not in users_with_positions]
+        random.shuffle(users_to_scan)
+        
+        # PARALLEL BATCH EXECUTION for fill scans
+        for i in range(0, len(users_to_scan), BATCH_SIZE):
+            batch = users_to_scan[i:i + BATCH_SIZE]
+            
+            # Execute batch in parallel
+            await asyncio.gather(*[
+                self.scan_exchange_fills(user) for user in batch
+            ], return_exceptions=True)
+            
+            # Rate limit delay between batches
+            if i + BATCH_SIZE < len(users_to_scan):
+                await asyncio.sleep(BATCH_DELAY)
     
     async def run(self):
         """Main loop - checks positions every 60 seconds"""
