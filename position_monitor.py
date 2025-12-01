@@ -821,7 +821,7 @@ class PositionMonitor:
             self.logger.info(f"   Exit: ${exit_price:.4f} ({exit_type})")
             self.logger.info(f"   Size: {position_size:.2f} contracts")
             self.logger.info(f"   P&L: ${profit_usd:+.2f} ({profit_percent:+.2f}%)")
-            self.logger.info(f"   📅 Profit added to 30-day billing cycle")
+            self.logger.info(f"   📅 P&L added to 30-day billing cycle")
             
             return True
             
