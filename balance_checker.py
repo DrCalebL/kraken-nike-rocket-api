@@ -531,36 +531,79 @@ class BalanceChecker:
         """
         Record a deposit or fees/funding/withdrawal transaction
         
+        OPTIMIZED: For fees_funding_withdrawal, aggregates into daily records
+        to prevent table bloat from hourly balance checks.
+        
         CONSOLIDATED: Uses both follower_user_id (new) and user_id (legacy api_key) for compatibility
         """
-        # Generate appropriate note based on transaction type
-        if transaction_type == 'fees_funding_withdrawal':
-            notes = 'Trading fees, funding payments, or withdrawal (cannot distinguish via API)'
-        elif transaction_type == 'deposit':
-            notes = 'Detected deposit via balance increase'
-        else:
-            notes = f'Auto-detected {transaction_type} via balance checker'
-        
         async with self.db_pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO portfolio_transactions (
-                    follower_user_id,
+            if transaction_type == 'fees_funding_withdrawal':
+                # UPSERT pattern: Update today's record if exists, otherwise create new
+                # This keeps one fees record per user per day instead of one per hour
+                existing = await conn.fetchrow("""
+                    SELECT id, amount FROM portfolio_transactions
+                    WHERE follower_user_id = $1
+                      AND transaction_type = 'fees_funding_withdrawal'
+                      AND DATE(created_at) = CURRENT_DATE
+                    LIMIT 1
+                """, user_id)
+                
+                if existing:
+                    # Add to existing daily record
+                    new_amount = float(existing['amount']) + float(amount)
+                    await conn.execute("""
+                        UPDATE portfolio_transactions
+                        SET amount = $1,
+                            notes = 'Daily total: Trading fees, funding payments, or withdrawals',
+                            created_at = NOW()
+                        WHERE id = $2
+                    """, new_amount, existing['id'])
+                    logger.info(f"📊 Updated daily fees for {api_key[:10]}...: +${amount:.2f} (total: ${new_amount:.2f})")
+                else:
+                    # Create new daily record
+                    await conn.execute("""
+                        INSERT INTO portfolio_transactions (
+                            follower_user_id,
+                            user_id,
+                            transaction_type,
+                            amount,
+                            detection_method,
+                            notes
+                        ) VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                        user_id,
+                        api_key,
+                        transaction_type,
+                        float(amount),
+                        'automatic',
+                        'Daily total: Trading fees, funding payments, or withdrawals'
+                    )
+                    logger.info(f"✅ Created daily fees record for {api_key[:10]}...: ${amount:.2f}")
+            else:
+                # Deposits and other types: always create individual records
+                if transaction_type == 'deposit':
+                    notes = 'Detected deposit via balance increase'
+                else:
+                    notes = f'Auto-detected {transaction_type} via balance checker'
+                
+                await conn.execute("""
+                    INSERT INTO portfolio_transactions (
+                        follower_user_id,
+                        user_id,
+                        transaction_type,
+                        amount,
+                        detection_method,
+                        notes
+                    ) VALUES ($1, $2, $3, $4, $5, $6)
+                """,
                     user_id,
+                    api_key,
                     transaction_type,
-                    amount,
-                    detection_method,
+                    float(amount),
+                    'automatic',
                     notes
-                ) VALUES ($1, $2, $3, $4, $5, $6)
-            """,
-                user_id,      # New proper FK
-                api_key,      # Legacy column for backwards compat
-                transaction_type,
-                float(amount),
-                'automatic',
-                notes
-            )
-            
-            logger.info(f"✅ Recorded {transaction_type} of ${amount:.2f} for {api_key[:10]}...")
+                )
+                logger.info(f"✅ Recorded {transaction_type} of ${amount:.2f} for {api_key[:10]}...")
 
 
     async def update_last_known_balance(self, user_id: int, api_key: str, balance: Decimal):
@@ -662,13 +705,23 @@ class BalanceChecker:
     async def get_transaction_history(
         self, 
         api_key: str, 
-        limit: int = 50
+        limit: int = 50,
+        offset: int = 0,
+        start_date: str = None,
+        end_date: str = None
     ) -> list:
         """
-        Get transaction history for a user
+        Get transaction history for a user with pagination and date filtering
         
-        OPTIMIZED: Aggregates fees/funding/withdrawals by day to prevent list clogging
-        while keeping deposits as individual entries
+        Args:
+            api_key: User's API key
+            limit: Max records to return
+            offset: Pagination offset
+            start_date: Filter from this date (YYYY-MM-DD)
+            end_date: Filter to this date (YYYY-MM-DD)
+        
+        NOTE: fees_funding_withdrawal records are already aggregated by day
+        at write time, so no complex aggregation needed here.
         
         CONSOLIDATED: Uses both FKs for compatibility
         """
@@ -678,64 +731,63 @@ class BalanceChecker:
                 SELECT id FROM follower_users WHERE api_key = $1
             """, api_key)
             
-            # Query that aggregates fees_funding_withdrawal by day, keeps deposits individual
-            transactions = await conn.fetch("""
-                WITH aggregated AS (
-                    -- Aggregate fees/funding/withdrawals by day
-                    SELECT 
-                        'fees_funding_withdrawal' as transaction_type,
-                        SUM(amount) as amount,
-                        DATE(created_at) as tx_date,
-                        MAX(created_at) as created_at,
-                        'automatic' as detection_method,
-                        'Daily total: Trading fees, funding payments, or withdrawals' as notes,
-                        COUNT(*) as tx_count
-                    FROM portfolio_transactions
-                    WHERE (follower_user_id = $1 OR user_id = $2)
-                      AND transaction_type = 'fees_funding_withdrawal'
-                    GROUP BY DATE(created_at)
-                    
-                    UNION ALL
-                    
-                    -- Keep deposits as individual entries
+            # Build query with optional date filters
+            if start_date and end_date:
+                transactions = await conn.fetch("""
                     SELECT 
                         transaction_type,
                         amount,
-                        DATE(created_at) as tx_date,
                         created_at,
                         detection_method,
-                        notes,
-                        1 as tx_count
+                        notes
                     FROM portfolio_transactions
                     WHERE (follower_user_id = $1 OR user_id = $2)
-                      AND transaction_type = 'deposit'
-                    
-                    UNION ALL
-                    
-                    -- Keep legacy 'withdrawal' entries as individual
+                      AND DATE(created_at) >= $5::date
+                      AND DATE(created_at) <= $6::date
+                    ORDER BY created_at DESC
+                    LIMIT $3 OFFSET $4
+                """, user_id, api_key, limit, offset, start_date, end_date)
+            elif start_date:
+                transactions = await conn.fetch("""
                     SELECT 
                         transaction_type,
                         amount,
-                        DATE(created_at) as tx_date,
                         created_at,
                         detection_method,
-                        notes,
-                        1 as tx_count
+                        notes
                     FROM portfolio_transactions
                     WHERE (follower_user_id = $1 OR user_id = $2)
-                      AND transaction_type = 'withdrawal'
-                )
-                SELECT 
-                    transaction_type,
-                    amount,
-                    created_at,
-                    detection_method,
-                    notes,
-                    tx_count
-                FROM aggregated
-                ORDER BY created_at DESC
-                LIMIT $3
-            """, user_id, api_key, limit)
+                      AND DATE(created_at) >= $5::date
+                    ORDER BY created_at DESC
+                    LIMIT $3 OFFSET $4
+                """, user_id, api_key, limit, offset, start_date)
+            elif end_date:
+                transactions = await conn.fetch("""
+                    SELECT 
+                        transaction_type,
+                        amount,
+                        created_at,
+                        detection_method,
+                        notes
+                    FROM portfolio_transactions
+                    WHERE (follower_user_id = $1 OR user_id = $2)
+                      AND DATE(created_at) <= $5::date
+                    ORDER BY created_at DESC
+                    LIMIT $3 OFFSET $4
+                """, user_id, api_key, limit, offset, end_date)
+            else:
+                transactions = await conn.fetch("""
+                    SELECT 
+                        transaction_type,
+                        amount,
+                        created_at,
+                        detection_method,
+                        notes
+                    FROM portfolio_transactions
+                    WHERE follower_user_id = $1 OR user_id = $2
+                    ORDER BY created_at DESC
+                    LIMIT $3 OFFSET $4
+                """, user_id, api_key, limit, offset)
             
             return [dict(t) for t in transactions]
 
