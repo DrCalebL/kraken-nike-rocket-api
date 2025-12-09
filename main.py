@@ -3094,12 +3094,42 @@ async def portfolio_dashboard(request: Request):
                     for (const tx of data.transactions) {{
                         const date = new Date(tx.created_at).toLocaleDateString();
                         const time = new Date(tx.created_at).toLocaleTimeString();
-                        const icon = tx.transaction_type === 'deposit' ? '💰' : 
-                                    tx.transaction_type === 'withdrawal' ? '💸' : '🎯';
-                        const color = tx.transaction_type === 'deposit' ? '#10b981' : 
-                                     tx.transaction_type === 'withdrawal' ? '#ef4444' : '#667eea';
-                        const sign = tx.transaction_type === 'deposit' ? '+' : 
-                                    tx.transaction_type === 'withdrawal' ? '-' : '';
+                        
+                        // Determine icon, color, sign, and label based on transaction type
+                        let icon, color, sign, label, subtitle;
+                        
+                        if (tx.transaction_type === 'deposit') {{
+                            icon = '💰';
+                            color = '#10b981';
+                            sign = '+';
+                            label = 'Deposit';
+                            subtitle = `${{date}} at ${{time}}`;
+                        }} else if (tx.transaction_type === 'fees_funding_withdrawal') {{
+                            icon = '💸';
+                            color = '#ef4444';
+                            sign = '-';
+                            label = 'Fees / Funding / Withdrawal';
+                            // Show count if aggregated (multiple transactions in one day)
+                            const count = tx.tx_count || 1;
+                            if (count > 1) {{
+                                subtitle = `${{date}} (${{count}} transactions)`;
+                            }} else {{
+                                subtitle = `${{date}} at ${{time}}`;
+                            }}
+                        }} else if (tx.transaction_type === 'withdrawal') {{
+                            // Legacy withdrawal entries
+                            icon = '💸';
+                            color = '#ef4444';
+                            sign = '-';
+                            label = 'Withdrawal';
+                            subtitle = `${{date}} at ${{time}}`;
+                        }} else {{
+                            icon = '🎯';
+                            color = '#667eea';
+                            sign = '';
+                            label = tx.transaction_type;
+                            subtitle = `${{date}} at ${{time}}`;
+                        }}
                         
                         html += `
                             <div style="
@@ -3112,17 +3142,17 @@ async def portfolio_dashboard(request: Request):
                                 <div style="display: flex; align-items: center; gap: 15px;">
                                     <div style="font-size: 24px;">${{icon}}</div>
                                     <div>
-                                        <div style="font-weight: 600; color: #374151; text-transform: capitalize;">
-                                            ${{tx.transaction_type}}
+                                        <div style="font-weight: 600; color: #374151;">
+                                            ${{label}}
                                         </div>
                                         <div style="font-size: 12px; color: #9ca3af;">
-                                            ${{date}} at ${{time}}
+                                            ${{subtitle}}
                                         </div>
                                     </div>
                                 </div>
                                 <div style="text-align: right;">
                                     <div style="font-size: 20px; font-weight: 600; color: ${{color}};">
-                                        ${{sign}}$${{tx.amount.toLocaleString()}}
+                                        ${{sign}}$${{tx.amount.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}})}}
                                     </div>
                                     <div style="font-size: 11px; color: #9ca3af;">
                                         ${{tx.detection_method}}
@@ -3131,6 +3161,18 @@ async def portfolio_dashboard(request: Request):
                             </div>
                         `;
                     }}
+                    
+                    // Add info note at the bottom
+                    html += `
+                        <div style="padding: 15px; background: #f9fafb; border-top: 1px solid #e5e7eb;">
+                            <div style="font-size: 12px; color: #6b7280; text-align: center;">
+                                ℹ️ <strong>Note:</strong> Kraken API cannot distinguish between trading fees, 
+                                funding payments, and spot↔futures transfers. These are grouped as 
+                                "Fees / Funding / Withdrawal".
+                            </div>
+                        </div>
+                    `;
+                    
                     listElement.innerHTML = html;
                 }} else {{
                     listElement.innerHTML = `
