@@ -1,8 +1,15 @@
 """
-Nike Rocket Position Monitor v2.3 - 30-Day Billing + Error Logging + Scaled
+Nike Rocket Position Monitor v2.4 - 30-Day Billing + Error Logging + Scaled
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.3:
+- CRITICAL BUG FIX: P&L sign was inverted for all trades
+- Root cause: side field stored as "BUY"/"SELL" but P&L logic expected "long"/"short"
+- Example: LONG SL loss of -$9.95 was recorded as +$9.95 profit
+- Fix: Normalize side to long/short before P&L calculation (line ~691-695)
+- Date: 2025-12-10
 
 Key changes from v2.2:
 - SCALED FOR 5000+ USERS with parallel batch execution
@@ -37,8 +44,8 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.3 (Scaled for 5000+ users)
-Updated: December 1, 2025
+Version: 2.4 (P&L sign fix)
+Updated: December 10, 2025
 """
 
 import asyncio
@@ -688,6 +695,11 @@ class PositionMonitor:
             fill_count = position.get('fill_count') or 1
             leverage = position.get('leverage', 1)
             side = position.get('side')
+            # Normalize side to long/short (may come as BUY/SELL from some sources)
+            if side and side.upper() in ('BUY', 'LONG'):
+                side = 'long'
+            elif side and side.upper() in ('SELL', 'SHORT'):
+                side = 'short'
             symbol = position['symbol']
             
             if not entry_price or not position_size:
