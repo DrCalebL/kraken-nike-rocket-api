@@ -8,6 +8,7 @@ UPDATED: Now reads initial_capital and last_known_balance from follower_users
 """
 
 import os
+import html
 import psycopg2
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -783,6 +784,9 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             if len(error_msg) > 300:
                 error_msg = error_msg[:300] + '...'
             
+            # HTML-escape for safe display (prevents breaking HTML parsing)
+            error_msg_escaped = html.escape(error_msg)
+            
             # User email for display
             user_display = error.get('email', 'Unknown User')
             
@@ -800,18 +804,18 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
             <div class="error-item" 
                  style="border-left-color: {border_color};" 
                  data-error-type="{error_category}"
-                 data-user="{user_display.lower()}"
-                 data-message="{error_msg.lower()}"
+                 data-user="{html.escape(user_display.lower())}"
+                 data-message="{error_msg_escaped.lower()}"
                  data-error-category="{error_type.lower()}"
                  data-timestamp="{timestamp_str}">
                 <div class="error-header">
                     <div style="display: flex; gap: 10px; align-items: center;">
                         <span class="error-type {badge_class}">{error.get('error_type', 'Unknown')}</span>
-                        <span style="color: #60a5fa; font-size: 12px;">👤 {user_display}</span>
+                        <span style="color: #60a5fa; font-size: 12px;">👤 {html.escape(user_display)}</span>
                     </div>
                     <span class="error-timestamp">{timestamp_str}</span>
                 </div>
-                <div class="error-message">{error_msg}</div>
+                <div class="error-message">{error_msg_escaped}</div>
                 <div class="error-context">API Key: {error.get('api_key', 'N/A')[:15]}...</div>
             </div>
             """
@@ -1974,8 +1978,10 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
     
     // Change user fee tier
     function changeTier(userId, newTier) {{
+        console.log('changeTier called:', userId, newTier);
         const tierNames = {{'team': 'Team (0%)', 'vip': 'VIP (5%)', 'standard': 'Standard (10%)'}};
         if (confirm(`Move user to ${{tierNames[newTier]}}?`)) {{
+            console.log('User confirmed, sending request...');
             fetch('/admin/update-user-tier', {{
                 method: 'POST',
                 headers: {{
@@ -1985,21 +1991,31 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
                 body: JSON.stringify({{user_id: userId, new_tier: newTier}})
             }})
             .then(response => {{
+                console.log('Response status:', response.status);
                 if (!response.ok) {{
-                    return response.json().then(data => {{
-                        throw new Error(data.detail || 'Update failed');
+                    return response.text().then(text => {{
+                        console.error('Error response body:', text);
+                        try {{
+                            const data = JSON.parse(text);
+                            throw new Error(data.detail || 'Update failed');
+                        }} catch (e) {{
+                            throw new Error(text || 'Update failed');
+                        }}
                     }});
                 }}
                 return response.json();
             }})
             .then(data => {{
                 console.log('Tier update successful:', data);
+                alert('Success! ' + (data.message || 'User tier updated'));
                 location.reload();
             }})
             .catch(err => {{
                 console.error('Tier update error:', err);
                 alert('Error updating tier: ' + err.message);
             }});
+        }} else {{
+            console.log('User cancelled');
         }}
     }}
     
