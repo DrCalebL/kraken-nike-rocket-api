@@ -588,14 +588,20 @@ async def update_user_tier_endpoint(
     - vip: 5% fees
     - standard: 10% fees
     """
+    print(f"[DEBUG] update-user-tier called")
+    print(f"[DEBUG] x_admin_key header received: {x_admin_key[:10] if x_admin_key else 'None'}...")
+    print(f"[DEBUG] Expected: {ADMIN_PASSWORD[:10]}...")
+    
     # Verify admin authentication
     if x_admin_key != ADMIN_PASSWORD:
+        print(f"[DEBUG] Auth failed - header doesn't match")
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
         data = await request.json()
         user_id = data.get('user_id')
         new_tier = data.get('new_tier')
+        print(f"[DEBUG] user_id={user_id}, new_tier={new_tier}")
         
         if not user_id or not new_tier:
             raise HTTPException(status_code=400, detail="Missing user_id or new_tier")
@@ -2118,7 +2124,26 @@ async def portfolio_dashboard(request: Request):
         
         <!-- Dashboard -->
         <div id="dashboard" style="display: none;">
-            <button class="logout-btn" onclick="logout()">Change API Key</button>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                <button class="refresh-btn" onclick="refreshDashboard()" style="
+                    padding: 12px 24px;
+                    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    font-size: 14px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    transition: all 0.1s ease;
+                    box-shadow: 0 4px 6px rgba(16, 185, 129, 0.3);
+                ">
+                    🔄 Refresh Dashboard
+                </button>
+                <button class="logout-btn" onclick="logout()">Change API Key</button>
+            </div>
             
             <!-- Agent Status Display -->
             <div class="agent-status-container">
@@ -2514,19 +2539,6 @@ async def portfolio_dashboard(request: Request):
                     </div>
                     <div class="section-header-actions">
                         <span id="equity-stats" style="font-size: 13px; color: #6b7280;"></span>
-                        <button onclick="loadEquityCurve()" style="
-                            background: #667eea;
-                            color: white;
-                            border: none;
-                            padding: 8px 16px;
-                            border-radius: 6px;
-                            cursor: pointer;
-                            font-size: 14px;
-                            box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
-                            transition: all 0.1s ease;
-                        ">
-                            🔄 Refresh
-                        </button>
                     </div>
                 </div>
                 
@@ -2577,19 +2589,6 @@ async def portfolio_dashboard(request: Request):
                     <h2 style="margin: 0; color: #667eea; font-size: 24px;">
                         📜 Transaction History
                     </h2>
-                    <button onclick="loadTransactionHistory(true)" style="
-                        background: #667eea;
-                        color: white;
-                        border: none;
-                        padding: 8px 16px;
-                        border-radius: 6px;
-                        cursor: pointer;
-                        font-size: 14px;
-                        box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3);
-                        transition: all 0.1s ease;
-                    ">
-                        🔄 Refresh
-                    </button>
                 </div>
                 
                 <!-- Date Filter Controls -->
@@ -3539,6 +3538,39 @@ async def portfolio_dashboard(request: Request):
                         <div style="font-size: 14px; color: #9ca3af;">Start trading to see your equity curve</div>
                     </div>
                 `;
+            }}
+        }}
+        
+        // Refresh entire dashboard
+        async function refreshDashboard() {{
+            const refreshBtn = document.querySelector('.refresh-btn');
+            const originalText = refreshBtn.innerHTML;
+            
+            try {{
+                // Show loading state
+                refreshBtn.innerHTML = '⏳ Refreshing...';
+                refreshBtn.disabled = true;
+                
+                // Refresh all dashboard data
+                await loadBalanceSummary();
+                await loadTransactionHistory(true);
+                await loadEquityCurve();
+                await changePeriod();
+                await checkAgentStatus();
+                
+                // Success feedback
+                refreshBtn.innerHTML = '✅ Refreshed!';
+                setTimeout(() => {{
+                    refreshBtn.innerHTML = originalText;
+                    refreshBtn.disabled = false;
+                }}, 1500);
+            }} catch (error) {{
+                console.error('Error refreshing dashboard:', error);
+                refreshBtn.innerHTML = '❌ Error';
+                setTimeout(() => {{
+                    refreshBtn.innerHTML = originalText;
+                    refreshBtn.disabled = false;
+                }}, 2000);
             }}
         }}
         
