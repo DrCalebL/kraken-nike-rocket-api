@@ -1391,6 +1391,124 @@ async def admin_reconcile_all_trades(password: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== OPEN POSITIONS API ====================
+# Returns current open positions for a user with TP/SL levels
+
+@app.get("/api/portfolio/open-positions")
+async def get_open_positions(request: Request):
+    """
+    Get all open positions for a user with TP/SL levels.
+    Query params:
+        - key: API key (required)
+        - start_date: Filter by date (optional, YYYY-MM-DD)
+        - end_date: Filter by date (optional, YYYY-MM-DD)
+    """
+    api_key = request.query_params.get('key') or request.headers.get('X-API-Key')
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+    
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API key required")
+    
+    try:
+        DATABASE_URL = os.getenv("DATABASE_URL")
+        if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+            DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+        
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # First validate the API key and get user_id
+        user = await conn.fetchrow(
+            "SELECT id FROM follower_users WHERE api_key = $1",
+            api_key
+        )
+        
+        if not user:
+            await conn.close()
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        
+        user_id = user['id']
+        
+        # Build query with optional date filters
+        query = """
+            SELECT 
+                id,
+                symbol,
+                kraken_symbol,
+                side,
+                quantity,
+                filled_quantity,
+                leverage,
+                avg_entry_price,
+                entry_fill_price,
+                target_tp,
+                target_sl,
+                opened_at,
+                first_fill_at,
+                last_fill_at,
+                fill_count,
+                status
+            FROM open_positions
+            WHERE user_id = $1 AND status = 'open'
+        """
+        params = [user_id]
+        param_count = 1
+        
+        if start_date:
+            param_count += 1
+            query += f" AND opened_at >= ${param_count}::date"
+            params.append(start_date)
+        
+        if end_date:
+            param_count += 1
+            query += f" AND opened_at <= ${param_count}::date + interval '1 day'"
+            params.append(end_date)
+        
+        query += " ORDER BY opened_at DESC"
+        
+        rows = await conn.fetch(query, *params)
+        
+        positions = []
+        for row in rows:
+            positions.append({
+                "id": row['id'],
+                "symbol": row['symbol'],
+                "kraken_symbol": row['kraken_symbol'],
+                "side": row['side'],
+                "quantity": float(row['quantity']) if row['quantity'] else 0,
+                "filled_quantity": float(row['filled_quantity']) if row['filled_quantity'] else 0,
+                "leverage": float(row['leverage']) if row['leverage'] else 1,
+                "avg_entry_price": float(row['avg_entry_price']) if row['avg_entry_price'] else 0,
+                "entry_fill_price": float(row['entry_fill_price']) if row['entry_fill_price'] else 0,
+                "target_tp": float(row['target_tp']) if row['target_tp'] else None,
+                "target_sl": float(row['target_sl']) if row['target_sl'] else None,
+                "opened_at": row['opened_at'].isoformat() if row['opened_at'] else None,
+                "first_fill_at": row['first_fill_at'].isoformat() if row['first_fill_at'] else None,
+                "last_fill_at": row['last_fill_at'].isoformat() if row['last_fill_at'] else None,
+                "fill_count": row['fill_count'] or 1,
+                "status": row['status']
+            })
+        
+        await conn.close()
+        
+        return {
+            "status": "success",
+            "positions": positions,
+            "count": len(positions)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        await log_error_to_db_global(
+            api_key[:20] + "..." if api_key else "unknown",
+            "OPEN_POSITIONS_ERROR",
+            str(e),
+            {"traceback": traceback.format_exc()[:500]}
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Serve static background images (NEW!)
 @app.get("/static/backgrounds/{filename}")
 async def get_background(filename: str):
@@ -2280,6 +2398,30 @@ async def portfolio_dashboard(request: Request):
                 "></div>
             </div>
             
+            <!-- Live Positions Section -->
+            <div class="live-positions" style="
+                background: white;
+                border-radius: 12px;
+                padding: 30px;
+                margin-bottom: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            ">
+                <div class="section-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0; color: #667eea; font-size: 24px;">
+                        📊 Live Positions
+                    </h2>
+                    <div style="font-size: 12px; color: #9ca3af;">
+                        Auto-refreshes with dashboard
+                    </div>
+                </div>
+                
+                <div id="positions-container">
+                    <div style="text-align: center; padding: 40px; color: #6b7280;">
+                        ⏳ Loading positions...
+                    </div>
+                </div>
+            </div>
+            
             <div class="hero">
                 <h1>🚀 $NIKEPIG'S MASSIVE ROCKET PERFORMANCE</h1>
                 
@@ -2573,6 +2715,87 @@ async def portfolio_dashboard(request: Request):
                     <div style="text-align: center;">
                         <div style="font-size: 12px; color: #6b7280;">Max Drawdown</div>
                         <div id="eq-maxdd" style="font-size: 18px; font-weight: 600; color: #f59e0b;">0%</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Open Positions Section (LIVE TRADES) -->
+            <div class="open-positions" style="
+                background: white;
+                border-radius: 12px;
+                padding: 30px;
+                margin-top: 30px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            ">
+                <div class="section-header">
+                    <h2 style="margin: 0; color: #667eea; font-size: 24px;">
+                        🔥 Open Positions
+                    </h2>
+                    <span id="open-positions-count" style="font-size: 14px; color: #6b7280;"></span>
+                </div>
+                
+                <!-- Date Filter Controls -->
+                <div style="
+                    display: flex;
+                    gap: 15px;
+                    align-items: center;
+                    padding: 15px;
+                    background: #f9fafb;
+                    border-radius: 8px;
+                    margin-bottom: 15px;
+                    margin-top: 15px;
+                    flex-wrap: wrap;
+                ">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <label style="font-size: 14px; color: #374151; font-weight: 500;">From:</label>
+                        <input type="date" id="pos-start-date" style="
+                            padding: 8px 12px;
+                            border: 1px solid #e5e7eb;
+                            border-radius: 6px;
+                            font-size: 14px;
+                            color: #374151;
+                        ">
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <label style="font-size: 14px; color: #374151; font-weight: 500;">To:</label>
+                        <input type="date" id="pos-end-date" style="
+                            padding: 8px 12px;
+                            border: 1px solid #e5e7eb;
+                            border-radius: 6px;
+                            font-size: 14px;
+                            color: #374151;
+                        ">
+                    </div>
+                    <button onclick="applyPositionDateFilter()" style="
+                        background: #667eea;
+                        color: white;
+                        border: none;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 14px;
+                    ">
+                        🔍 Search
+                    </button>
+                    <button onclick="clearPositionDateFilter()" style="
+                        background: #f3f4f6;
+                        color: #374151;
+                        border: 1px solid #e5e7eb;
+                        padding: 8px 16px;
+                        border-radius: 6px;
+                        cursor: pointer;
+                        font-size: 14px;
+                    ">
+                        ✕ Clear
+                    </button>
+                    <div id="pos-date-filter-status" style="font-size: 12px; color: #6b7280; margin-left: auto;">
+                    </div>
+                </div>
+                
+                <div id="open-positions-list" style="overflow-x: auto;">
+                    <!-- Positions will be loaded here -->
+                    <div style="text-align: center; padding: 40px; color: #9ca3af;">
+                        Loading open positions...
                     </div>
                 </div>
             </div>
@@ -2895,6 +3118,7 @@ async def portfolio_dashboard(request: Request):
                     initExportControls();
                     // Load balance summary and transactions
                     await loadBalanceSummary();
+                    await loadPositions();
                     await loadTransactionHistory();
                     // Load equity curve chart
                     await loadEquityCurve();
@@ -3541,6 +3765,153 @@ async def portfolio_dashboard(request: Request):
             }}
         }}
         
+        // ==================== OPEN POSITIONS FUNCTIONS ====================
+        let positionStartDate = null;
+        let positionEndDate = null;
+        
+        async function loadPositions() {{
+            try {{
+                let url = `/api/portfolio/open-positions?key=${{currentApiKey}}`;
+                
+                if (positionStartDate) {{
+                    url += `&start_date=${{positionStartDate}}`;
+                }}
+                if (positionEndDate) {{
+                    url += `&end_date=${{positionEndDate}}`;
+                }}
+                
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                const listDiv = document.getElementById('open-positions-list');
+                const countSpan = document.getElementById('open-positions-count');
+                
+                if (data.status === 'success' && data.positions && data.positions.length > 0) {{
+                    countSpan.textContent = `${{data.count}} open position${{data.count > 1 ? 's' : ''}}`;
+                    
+                    let html = `
+                        <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                            <thead>
+                                <tr style="background: #f9fafb; border-bottom: 2px solid #e5e7eb;">
+                                    <th style="padding: 12px 10px; text-align: left; color: #374151; font-weight: 600;">Symbol</th>
+                                    <th style="padding: 12px 10px; text-align: left; color: #374151; font-weight: 600;">Side</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Size</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Entry Price</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Take Profit</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Stop Loss</th>
+                                    <th style="padding: 12px 10px; text-align: left; color: #374151; font-weight: 600;">Opened</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    
+                    for (const pos of data.positions) {{
+                        const sideColor = pos.side === 'long' || pos.side === 'buy' ? '#10b981' : '#ef4444';
+                        const sideIcon = pos.side === 'long' || pos.side === 'buy' ? '📈' : '📉';
+                        const sideLabel = pos.side === 'long' || pos.side === 'buy' ? 'LONG' : 'SHORT';
+                        
+                        const openedDate = pos.opened_at ? new Date(pos.opened_at).toLocaleString() : '-';
+                        const entryPrice = pos.avg_entry_price || pos.entry_fill_price || 0;
+                        
+                        html += `
+                            <tr style="border-bottom: 1px solid #e5e7eb;">
+                                <td style="padding: 12px 10px; font-weight: 600; color: #374151;">
+                                    ${{pos.symbol || pos.kraken_symbol || '-'}}
+                                </td>
+                                <td style="padding: 12px 10px;">
+                                    <span style="
+                                        display: inline-flex;
+                                        align-items: center;
+                                        gap: 4px;
+                                        padding: 4px 10px;
+                                        border-radius: 12px;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        background: ${{sideColor}}20;
+                                        color: ${{sideColor}};
+                                    ">
+                                        ${{sideIcon}} ${{sideLabel}}
+                                    </span>
+                                </td>
+                                <td style="padding: 12px 10px; text-align: right; color: #374151;">
+                                    ${{(pos.filled_quantity || pos.quantity || 0).toLocaleString()}}
+                                </td>
+                                <td style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 500;">
+                                    $${{entryPrice.toFixed(5)}}
+                                </td>
+                                <td style="padding: 12px 10px; text-align: right;">
+                                    ${{pos.target_tp ? `<span style="color: #10b981; font-weight: 500;">$${{pos.target_tp.toFixed(5)}}</span>` : '<span style="color: #9ca3af;">-</span>'}}
+                                </td>
+                                <td style="padding: 12px 10px; text-align: right;">
+                                    ${{pos.target_sl ? `<span style="color: #ef4444; font-weight: 500;">$${{pos.target_sl.toFixed(5)}}</span>` : '<span style="color: #9ca3af;">-</span>'}}
+                                </td>
+                                <td style="padding: 12px 10px; color: #6b7280; font-size: 13px;">
+                                    ${{openedDate}}
+                                </td>
+                            </tr>
+                        `;
+                    }}
+                    
+                    html += `
+                            </tbody>
+                        </table>
+                    `;
+                    
+                    listDiv.innerHTML = html;
+                }} else {{
+                    countSpan.textContent = '0 positions';
+                    listDiv.innerHTML = `
+                        <div style="text-align: center; padding: 40px; color: #9ca3af;">
+                            <div style="font-size: 48px; margin-bottom: 15px;">✨</div>
+                            <div style="font-size: 16px; font-weight: 500; margin-bottom: 8px;">No Open Positions</div>
+                            <div style="font-size: 14px;">Your active trades will appear here</div>
+                        </div>
+                    `;
+                }}
+            }} catch (error) {{
+                console.error('Error loading positions:', error);
+                document.getElementById('open-positions-list').innerHTML = `
+                    <div style="text-align: center; padding: 40px; color: #ef4444;">
+                        Error loading positions. Please try again.
+                    </div>
+                `;
+            }}
+        }}
+        
+        function applyPositionDateFilter() {{
+            const startInput = document.getElementById('pos-start-date');
+            const endInput = document.getElementById('pos-end-date');
+            const statusDiv = document.getElementById('pos-date-filter-status');
+            
+            positionStartDate = startInput.value || null;
+            positionEndDate = endInput.value || null;
+            
+            if (positionStartDate || positionEndDate) {{
+                let filterText = 'Filtering: ';
+                if (positionStartDate && positionEndDate) {{
+                    filterText += `${{positionStartDate}} to ${{positionEndDate}}`;
+                }} else if (positionStartDate) {{
+                    filterText += `From ${{positionStartDate}}`;
+                }} else {{
+                    filterText += `Until ${{positionEndDate}}`;
+                }}
+                statusDiv.textContent = filterText;
+            }} else {{
+                statusDiv.textContent = '';
+            }}
+            
+            loadPositions();
+        }}
+        
+        function clearPositionDateFilter() {{
+            document.getElementById('pos-start-date').value = '';
+            document.getElementById('pos-end-date').value = '';
+            document.getElementById('pos-date-filter-status').textContent = '';
+            positionStartDate = null;
+            positionEndDate = null;
+            loadPositions();
+        }}
+        
         // Refresh entire dashboard
         async function refreshDashboard() {{
             const refreshBtn = document.querySelector('.refresh-btn');
@@ -3553,6 +3924,7 @@ async def portfolio_dashboard(request: Request):
                 
                 // Refresh all dashboard data
                 await loadBalanceSummary();
+                await loadPositions();
                 await loadTransactionHistory(true);
                 await loadEquityCurve();
                 await changePeriod();
