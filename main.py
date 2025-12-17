@@ -2289,11 +2289,11 @@ async def portfolio_dashboard(request: Request):
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; padding: 15px; background: #f9fafb; border-radius: 8px;">
                     <div>
-                        <div style="font-size: 13px; color: #6b7280;">Total Deposits</div>
+                        <div style="font-size: 13px; color: #6b7280;">Funding/Deposits</div>
                         <div id="total-deposits" style="font-size: 18px; font-weight: 600; color: #10b981;">+$0</div>
                     </div>
                     <div>
-                        <div style="font-size: 13px; color: #6b7280;">Total Withdrawals</div>
+                        <div style="font-size: 13px; color: #6b7280;">Fees/Funding/Withdrawals</div>
                         <div id="total-withdrawals" style="font-size: 18px; font-weight: 600; color: #ef4444;">-$0</div>
                     </div>
                     <div>
@@ -3338,7 +3338,7 @@ async def portfolio_dashboard(request: Request):
                         icon = '💰';
                         color = '#10b981';
                         sign = '+';
-                        label = 'Deposit';
+                        label = 'Funding/Deposit';
                         subtitle = `${{date}} at ${{time}}`;
                     }} else if (tx.transaction_type === 'fees_funding_withdrawal') {{
                         icon = '💸';
