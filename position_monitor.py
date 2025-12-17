@@ -1,8 +1,15 @@
 """
-Nike Rocket Position Monitor v2.4 - 30-Day Billing + Error Logging + Scaled
+Nike Rocket Position Monitor v2.5 - 30-Day Billing + Error Logging + Scaled
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.4:
+- CRITICAL BUG FIX: Signal matching query used non-existent 'direction' column
+- Root cause: signals table has 'action' column (BUY/SELL), not 'direction'
+- Impact: Query would fail, fallback returned all trades as "signal trades"
+- Fix: Query now uses 'action' column with proper long->BUY, short->SELL mapping
+- Date: 2025-12-18
 
 Key changes from v2.3:
 - CRITICAL BUG FIX: P&L sign was inverted for all trades
@@ -44,8 +51,8 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.4 (P&L sign fix)
-Updated: December 10, 2025
+Version: 2.5 (Signal matching fix)
+Updated: December 18, 2025
 """
 
 import asyncio
@@ -265,19 +272,24 @@ class PositionMonitor:
                 symbol_base = symbol.split('/')[0].upper() if '/' in symbol else symbol.upper()
                 symbol_base = symbol_base.replace('PF_', '').replace('USD', '').replace(':USD', '')
                 
-                # Look for a recent signal matching this symbol and direction
+                # Look for a recent signal matching this symbol and action
+                # NOTE: Signal stores BUY/SELL, but side is normalized to long/short
+                # Map: long -> BUY, short -> SELL
+                action_map = {'long': 'BUY', 'short': 'SELL'}
+                signal_action = action_map.get(side.lower(), side.upper())
+                
                 signal = await conn.fetchrow("""
-                    SELECT id, signal_id, symbol, direction, created_at
+                    SELECT id, signal_id, symbol, action, created_at
                     FROM signals
                     WHERE UPPER(symbol) LIKE $1
-                      AND LOWER(direction) = LOWER($2)
+                      AND UPPER(action) = UPPER($2)
                       AND created_at >= NOW() - INTERVAL '%s hours'
                     ORDER BY created_at DESC
                     LIMIT 1
-                """ % lookback_hours, f'%{symbol_base}%', side)
+                """ % lookback_hours, f'%{symbol_base}%', signal_action)
                 
                 if signal:
-                    self.logger.info(f"✅ Found matching signal: {signal['symbol']} {signal['direction']} (signal_id: {signal['signal_id']})")
+                    self.logger.info(f"✅ Found matching signal: {signal['symbol']} {signal['action']} (signal_id: {signal['signal_id']})")
                     return dict(signal)
                 else:
                     self.logger.info(f"⚠️ No matching signal found for {symbol} {side} - likely manual trade")
