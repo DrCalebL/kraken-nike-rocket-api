@@ -767,6 +767,14 @@ class HostedTradingLoop:
                         datetime.now(),
                         'open'
                     )
+                    
+                    # Start billing cycle if not started (first trade OPEN)
+                    await conn.execute("""
+                        UPDATE follower_users SET 
+                            billing_cycle_start = CURRENT_TIMESTAMP
+                        WHERE id = $1 AND billing_cycle_start IS NULL
+                    """, user['id'])
+                    
                     self.logger.info(f"   📝 Open position recorded in database")
             except Exception as e:
                 self.logger.error(f"   ⚠️ Failed to record position (trade still placed): {e}")
