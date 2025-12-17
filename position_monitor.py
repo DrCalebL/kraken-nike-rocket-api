@@ -133,6 +133,31 @@ class PositionMonitor:
             self.logger.error(f"Failed to create exchange: {e}")
             return None
     
+    @staticmethod
+    def get_base_symbol(symbol: str) -> str:
+        """
+        Extract base symbol from various formats for consistent matching.
+        
+        Handles:
+        - ADA/USD:USD -> ADA
+        - ADA/USDT -> ADA  
+        - PF_ADAUSD -> ADA
+        - ADAUSD -> ADA
+        """
+        if not symbol:
+            return ''
+        
+        # Remove common prefixes/suffixes
+        base = symbol.upper()
+        base = base.replace('PF_', '')
+        base = base.replace(':USD', '')
+        base = base.replace('/USD', '')
+        base = base.replace('/USDT', '')
+        base = base.replace('USD', '')
+        base = base.replace('USDT', '')
+        
+        return base.strip()
+    
     async def update_user_fingerprint(self, user_id: int, exchange: ccxt.krakenfutures):
         """
         Update user's kraken_account_id fingerprint using trade history.
@@ -415,11 +440,15 @@ class PositionMonitor:
             
             async with self.db_pool.acquire() as conn:
                 # Check if we already have an open position for this symbol
+                # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
+                base_symbol = self.get_base_symbol(symbol)
                 existing = await conn.fetchrow("""
                     SELECT id, filled_quantity, avg_entry_price, fill_count
                     FROM open_positions 
-                    WHERE user_id = $1 AND symbol = $2 AND status = 'open'
-                """, user_id, symbol)
+                    WHERE user_id = $1 
+                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2 
+                    AND status = 'open'
+                """, user_id, base_symbol)
                 
                 if existing:
                     # Update existing position with new aggregate data
@@ -733,11 +762,15 @@ class PositionMonitor:
                     # Still mark fills and position as processed to avoid reprocessing
                     async with self.db_pool.acquire() as conn:
                         if position.get('id'):
+                            # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
+                            base_symbol = self.get_base_symbol(symbol)
                             await conn.execute("""
                                 UPDATE position_fills 
                                 SET position_id = $1
-                                WHERE user_id = $2 AND symbol = $3 AND position_id IS NULL
-                            """, position['id'], position['user_id'], symbol)
+                                WHERE user_id = $2 
+                                AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                                AND position_id IS NULL
+                            """, position['id'], position['user_id'], base_symbol)
                             
                             await conn.execute("""
                                 UPDATE open_positions SET status = 'closed_manual' WHERE id = $1
@@ -815,11 +848,15 @@ class PositionMonitor:
                 
                 # Mark fills as assigned to this position (audit trail)
                 if position.get('id'):
+                    # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
+                    base_symbol = self.get_base_symbol(symbol)
                     await conn.execute("""
                         UPDATE position_fills 
                         SET position_id = $1
-                        WHERE user_id = $2 AND symbol = $3 AND position_id IS NULL
-                    """, position['id'], position['user_id'], symbol)
+                        WHERE user_id = $2 
+                        AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                        AND position_id IS NULL
+                    """, position['id'], position['user_id'], base_symbol)
                     
                     # Mark position as closed
                     await conn.execute("""
