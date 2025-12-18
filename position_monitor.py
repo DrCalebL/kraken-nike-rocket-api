@@ -1,10 +1,19 @@
 """
-Nike Rocket Position Monitor v2.5 - 30-Day Billing + Error Logging + Scaled
+Nike Rocket Position Monitor v2.6 - Fill Aggregation Time Boundary Fix
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
 
-Key changes from v2.4:
+Key changes from v2.5:
+- CRITICAL BUG FIX: Fill aggregation included orphaned fills from previous trades
+- Root cause: get_aggregated_position() had no time boundary on fill query
+- Impact: Entry prices were averaged across multiple trades (e.g., $0.389 instead of $0.370)
+- Example: Today's SHORT trade contaminated by Nov 27 fills → wrong side detection
+- Fix: Query now uses last closed position timestamp as lower bound
+- Also uses base symbol matching (SPLIT_PART) for consistent symbol comparison
+- Date: 2025-12-19
+
+Key changes from v2.5:
 - CRITICAL BUG FIX: Signal matching query used non-existent 'direction' column
 - Root cause: signals table has 'action' column (BUY/SELL), not 'direction'
 - Impact: Query would fail, fallback returned all trades as "signal trades"
@@ -51,8 +60,8 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.5 (Signal matching fix)
-Updated: December 18, 2025
+Version: 2.6 (Fill aggregation time boundary fix)
+Updated: December 19, 2025
 """
 
 import asyncio
@@ -373,9 +382,17 @@ class PositionMonitor:
     
     # ==================== Position Aggregation ====================
     
-    async def get_aggregated_position(self, user_id: int, symbol: str) -> dict:
+    async def get_aggregated_position(self, user_id: int, symbol: str, after_timestamp: datetime = None) -> dict:
         """
-        Calculate aggregated position from all unassigned fills.
+        Calculate aggregated position from unassigned fills.
+        
+        IMPORTANT: Only aggregates fills AFTER the last closed position to prevent
+        contamination from orphaned fills of previous trades.
+        
+        Args:
+            user_id: User ID
+            symbol: Trading symbol
+            after_timestamp: Only aggregate fills after this time (optional, auto-detected if None)
         
         Returns:
             {
@@ -389,18 +406,52 @@ class PositionMonitor:
             }
         """
         async with self.db_pool.acquire() as conn:
-            result = await conn.fetchrow("""
-                SELECT 
-                    SUM(CASE WHEN side = 'buy' THEN quantity ELSE 0 END) as buy_qty,
-                    SUM(CASE WHEN side = 'buy' THEN cost ELSE 0 END) as buy_cost,
-                    SUM(CASE WHEN side = 'sell' THEN quantity ELSE 0 END) as sell_qty,
-                    SUM(CASE WHEN side = 'sell' THEN cost ELSE 0 END) as sell_cost,
-                    COUNT(*) as fill_count,
-                    MIN(fill_timestamp) as first_fill,
-                    MAX(fill_timestamp) as last_fill
-                FROM position_fills
-                WHERE user_id = $1 AND symbol = $2 AND position_id IS NULL
-            """, user_id, symbol)
+            # Get the timestamp of the last closed position for this user/symbol
+            # to avoid aggregating fills from previous trades
+            base_symbol = self.get_base_symbol(symbol)
+            
+            if after_timestamp is None:
+                last_closed = await conn.fetchval("""
+                    SELECT MAX(last_fill_at)
+                    FROM open_positions 
+                    WHERE user_id = $1 
+                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2
+                    AND status IN ('closed', 'closed_manual')
+                """, user_id, base_symbol)
+                after_timestamp = last_closed
+            
+            # Build query with optional time filter
+            if after_timestamp:
+                result = await conn.fetchrow("""
+                    SELECT 
+                        SUM(CASE WHEN side = 'buy' THEN quantity ELSE 0 END) as buy_qty,
+                        SUM(CASE WHEN side = 'buy' THEN cost ELSE 0 END) as buy_cost,
+                        SUM(CASE WHEN side = 'sell' THEN quantity ELSE 0 END) as sell_qty,
+                        SUM(CASE WHEN side = 'sell' THEN cost ELSE 0 END) as sell_cost,
+                        COUNT(*) as fill_count,
+                        MIN(fill_timestamp) as first_fill,
+                        MAX(fill_timestamp) as last_fill
+                    FROM position_fills
+                    WHERE user_id = $1 
+                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2 
+                    AND position_id IS NULL
+                    AND fill_timestamp > $3
+                """, user_id, base_symbol, after_timestamp)
+            else:
+                result = await conn.fetchrow("""
+                    SELECT 
+                        SUM(CASE WHEN side = 'buy' THEN quantity ELSE 0 END) as buy_qty,
+                        SUM(CASE WHEN side = 'buy' THEN cost ELSE 0 END) as buy_cost,
+                        SUM(CASE WHEN side = 'sell' THEN quantity ELSE 0 END) as sell_qty,
+                        SUM(CASE WHEN side = 'sell' THEN cost ELSE 0 END) as sell_cost,
+                        COUNT(*) as fill_count,
+                        MIN(fill_timestamp) as first_fill,
+                        MAX(fill_timestamp) as last_fill
+                    FROM position_fills
+                    WHERE user_id = $1 
+                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2 
+                    AND position_id IS NULL
+                """, user_id, base_symbol)
             
             if not result or result['fill_count'] == 0:
                 return None
@@ -776,13 +827,28 @@ class PositionMonitor:
                         if position.get('id'):
                             # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
                             base_symbol = self.get_base_symbol(symbol)
-                            await conn.execute("""
-                                UPDATE position_fills 
-                                SET position_id = $1
-                                WHERE user_id = $2 
-                                AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
-                                AND position_id IS NULL
-                            """, position['id'], position['user_id'], base_symbol)
+                            
+                            # Only assign fills from THIS position's time window
+                            # Use opened_at as lower bound to avoid old orphaned fills
+                            opened_at = position.get('opened_at')
+                            if opened_at:
+                                await conn.execute("""
+                                    UPDATE position_fills 
+                                    SET position_id = $1
+                                    WHERE user_id = $2 
+                                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                                    AND position_id IS NULL
+                                    AND fill_timestamp >= $4
+                                """, position['id'], position['user_id'], base_symbol, opened_at)
+                            else:
+                                # Fallback if no opened_at (shouldn't happen)
+                                await conn.execute("""
+                                    UPDATE position_fills 
+                                    SET position_id = $1
+                                    WHERE user_id = $2 
+                                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                                    AND position_id IS NULL
+                                """, position['id'], position['user_id'], base_symbol)
                             
                             await conn.execute("""
                                 UPDATE open_positions SET status = 'closed_manual' WHERE id = $1
@@ -862,13 +928,28 @@ class PositionMonitor:
                 if position.get('id'):
                     # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
                     base_symbol = self.get_base_symbol(symbol)
-                    await conn.execute("""
-                        UPDATE position_fills 
-                        SET position_id = $1
-                        WHERE user_id = $2 
-                        AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
-                        AND position_id IS NULL
-                    """, position['id'], position['user_id'], base_symbol)
+                    
+                    # Only assign fills from THIS position's time window
+                    # Use opened_at as lower bound to avoid old orphaned fills
+                    opened_at = position.get('opened_at')
+                    if opened_at:
+                        await conn.execute("""
+                            UPDATE position_fills 
+                            SET position_id = $1
+                            WHERE user_id = $2 
+                            AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                            AND position_id IS NULL
+                            AND fill_timestamp >= $4
+                        """, position['id'], position['user_id'], base_symbol, opened_at)
+                    else:
+                        # Fallback if no opened_at (shouldn't happen)
+                        await conn.execute("""
+                            UPDATE position_fills 
+                            SET position_id = $1
+                            WHERE user_id = $2 
+                            AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                            AND position_id IS NULL
+                        """, position['id'], position['user_id'], base_symbol)
                     
                     # Mark position as closed
                     await conn.execute("""
@@ -1057,7 +1138,7 @@ class PositionMonitor:
     async def run(self):
         """Main loop - checks positions every 60 seconds"""
         self.logger.info("=" * 60)
-        self.logger.info("📊 POSITION MONITOR v2.5 STARTED")
+        self.logger.info("📊 POSITION MONITOR v2.6 STARTED")
         self.logger.info("=" * 60)
         self.logger.info(f"🔄 Check interval: {CHECK_INTERVAL_SECONDS} seconds")
         self.logger.info(f"💰 Fee tiers: Team=0%, VIP=5%, Standard=10%")
