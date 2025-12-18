@@ -918,11 +918,21 @@ class PositionMonitor:
                 """, profit_usd, position['user_id'])
                 
                 # Start billing cycle if not started (FALLBACK - primary trigger is on position OPEN)
-                await conn.execute("""
-                    UPDATE follower_users SET 
-                        billing_cycle_start = CURRENT_TIMESTAMP
-                    WHERE id = $1 AND billing_cycle_start IS NULL
-                """, position['user_id'])
+                # Use position's opened_at to ensure the trade is included in the cycle
+                position_opened_at = position.get('opened_at') or position.get('first_fill_at')
+                if position_opened_at:
+                    await conn.execute("""
+                        UPDATE follower_users SET 
+                            billing_cycle_start = $2
+                        WHERE id = $1 AND billing_cycle_start IS NULL
+                    """, position['user_id'], position_opened_at)
+                else:
+                    # Ultimate fallback - shouldn't happen
+                    await conn.execute("""
+                        UPDATE follower_users SET 
+                            billing_cycle_start = CURRENT_TIMESTAMP
+                        WHERE id = $1 AND billing_cycle_start IS NULL
+                    """, position['user_id'])
                 
                 # Mark fills as assigned to this position (audit trail)
                 if position.get('id'):
