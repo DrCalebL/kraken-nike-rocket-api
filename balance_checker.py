@@ -257,6 +257,10 @@ class BalanceChecker:
         )
         if exchange_txs:
             logger.info(f"   Found {len(exchange_txs)} transactions via exchange API")
+        
+        # Update last known balance with TOTAL EQUITY (for dashboard display)
+        await self.update_last_known_balance(user_id, api_key, total_equity)
+        logger.info(f"   📊 Updated last_known_balance to ${total_equity:.2f} (total equity)")
     
     async def check_recently_closed_position(self, user_id: int) -> bool:
         """
@@ -310,10 +314,6 @@ class BalanceChecker:
                 return True
             
             return False
-        
-        # Update last known balance with TOTAL EQUITY (for dashboard display)
-        await self.update_last_known_balance(user_id, api_key, total_equity)
-        logger.info(f"   📊 Updated last_known_balance to ${total_equity:.2f} (total equity)")
     
     
     # ==================== ISSUE #3 FIX: Check Exchange Transaction History ====================
