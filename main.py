@@ -4244,7 +4244,8 @@ async def portfolio_dashboard(request: Request):
                 
                 // Check if we have actual trading data to chart
                 if (data.status === 'success' && data.equity_curve && data.equity_curve.length > 1) {{
-                    // We have trades - render the chart with time-proportional X axis
+                    // We have trades - render chart with time-proportional X axis
+                    // Busy periods show as clustered dots
                     const equityData = data.equity_curve.map(point => ({{
                         x: new Date(point.date),
                         y: point.equity
@@ -4273,7 +4274,7 @@ async def portfolio_dashboard(request: Request):
                         gradient.addColorStop(1, 'rgba(239, 68, 68, 0.0)');
                     }}
                     
-                    // Create chart with time scale
+                    // Create chart with time scale (clustered dots = busy periods)
                     equityChart = new Chart(ctx, {{
                         type: 'line',
                         data: {{
@@ -4285,7 +4286,7 @@ async def portfolio_dashboard(request: Request):
                                 borderWidth: 2,
                                 fill: true,
                                 tension: 0.3,
-                                pointRadius: equityData.length > 50 ? 0 : 3,
+                                pointRadius: equityData.length > 100 ? 2 : 3,
                                 pointHoverRadius: 6,
                                 pointBackgroundColor: data.current_equity >= data.initial_capital ? '#10b981' : '#ef4444',
                                 pointBorderColor: '#fff',
