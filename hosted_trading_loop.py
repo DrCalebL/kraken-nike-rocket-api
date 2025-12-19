@@ -746,8 +746,8 @@ class HostedTradingLoop:
                         signal.get('signal_id')
                     )
                     
-                    # Use consistent timestamp for both position and billing cycle
-                    position_opened_at = datetime.now()
+                    # Use consistent UTC timestamp for both position and billing cycle
+                    position_opened_at = datetime.utcnow()
                     
                     await conn.execute("""
                         INSERT INTO open_positions 
