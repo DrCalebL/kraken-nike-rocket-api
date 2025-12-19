@@ -2359,6 +2359,7 @@ async def portfolio_dashboard(request: Request):
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
             border-radius: 16px;
             padding: 24px;
+            margin-top: 30px;
             margin-bottom: 30px;
             border: 1px solid rgba(16, 185, 129, 0.3);
         }}
