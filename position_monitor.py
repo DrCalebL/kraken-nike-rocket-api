@@ -269,7 +269,7 @@ class PositionMonitor:
         
         Args:
             symbol: Trading pair (e.g., 'ADA/USD:USD', 'BTC/USD:USD')
-            side: 'long' or 'short'
+            side: 'LONG' or 'SHORT'
             lookback_hours: How far back to look for matching signals (default 48h)
             
         Returns:
@@ -282,8 +282,8 @@ class PositionMonitor:
                 symbol_base = symbol_base.replace('PF_', '').replace('USD', '').replace(':USD', '')
                 
                 # Look for a recent signal matching this symbol and action
-                # NOTE: Signal stores BUY/SELL, but side is normalized to long/short
-                # Map: long -> BUY, short -> SELL
+                # NOTE: Signal stores BUY/SELL, side is normalized to LONG/SHORT
+                # Map: LONG -> BUY, SHORT -> SELL
                 action_map = {'long': 'BUY', 'short': 'SELL'}
                 signal_action = action_map.get(side.lower(), side.upper())
                 
@@ -463,12 +463,12 @@ class PositionMonitor:
             
             # Calculate net position
             if sell_qty > buy_qty:
-                net_side = 'short'
+                net_side = 'SHORT'
                 net_quantity = sell_qty - buy_qty
                 # For short: we sold high, cost basis is sell_cost - buy_cost
                 total_cost = sell_cost - buy_cost
             else:
-                net_side = 'long'
+                net_side = 'LONG'
                 net_quantity = buy_qty - sell_qty
                 # For long: we bought low, cost basis is buy_cost - sell_cost
                 total_cost = buy_cost - sell_cost
@@ -787,11 +787,11 @@ class PositionMonitor:
             fill_count = position.get('fill_count') or 1
             leverage = position.get('leverage', 1)
             side = position.get('side')
-            # Normalize side to long/short (may come as BUY/SELL from some sources)
+            # Normalize side to LONG/SHORT (may come as BUY/SELL or long/short from sources)
             if side and side.upper() in ('BUY', 'LONG'):
-                side = 'long'
+                side = 'LONG'
             elif side and side.upper() in ('SELL', 'SHORT'):
-                side = 'short'
+                side = 'SHORT'
             symbol = position['symbol']
             
             if not entry_price or not position_size:
@@ -816,7 +816,7 @@ class PositionMonitor:
                     self.logger.info(f"   Entry: ${entry_price:.4f}, Exit: ${exit_price:.4f}")
                     
                     # Calculate P&L for logging only (not recorded/charged)
-                    if side == 'long':
+                    if side == 'LONG':
                         manual_pnl = (exit_price - entry_price) * position_size
                     else:
                         manual_pnl = (entry_price - exit_price) * position_size
@@ -862,13 +862,13 @@ class PositionMonitor:
             # This is a Nike Rocket signal trade - record it (NO FEE - 30-day billing)
             
             # Calculate P&L
-            if side == 'long':
+            if side == 'LONG':
                 profit_usd = (exit_price - entry_price) * position_size
-            else:  # short
+            else:  # SHORT
                 profit_usd = (entry_price - exit_price) * position_size
             
             profit_percent = ((exit_price - entry_price) / entry_price) * 100
-            if side == 'short':
+            if side == 'SHORT':
                 profit_percent = -profit_percent
             
             # 30-DAY BILLING: No per-trade fee calculation
