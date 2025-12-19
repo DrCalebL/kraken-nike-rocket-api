@@ -1524,6 +1524,73 @@ async def get_open_positions(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Live prices endpoint with server-side caching (rate-limit safe)
+from price_cache import price_cache
+
+# Shared exchange instance for public price data (no auth needed)
+_shared_exchange = None
+
+def get_shared_exchange():
+    """Get or create shared exchange for public price data"""
+    global _shared_exchange
+    if _shared_exchange is None:
+        import ccxt
+        _shared_exchange = ccxt.krakenfutures({'enableRateLimit': True})
+    return _shared_exchange
+
+@app.get("/api/prices")
+async def get_live_prices(symbols: str = ""):
+    """
+    Get live prices for symbols (server-side cached, rate-limit safe).
+    
+    All users share the same cache - max 1 API call per 5 seconds per symbol.
+    
+    Query params:
+        symbols: Comma-separated list of symbols (e.g., "PF_ADAUSD,PF_XBTUSD")
+    
+    Returns:
+        {"prices": {"PF_ADAUSD": 0.3605, "PF_XBTUSD": 104500.0}, "cached": true}
+    """
+    if not symbols:
+        return {"prices": {}, "cached": False}
+    
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    if not symbol_list:
+        return {"prices": {}, "cached": False}
+    
+    results = {}
+    any_fetched = False
+    
+    try:
+        exchange = get_shared_exchange()
+        
+        for symbol in symbol_list:
+            # Check cache first (5 second TTL)
+            cached = price_cache.get(symbol)
+            if cached is not None:
+                results[symbol] = cached
+            else:
+                # Cache miss - fetch from exchange
+                try:
+                    ticker = await asyncio.to_thread(exchange.fetch_ticker, symbol)
+                    price = float(ticker['last'])
+                    price_cache.set(symbol, price)
+                    results[symbol] = price
+                    any_fetched = True
+                except Exception as e:
+                    print(f"⚠️ Could not fetch price for {symbol}: {e}")
+                    results[symbol] = None
+        
+        return {
+            "prices": results,
+            "cached": not any_fetched
+        }
+        
+    except Exception as e:
+        print(f"❌ Price fetch error: {e}")
+        return {"prices": {}, "error": str(e)}
+
+
 # Serve static background images (NEW!)
 @app.get("/static/backgrounds/{filename}")
 async def get_background(filename: str):
@@ -4419,6 +4486,9 @@ async def portfolio_dashboard(request: Request):
                 const countSpan = document.getElementById('open-positions-count');
                 
                 if (data.status === 'success' && data.positions && data.positions.length > 0) {{
+                    // Store positions globally for price updates
+                    window.openPositions = data.positions;
+                    
                     countSpan.textContent = `${{data.count}} open position${{data.count > 1 ? 's' : ''}}`;
                     
                     let html = `
@@ -4429,6 +4499,8 @@ async def portfolio_dashboard(request: Request):
                                     <th style="padding: 12px 10px; text-align: left; color: #374151; font-weight: 600;">Side</th>
                                     <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Size</th>
                                     <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Entry Price</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Current Price</th>
+                                    <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Live P&L</th>
                                     <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Take Profit</th>
                                     <th style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 600;">Stop Loss</th>
                                     <th style="padding: 12px 10px; text-align: left; color: #374151; font-weight: 600;">Opened</th>
@@ -4444,9 +4516,10 @@ async def portfolio_dashboard(request: Request):
                         
                         const openedDate = pos.opened_at ? new Date(pos.opened_at).toLocaleString() : '-';
                         const entryPrice = pos.avg_entry_price || pos.entry_fill_price || 0;
+                        const posId = pos.id || pos.symbol.replace('/', '-');
                         
                         html += `
-                            <tr style="border-bottom: 1px solid #e5e7eb;">
+                            <tr style="border-bottom: 1px solid #e5e7eb;" data-position-id="${{posId}}" data-kraken-symbol="${{pos.kraken_symbol}}" data-entry="${{entryPrice}}" data-size="${{pos.filled_quantity || pos.quantity || 0}}" data-side="${{pos.side}}">
                                 <td style="padding: 12px 10px; font-weight: 600; color: #374151;">
                                     ${{pos.symbol || pos.kraken_symbol || '-'}}
                                 </td>
@@ -4471,6 +4544,12 @@ async def portfolio_dashboard(request: Request):
                                 <td style="padding: 12px 10px; text-align: right; color: #374151; font-weight: 500;">
                                     $${{entryPrice.toFixed(5)}}
                                 </td>
+                                <td style="padding: 12px 10px; text-align: right; color: #374151;" id="price-${{posId}}">
+                                    <span style="color: #9ca3af;">Loading...</span>
+                                </td>
+                                <td style="padding: 12px 10px; text-align: right; font-weight: 600;" id="pnl-${{posId}}">
+                                    <span style="color: #9ca3af;">--</span>
+                                </td>
                                 <td style="padding: 12px 10px; text-align: right;">
                                     ${{pos.target_tp ? `<span style="color: #10b981; font-weight: 500;">$${{pos.target_tp.toFixed(5)}}</span>` : '<span style="color: #9ca3af;">-</span>'}}
                                 </td>
@@ -4490,7 +4569,11 @@ async def portfolio_dashboard(request: Request):
                     `;
                     
                     listDiv.innerHTML = html;
+                    
+                    // Start fetching live prices
+                    updateLivePrices();
                 }} else {{
+                    window.openPositions = [];
                     countSpan.textContent = '0 positions';
                     listDiv.innerHTML = `
                         <div style="text-align: center; padding: 40px; color: #9ca3af;">
@@ -4508,6 +4591,68 @@ async def portfolio_dashboard(request: Request):
                     </div>
                 `;
             }}
+        }}
+        
+        // Live price updates for open positions (refreshes every 10 seconds)
+        let priceUpdateInterval = null;
+        
+        async function updateLivePrices() {{
+            // Get all position rows with kraken symbols
+            const rows = document.querySelectorAll('tr[data-kraken-symbol]');
+            if (rows.length === 0) return;
+            
+            // Collect unique symbols
+            const symbols = [...new Set([...rows].map(r => r.dataset.krakenSymbol).filter(s => s))];
+            if (symbols.length === 0) return;
+            
+            try {{
+                // Fetch prices from cached endpoint
+                const response = await fetch(`/api/prices?symbols=${{symbols.join(',')}}`);
+                const data = await response.json();
+                
+                if (data.prices) {{
+                    // Update each position row
+                    rows.forEach(row => {{
+                        const symbol = row.dataset.krakenSymbol;
+                        const entryPrice = parseFloat(row.dataset.entry);
+                        const size = parseFloat(row.dataset.size);
+                        const side = row.dataset.side?.toLowerCase();
+                        const posId = row.dataset.positionId;
+                        
+                        const currentPrice = data.prices[symbol];
+                        
+                        if (currentPrice && entryPrice && size) {{
+                            // Update current price display
+                            const priceCell = document.getElementById(`price-${{posId}}`);
+                            if (priceCell) {{
+                                priceCell.innerHTML = `$${{currentPrice.toFixed(5)}}`;
+                            }}
+                            
+                            // Calculate P&L based on side
+                            let pnl;
+                            if (side === 'long' || side === 'buy') {{
+                                pnl = (currentPrice - entryPrice) * size;
+                            }} else {{
+                                pnl = (entryPrice - currentPrice) * size;
+                            }}
+                            
+                            // Update P&L display
+                            const pnlCell = document.getElementById(`pnl-${{posId}}`);
+                            if (pnlCell) {{
+                                const pnlColor = pnl >= 0 ? '#10b981' : '#ef4444';
+                                const pnlSign = pnl >= 0 ? '+' : '';
+                                pnlCell.innerHTML = `<span style="color: ${{pnlColor}};">${{pnlSign}}$${{pnl.toFixed(2)}}</span>`;
+                            }}
+                        }}
+                    }});
+                }}
+            }} catch (error) {{
+                console.error('Error fetching live prices:', error);
+            }}
+            
+            // Schedule next update (10 seconds)
+            if (priceUpdateInterval) clearTimeout(priceUpdateInterval);
+            priceUpdateInterval = setTimeout(updateLivePrices, 10000);
         }}
         
         // Refresh entire dashboard
