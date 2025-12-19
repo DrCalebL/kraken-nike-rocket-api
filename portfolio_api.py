@@ -1020,12 +1020,21 @@ async def get_equity_curve(request: Request):
                 drawdown = (running_peak - current_equity) / running_peak * 100
                 max_drawdown = max(max_drawdown, drawdown)
             
+            # Clean symbol: ADA/USDT → ADA, PF_ADAUSD → ADA
+            raw_symbol = trade['symbol'] or ''
+            if '/' in raw_symbol:
+                clean_symbol = raw_symbol.split('/')[0].upper()
+            elif raw_symbol.startswith('PF_'):
+                clean_symbol = raw_symbol[3:-3].upper()  # PF_ADAUSD → ADA
+            else:
+                clean_symbol = raw_symbol.upper()
+            
             equity_curve.append({
                 "date": trade['exit_time'].isoformat(),
                 "equity": round(current_equity, 2),
                 "pnl": round(pnl, 2),
                 "cumulative_pnl": round(cumulative_pnl, 2),
-                "trade": f"{trade['side']} {trade['symbol']}"
+                "trade": f"{trade['side']} {clean_symbol}"
             })
         
         current_equity = initial_capital + cumulative_pnl
