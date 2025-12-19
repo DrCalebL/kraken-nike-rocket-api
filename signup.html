@@ -373,6 +373,128 @@
             font-size: 16px;
             font-weight: bold;
         }
+
+        /* Backtest Results Section */
+        .backtest-section {
+            margin-bottom: 30px;
+        }
+
+        .backtest-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px;
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(102, 126, 234, 0.1) 100%);
+            border-radius: 10px;
+            cursor: pointer;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            margin-bottom: 14px;
+        }
+
+        .backtest-header h2 {
+            color: #fff;
+            font-size: 18px;
+            margin: 0;
+        }
+
+        .backtest-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 14px;
+        }
+
+        .backtest-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            padding: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .backtest-card .market-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 15px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .backtest-card .market-badge.bull {
+            background: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+        }
+
+        .backtest-card .market-badge.bear {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+        }
+
+        .backtest-card .market-badge.sideways {
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+        }
+
+        .backtest-card .market-badge.full {
+            background: rgba(139, 92, 246, 0.2);
+            color: #a78bfa;
+        }
+
+        .backtest-card .period {
+            color: #9ca3af;
+            font-size: 11px;
+            margin-bottom: 6px;
+        }
+
+        .backtest-card .result {
+            font-size: 24px;
+            font-weight: bold;
+            color: #10b981;
+            margin-bottom: 2px;
+        }
+
+        .backtest-card .final-value {
+            color: #fff;
+            font-size: 13px;
+            margin-bottom: 10px;
+        }
+
+        .backtest-card .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .backtest-card .stat-label {
+            color: #6b7280;
+            font-size: 9px;
+            text-transform: uppercase;
+        }
+
+        .backtest-card .stat-value {
+            color: #fff;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .backtest-card .stat-value.negative {
+            color: #ef4444;
+        }
+
+        .backtest-card .stat-value.positive {
+            color: #10b981;
+        }
+
+        .backtest-disclaimer {
+            margin-top: 14px;
+            padding: 10px 14px;
+            background: rgba(251, 191, 36, 0.1);
+            border: 1px solid rgba(251, 191, 36, 0.2);
+            border-radius: 8px;
+            font-size: 11px;
+            color: #fbbf24;
+        }
     </style>
 </head>
 <body>
@@ -399,6 +521,92 @@
         </div>
 
         <div id="result-section" class="result-section"></div>
+
+        <!-- Backtest Results Section -->
+        <div class="backtest-section">
+            <div class="backtest-header" onclick="toggleBacktestSection()">
+                <h2>📊 Backtested Performance</h2>
+                <span class="toggle-icon" id="backtestToggle">▼</span>
+            </div>
+            
+            <div class="backtest-grid" id="backtestGrid">
+                <!-- Bull Market -->
+                <div class="backtest-card">
+                    <span class="market-badge bull">🚀 BULL</span>
+                    <div class="period">Jan 2020 → Aug 2021</div>
+                    <div class="result">+10,132%</div>
+                    <div class="final-value">$300 → $30,695</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">Buy & Hold</div>
+                            <div class="stat-value positive">+4,377%</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value">42.2%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bear Market -->
+                <div class="backtest-card">
+                    <span class="market-badge bear">🐻 BEAR</span>
+                    <div class="period">Sep 2021 → Jun 2023</div>
+                    <div class="result">+5,402%</div>
+                    <div class="final-value">$300 → $16,505</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">Buy & Hold</div>
+                            <div class="stat-value negative">-84.4%</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value">42.0%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sideways/Chop Market -->
+                <div class="backtest-card">
+                    <span class="market-badge sideways">🦀 CHOP</span>
+                    <div class="period">Jun 2023 → Nov 2025</div>
+                    <div class="result">+9,850%</div>
+                    <div class="final-value">$300 → $29,849</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">Buy & Hold</div>
+                            <div class="stat-value positive">+60.9%</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value">41.1%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Full Cycle -->
+                <div class="backtest-card">
+                    <span class="market-badge full">📈 FULL</span>
+                    <div class="period">Jan 2020 → Nov 2025</div>
+                    <div class="result">+83.8M%</div>
+                    <div class="final-value">$300 → $251.4M</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">Buy & Hold</div>
+                            <div class="stat-value positive">+582%</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">Win Rate</div>
+                            <div class="stat-value">41.8%</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="backtest-disclaimer">
+                ⚠️ Past performance ≠ future results. Backtests use 20x max leverage, 2-3% risk/trade. Real trading has slippage & fees.
+            </div>
+        </div>
 
         <!-- Safety & Trust Section -->
         <div class="safety-section">
@@ -478,6 +686,21 @@
             const grid = document.getElementById('safetyGrid');
             header.classList.toggle('collapsed');
             grid.classList.toggle('hidden');
+        }
+
+        function toggleBacktestSection() {
+            const grid = document.getElementById('backtestGrid');
+            const toggle = document.getElementById('backtestToggle');
+            const disclaimer = grid.nextElementSibling;
+            if (grid.style.display === 'none') {
+                grid.style.display = 'grid';
+                disclaimer.style.display = 'block';
+                toggle.textContent = '▼';
+            } else {
+                grid.style.display = 'none';
+                disclaimer.style.display = 'none';
+                toggle.textContent = '▶';
+            }
         }
 
         async function signup() {
