@@ -54,7 +54,8 @@ from order_utils import (
     notify_entry_failed,
     notify_bracket_incomplete,
     notify_signal_invalid,
-    notify_signal_invalid_values
+    notify_signal_invalid_values,
+    notify_critical_error
 )
 
 # Logging setup
@@ -1024,6 +1025,13 @@ class HostedTradingLoop:
                 await log_error_to_db(
                     self.db_pool, "system", "TRADING_LOOP_ERROR",
                     str(e)[:200], {"poll_count": poll_count, "traceback": traceback.format_exc()[:500]}
+                )
+                # Critical system error - notify
+                await notify_critical_error(
+                    error_type="TRADING_LOOP_ERROR",
+                    error=str(e),
+                    location="hosted_trading_loop.run",
+                    context={"poll_count": poll_count, "traceback": traceback.format_exc()[:200]}
                 )
                 # Wait before retrying
                 await asyncio.sleep(10)
