@@ -423,8 +423,11 @@ def get_stats_summary() -> Dict:
         except Exception as e:
             print(f"Error getting portfolio stats: {e}")
     
+    # Override current_value with capital + profit (more accurate than stale last_known_balance)
+    current_value = platform_capital + total_profit
+    
     # Calculate platform ROI
-    platform_roi = ((current_value - platform_capital) / platform_capital * 100) if platform_capital > 0 else 0.0
+    platform_roi = (total_profit / platform_capital * 100) if platform_capital > 0 else 0.0
     
     # Active percentage
     active_percent = (active_now / configured_users * 100) if configured_users > 0 else 0.0
