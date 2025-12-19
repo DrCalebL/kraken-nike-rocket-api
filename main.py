@@ -2178,6 +2178,181 @@ async def portfolio_dashboard(request: Request):
                 font-size: 20px !important;
             }}
         }}
+        
+        /* Safety Section Styles */
+        .safety-section {{
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border-radius: 16px;
+            padding: 30px;
+            margin-top: 30px;
+            border: 1px solid rgba(102, 126, 234, 0.3);
+        }}
+
+        .safety-header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }}
+
+        .safety-header h2 {{
+            color: #fff;
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 0;
+        }}
+
+        .safety-header .toggle-icon {{
+            color: #667eea;
+            font-size: 20px;
+            transition: transform 0.3s;
+        }}
+
+        .safety-header.collapsed .toggle-icon {{
+            transform: rotate(-90deg);
+        }}
+
+        .safety-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            transition: all 0.3s ease;
+        }}
+
+        .safety-grid.hidden {{
+            display: none;
+        }}
+
+        .safety-card {{
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.2s, border-color 0.2s;
+        }}
+
+        .safety-card:hover {{
+            transform: translateY(-2px);
+            border-color: rgba(102, 126, 234, 0.5);
+        }}
+
+        .safety-card .icon {{
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-bottom: 16px;
+        }}
+
+        .safety-card h3 {{
+            color: #fff;
+            font-size: 18px;
+            margin-bottom: 12px;
+        }}
+
+        .safety-card p {{
+            color: #9ca3af;
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }}
+
+        .safety-card ul {{
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }}
+
+        .safety-card li {{
+            color: #9ca3af;
+            font-size: 13px;
+            padding: 6px 0;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+        }}
+
+        .safety-card li::before {{
+            content: "✓";
+            color: #10b981;
+            font-weight: bold;
+            flex-shrink: 0;
+        }}
+
+        .github-link {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #24292e;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            margin-top: 12px;
+            transition: background 0.2s;
+        }}
+
+        .github-link:hover {{
+            background: #3a3f47;
+        }}
+
+        .github-link svg {{
+            width: 20px;
+            height: 20px;
+        }}
+
+        .fee-tiers {{
+            display: flex;
+            gap: 12px;
+            margin-top: 12px;
+        }}
+
+        .fee-tier {{
+            flex: 1;
+            text-align: center;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+        }}
+
+        .fee-tier .tier-name {{
+            color: #667eea;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }}
+
+        .fee-tier .tier-rate {{
+            color: #fff;
+            font-size: 20px;
+            font-weight: bold;
+        }}
+
+        .tech-badges {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 12px;
+        }}
+
+        .tech-badge {{
+            background: rgba(102, 126, 234, 0.2);
+            color: #a5b4fc;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -2873,12 +3048,126 @@ async def portfolio_dashboard(request: Request):
                     💡 CSV exports include: Date, Symbol, Side, Entry Price, Exit Price, Position Size, P&L, and Net P&L summary
                 </div>
             </div>
+            
+            <!-- Safety & Trust Section -->
+            <div class="safety-section">
+                <div class="safety-header" onclick="toggleSafetySection()">
+                    <h2>🛡️ Safety & Trust</h2>
+                    <span class="toggle-icon">▼</span>
+                </div>
+                
+                <div class="safety-grid" id="safetyGrid">
+                    <!-- Non-Custodial -->
+                    <div class="safety-card">
+                        <div class="icon">🔐</div>
+                        <h3>100% Non-Custodial</h3>
+                        <p>Your funds never leave your Kraken account. We can't touch them.</p>
+                        <ul>
+                            <li>API keys with <strong>trade-only</strong> permissions</li>
+                            <li>Withdrawal permissions NEVER requested</li>
+                            <li>All funds remain in YOUR Kraken Futures wallet</li>
+                            <li>Disable API keys anytime to stop trading</li>
+                        </ul>
+                    </div>
+
+                    <!-- Open Source -->
+                    <div class="safety-card">
+                        <div class="icon">📖</div>
+                        <h3>Fully Open Source</h3>
+                        <p>Don't trust, verify. Our entire trading system is public on GitHub.</p>
+                        <ul>
+                            <li>Audit every line of code yourself</li>
+                            <li>See exactly how trades are executed</li>
+                            <li>Verify billing calculations</li>
+                            <li>Community-reviewed for security</li>
+                        </ul>
+                        <a href="https://github.com/calebws/nike-rocket-api" target="_blank" class="github-link">
+                            <svg viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                            </svg>
+                            View on GitHub
+                        </a>
+                    </div>
+
+                    <!-- Risk Management -->
+                    <div class="safety-card">
+                        <div class="icon">📊</div>
+                        <h3>Professional Risk Management</h3>
+                        <p>Every trade follows strict risk protocols used by professional traders.</p>
+                        <ul>
+                            <li><strong>2-3% risk per trade</strong> - Never bet the farm</li>
+                            <li><strong>ATR-based stops</strong> - Dynamic SL adapts to volatility</li>
+                            <li><strong>Every trade has TP & SL</strong> - No runaway losses</li>
+                            <li><strong>Position sizing formula</strong> - Risk-based, not leverage-based</li>
+                        </ul>
+                        <div class="tech-badges">
+                            <span class="tech-badge">ATR Indicator</span>
+                            <span class="tech-badge">Multi-Timeframe</span>
+                            <span class="tech-badge">Backtested</span>
+                        </div>
+                    </div>
+
+                    <!-- Fair Billing -->
+                    <div class="safety-card">
+                        <div class="icon">💰</div>
+                        <h3>Fair Profit-Share Billing</h3>
+                        <p>We only make money when YOU make money. Aligned incentives.</p>
+                        <ul>
+                            <li><strong>10% of net profits</strong> - Only pay on gains</li>
+                            <li><strong>Net profit billing</strong> - Losses offset wins</li>
+                            <li><strong>30-day cycles</strong> - One bill per month</li>
+                            <li><strong>No profit = $0 fee</strong> - Losing month? No invoice</li>
+                            <li><strong>Manual trades excluded</strong> - Only charged for signals</li>
+                        </ul>
+                    </div>
+
+                    <!-- Signal Matching -->
+                    <div class="safety-card">
+                        <div class="icon">🎯</div>
+                        <h3>Smart Signal Matching</h3>
+                        <p>Our system distinguishes between copytraded signals and your manual trades.</p>
+                        <ul>
+                            <li>Only Nike Rocket signals are tracked for billing</li>
+                            <li>Your own manual trades on Kraken are FREE</li>
+                            <li>No surprise fees on trades we didn't make</li>
+                            <li>Full audit trail of which signals triggered trades</li>
+                        </ul>
+                    </div>
+
+                    <!-- Infrastructure -->
+                    <div class="safety-card">
+                        <div class="icon">⚙️</div>
+                        <h3>Enterprise Infrastructure</h3>
+                        <p>Built with the same reliability standards as professional trading firms.</p>
+                        <ul>
+                            <li><strong>Error logging</strong> - Every issue tracked</li>
+                            <li><strong>Balance reconciliation</strong> - Hourly Kraken sync</li>
+                            <li><strong>Rate limiting</strong> - Respects exchange limits</li>
+                            <li><strong>AES-256 encryption</strong> - API keys encrypted at rest</li>
+                        </ul>
+                        <div class="tech-badges">
+                            <span class="tech-badge">Railway Cloud</span>
+                            <span class="tech-badge">PostgreSQL</span>
+                            <span class="tech-badge">CCXT</span>
+                            <span class="tech-badge">Fernet</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
         let currentApiKey = '{api_key}';
         let currentPeriod = '30d';
+        
+        // Safety section toggle
+        function toggleSafetySection() {{
+            const header = document.querySelector('.safety-header');
+            const grid = document.getElementById('safetyGrid');
+            header.classList.toggle('collapsed');
+            grid.classList.toggle('hidden');
+        }}
         
         // On page load
         if (currentApiKey) {{
