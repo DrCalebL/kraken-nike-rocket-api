@@ -1534,6 +1534,16 @@ async def get_background(filename: str):
     else:
         raise HTTPException(status_code=404, detail="Background image not found")
 
+# Serve all static files (images, etc.)
+@app.get("/static/{filename}")
+async def get_static_file(filename: str):
+    """Serve static files (og-preview.png, logos, etc.)"""
+    filepath = f"static/{filename}"
+    if os.path.exists(filepath):
+        return FileResponse(filepath)
+    else:
+        raise HTTPException(status_code=404, detail="Static file not found")
+
 # Signup page
 @app.get("/signup", response_class=HTMLResponse)
 async def signup_page():
