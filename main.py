@@ -3140,7 +3140,10 @@ async def portfolio_dashboard(request: Request):
                     <h2 style="margin: 0; color: #667eea; font-size: 24px;">
                         🔥 Open Positions
                     </h2>
-                    <span id="open-positions-count" style="font-size: 14px; color: #6b7280;"></span>
+                    <div style="text-align: right;">
+                        <span id="open-positions-count" style="font-size: 14px; color: #6b7280; display: block;"></span>
+                        <span style="font-size: 11px; color: #9ca3af;">🕐 Times in your local timezone</span>
+                    </div>
                 </div>
                 
                 <div id="open-positions-list" style="overflow-x: auto;">
