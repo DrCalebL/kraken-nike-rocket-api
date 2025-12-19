@@ -2356,19 +2356,21 @@ async def portfolio_dashboard(request: Request):
 
         /* Backtest Results Section */
         .backtest-section {{
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border-radius: 16px;
+            padding: 24px;
             margin-bottom: 30px;
+            border: 1px solid rgba(16, 185, 129, 0.3);
         }}
 
         .backtest-header {{
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 16px 20px;
-            background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(102, 126, 234, 0.1) 100%);
-            border-radius: 12px;
+            padding: 0 0 16px 0;
+            margin-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
             cursor: pointer;
-            border: 1px solid rgba(16, 185, 129, 0.2);
-            margin-bottom: 16px;
         }}
 
         .backtest-header h2 {{
@@ -2379,15 +2381,21 @@ async def portfolio_dashboard(request: Request):
 
         .backtest-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns: repeat(2, 1fr);
             gap: 16px;
         }}
 
+        @media (max-width: 700px) {{
+            .backtest-grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+
         .backtest-card {{
-            background: rgba(255, 255, 255, 0.03);
+            background: rgba(255, 255, 255, 0.06);
             border-radius: 12px;
             padding: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.1);
             transition: transform 0.2s, border-color 0.2s;
         }}
 
@@ -2398,43 +2406,45 @@ async def portfolio_dashboard(request: Request):
 
         .backtest-card .market-badge {{
             display: inline-block;
-            padding: 4px 10px;
+            padding: 5px 12px;
             border-radius: 20px;
-            font-size: 11px;
+            font-size: 12px;
             font-weight: 600;
             margin-bottom: 12px;
+            letter-spacing: 0.5px;
         }}
 
         .backtest-card .market-badge.bull {{
-            background: rgba(16, 185, 129, 0.2);
-            color: #10b981;
+            background: rgba(16, 185, 129, 0.25);
+            color: #34d399;
         }}
 
         .backtest-card .market-badge.bear {{
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
+            background: rgba(239, 68, 68, 0.25);
+            color: #f87171;
         }}
 
         .backtest-card .market-badge.sideways {{
-            background: rgba(251, 191, 36, 0.2);
-            color: #fbbf24;
+            background: rgba(251, 191, 36, 0.25);
+            color: #fcd34d;
         }}
 
         .backtest-card .market-badge.full {{
-            background: rgba(139, 92, 246, 0.2);
-            color: #a78bfa;
+            background: rgba(139, 92, 246, 0.25);
+            color: #c4b5fd;
         }}
 
         .backtest-card .period {{
             color: #9ca3af;
-            font-size: 12px;
+            font-size: 13px;
             margin-bottom: 8px;
         }}
 
         .backtest-card .result {{
-            font-size: 28px;
+            font-size: 32px;
             font-weight: bold;
             margin-bottom: 4px;
+            color: #10b981;
         }}
 
         .backtest-card .result.profit {{
@@ -2442,112 +2452,134 @@ async def portfolio_dashboard(request: Request):
         }}
 
         .backtest-card .final-value {{
-            color: #fff;
-            font-size: 15px;
-            margin-bottom: 12px;
+            color: #e5e7eb;
+            font-size: 16px;
+            margin-bottom: 14px;
+            font-weight: 500;
         }}
 
         .backtest-card .stats {{
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 8px;
-            padding-top: 12px;
-            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 12px;
+            padding-top: 14px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
         }}
 
         .backtest-card .stat {{
             text-align: center;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
         }}
 
         .backtest-card .stat-label {{
-            color: #6b7280;
+            color: #9ca3af;
             font-size: 10px;
             text-transform: uppercase;
-            margin-bottom: 2px;
+            margin-bottom: 4px;
+            letter-spacing: 0.5px;
         }}
 
         .backtest-card .stat-value {{
             color: #fff;
-            font-size: 13px;
-            font-weight: 600;
+            font-size: 15px;
+            font-weight: 700;
         }}
 
         .backtest-card .stat-value.negative {{
-            color: #ef4444;
+            color: #f87171;
         }}
 
         .backtest-card .stat-value.positive {{
-            color: #10b981;
+            color: #34d399;
         }}
 
         .backtest-disclaimer {{
-            margin-top: 16px;
-            padding: 12px 16px;
-            background: rgba(251, 191, 36, 0.1);
-            border: 1px solid rgba(251, 191, 36, 0.2);
-            border-radius: 8px;
-            font-size: 12px;
-            color: #fbbf24;
+            margin-top: 20px;
+            padding: 14px 18px;
+            background: rgba(251, 191, 36, 0.15);
+            border: 1px solid rgba(251, 191, 36, 0.3);
+            border-radius: 10px;
+            font-size: 13px;
+            color: #fcd34d;
+            line-height: 1.5;
         }}
 
         .max-pain-section {{
-            margin-top: 20px;
-            padding: 20px;
-            background: rgba(239, 68, 68, 0.05);
-            border: 1px solid rgba(239, 68, 68, 0.2);
+            margin-top: 24px;
+            padding: 24px;
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.25);
             border-radius: 12px;
         }}
 
         .max-pain-section h3 {{
-            color: #ef4444;
-            font-size: 16px;
-            margin: 0 0 16px 0;
+            color: #f87171;
+            font-size: 18px;
+            margin: 0 0 20px 0;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
         }}
 
         .max-pain-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(4, 1fr);
             gap: 16px;
-            margin-bottom: 16px;
+            margin-bottom: 20px;
+        }}
+
+        @media (max-width: 900px) {{
+            .max-pain-grid {{
+                grid-template-columns: repeat(2, 1fr);
+            }}
+        }}
+
+        @media (max-width: 500px) {{
+            .max-pain-grid {{
+                grid-template-columns: 1fr;
+            }}
         }}
 
         .pain-stat {{
             text-align: center;
-            padding: 16px;
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 8px;
+            padding: 20px 16px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 10px;
+            border: 1px solid rgba(239, 68, 68, 0.15);
         }}
 
         .pain-stat .pain-value {{
-            font-size: 32px;
+            font-size: 36px;
             font-weight: bold;
-            color: #ef4444;
-            margin-bottom: 4px;
+            color: #f87171;
+            margin-bottom: 6px;
         }}
 
         .pain-stat .pain-label {{
-            color: #9ca3af;
-            font-size: 12px;
+            color: #e5e7eb;
+            font-size: 13px;
+            font-weight: 600;
             text-transform: uppercase;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
+            letter-spacing: 0.5px;
         }}
 
         .pain-stat .pain-explanation {{
-            color: #d1d5db;
+            color: #9ca3af;
             font-size: 12px;
-            line-height: 1.5;
+            line-height: 1.6;
         }}
 
         .max-pain-summary {{
-            padding: 14px 16px;
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 8px;
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 10px;
             color: #d1d5db;
-            font-size: 13px;
-            line-height: 1.6;
+            font-size: 14px;
+            line-height: 1.7;
+            border: 1px solid rgba(255, 255, 255, 0.08);
         }}
 
         .max-pain-summary strong {{
