@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
 import os
 
+from config import get_fee_rate, get_tier_display
+
 Base = declarative_base()
 
 # Encryption key for credentials (store in environment variable!)
@@ -124,22 +126,12 @@ class User(Base):
     @property
     def fee_percentage(self) -> float:
         """Get fee percentage based on user tier"""
-        tier_rates = {
-            'team': 0.00,      # 0% for team members
-            'vip': 0.05,       # 5% for VIPs
-            'standard': 0.10,  # 10% for typical customers
-        }
-        return tier_rates.get(self.fee_tier, 0.10)
+        return get_fee_rate(self.fee_tier)
     
     @property
     def fee_tier_display(self) -> str:
         """Get display name for fee tier"""
-        tier_names = {
-            'team': '🏠 Team (0%)',
-            'vip': '⭐ VIP (5%)',
-            'standard': '👤 Standard (10%)',
-        }
-        return tier_names.get(self.fee_tier, '👤 Standard (10%)')
+        return get_tier_display(self.fee_tier)
 
 
 class Signal(Base):
