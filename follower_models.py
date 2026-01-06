@@ -67,12 +67,18 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login = Column(DateTime, nullable=True)
     
-    # Monthly profit tracking
-    monthly_profit = Column(Float, default=0.0)
-    monthly_trades = Column(Integer, default=0)
-    monthly_fee_due = Column(Float, default=0.0)
-    monthly_fee_paid = Column(Boolean, default=True)
-    last_fee_calculation = Column(DateTime, nullable=True)
+    # 30-Day Rolling Billing (current cycle)
+    billing_cycle_start = Column(DateTime, nullable=True)
+    current_cycle_profit = Column(Float, default=0.0)
+    current_cycle_trades = Column(Integer, default=0)
+    
+    # Pending invoice (after cycle ends)
+    pending_invoice_id = Column(String, nullable=True)
+    pending_invoice_amount = Column(Float, default=0.0)
+    invoice_due_date = Column(DateTime, nullable=True)
+    
+    # Tier change scheduling
+    next_cycle_fee_tier = Column(String, nullable=True)
     
     # All-time tracking
     total_profit = Column(Float, default=0.0)
@@ -109,19 +115,36 @@ class User(Base):
             return None, None
     
     def check_payment_status(self) -> bool:
-        """Check if monthly fee is paid"""
-        if not self.last_fee_calculation:
+        """
+        Check if user has access (30-day billing system)
+        
+        Returns True if:
+        - No pending invoice, OR
+        - Pending invoice exists but not yet overdue
+        
+        Returns False if:
+        - Pending invoice is overdue (past invoice_due_date)
+        """
+        # If no pending invoice, user has access
+        if not self.pending_invoice_id:
             return True
         
-        # Check if more than 30 days since last calculation
-        days_since = (datetime.utcnow() - self.last_fee_calculation).days
+        # If invoice exists but no due date set, allow access (shouldn't happen)
+        if not self.invoice_due_date:
+            return True
         
-        if days_since >= 30:
-            # New month - needs payment if had profit
-            if self.monthly_profit > 0:
-                return self.monthly_fee_paid
+        # Check if invoice is overdue
+        from config import utc_now
+        now = utc_now()
         
-        return True
+        # Make due_date timezone-aware for comparison
+        due_date = self.invoice_due_date
+        if due_date.tzinfo is None:
+            from datetime import timezone
+            due_date = due_date.replace(tzinfo=timezone.utc)
+        
+        # If past due date, access is revoked
+        return now <= due_date
     
     @property
     def fee_percentage(self) -> float:
