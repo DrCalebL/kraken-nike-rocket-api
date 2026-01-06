@@ -864,15 +864,13 @@ async def report_pnl(
         db.add(db_trade)
         
         # Update user stats - accumulate profit for 30-day billing
-        # Note: Do NOT update monthly_fee_due here - that's legacy
-        user.monthly_profit += trade.profit_usd
-        user.monthly_trades += 1
+        # Uses current_cycle_profit instead of legacy monthly_profit
+        user.current_cycle_profit = (user.current_cycle_profit or 0) + trade.profit_usd
+        user.current_cycle_trades = (user.current_cycle_trades or 0) + 1
         user.total_profit += trade.profit_usd
         user.total_trades += 1
         
-        # 30-DAY BILLING: Do NOT accumulate per-trade fees
-        # if trade.profit_usd > 0:
-        #     user.monthly_fee_due += fee_charged  # REMOVED - legacy code
+        # 30-DAY BILLING: No per-trade fees - calculated at cycle end
         
         db.commit()
         
@@ -887,7 +885,7 @@ async def report_pnl(
             "profit_usd": trade.profit_usd,
             "fee_charged": 0,  # Always 0 - 30-day billing
             "billing_note": "Fees calculated at end of 30-day cycle",
-            "monthly_profit": user.monthly_profit
+            "current_cycle_profit": user.current_cycle_profit
         }
     
     except Exception as e:
@@ -946,8 +944,7 @@ async def register_user(
             email=data.email,
             api_key=api_key,
             kraken_account_id=data.kraken_account_id,
-            access_granted=True,  # Grant access immediately
-            monthly_fee_paid=True  # First month free
+            access_granted=True  # Grant access immediately (30-day billing starts on first trade)
         )
         
         db.add(user)
@@ -1001,9 +998,11 @@ async def verify_user(
     return {
         "access_granted": user.access_granted,
         "email": user.email,
-        "monthly_profit": user.monthly_profit,
-        "monthly_fee_due": user.monthly_fee_due,
-        "monthly_fee_paid": user.monthly_fee_paid,
+        # 30-day billing fields
+        "current_cycle_profit": user.current_cycle_profit or 0,
+        "current_cycle_trades": user.current_cycle_trades or 0,
+        "pending_invoice_amount": user.pending_invoice_amount or 0,
+        "invoice_due_date": user.invoice_due_date.isoformat() if user.invoice_due_date else None,
         "suspension_reason": user.suspension_reason if not user.access_granted else None
     }
 
@@ -1028,11 +1027,12 @@ async def get_user_stats(
         "email": user.email,
         "access_granted": user.access_granted,
         
-        # Monthly stats
-        "monthly_profit": user.monthly_profit,
-        "monthly_trades": user.monthly_trades,
-        "monthly_fee_due": user.monthly_fee_due,
-        "monthly_fee_paid": user.monthly_fee_paid,
+        # 30-day billing cycle stats
+        "billing_cycle_start": user.billing_cycle_start.isoformat() if user.billing_cycle_start else None,
+        "current_cycle_profit": user.current_cycle_profit or 0,
+        "current_cycle_trades": user.current_cycle_trades or 0,
+        "pending_invoice_amount": user.pending_invoice_amount or 0,
+        "invoice_due_date": user.invoice_due_date.isoformat() if user.invoice_due_date else None,
         
         # All-time stats
         "total_profit": user.total_profit,
@@ -1298,40 +1298,58 @@ async def create_payment_page(
     
     Called by: User clicking payment link
     Public: No auth required (uses API key in URL)
+    
+    DEPRECATED: This endpoint is legacy. The 30-day billing system in 
+    billing_service_30day.py now automatically creates invoices via Coinbase Commerce.
+    Kept for backwards compatibility but should not be used for new integrations.
     """
     # Find user
     user = db.query(User).filter(User.api_key == api_key).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Check if payment needed
-    if user.monthly_fee_due <= 0:
+    # Check if payment needed (30-day billing system)
+    pending_amount = user.pending_invoice_amount or 0
+    if pending_amount <= 0:
         return {
             "message": "No payment due",
-            "monthly_profit": user.monthly_profit,
-            "access_granted": user.access_granted
+            "current_cycle_profit": user.current_cycle_profit or 0,
+            "access_granted": user.access_granted,
+            "note": "Invoices are automatically created at the end of each 30-day billing cycle"
         }
     
-    # Create Coinbase Commerce charge
+    # If user already has a pending invoice, return that
+    if user.pending_invoice_id:
+        # Look up the existing invoice
+        from billing_service_30day import BillingServiceV2
+        return {
+            "message": "Invoice already exists",
+            "pending_invoice_id": user.pending_invoice_id,
+            "amount": pending_amount,
+            "due_date": user.invoice_due_date.isoformat() if user.invoice_due_date else None,
+            "note": "Pay existing invoice - new invoices created automatically at cycle end"
+        }
+    
+    # Create Coinbase Commerce charge (legacy behavior for backwards compatibility)
     try:
         import requests
         
         response = requests.post(
             "https://api.commerce.coinbase.com/charges",
             json={
-                "name": "Nike Rocket - Monthly Fee",
-                "description": f"10% profit sharing for {user.email}",
+                "name": "Nike Rocket - Trading Fee",
+                "description": f"Profit sharing fee for {user.email}",
                 "pricing_type": "fixed_price",
                 "local_price": {
-                    "amount": str(user.monthly_fee_due),
+                    "amount": str(pending_amount),
                     "currency": "USD"
                 },
                 "metadata": {
                     "user_id": user.id,
                     "user_email": user.email,
                     "api_key": api_key,
-                    "for_month": datetime.utcnow().strftime("%Y-%m"),
-                    "profit_amount": user.monthly_profit
+                    "billing_cycle": "30-day",
+                    "profit_amount": user.current_cycle_profit or 0
                 }
             },
             headers={
@@ -1346,21 +1364,20 @@ async def create_payment_page(
             # Store payment record
             payment = Payment(
                 user_id=user.id,
-                amount_usd=user.monthly_fee_due,
+                amount_usd=pending_amount,
                 currency="USD",
                 coinbase_charge_id=charge["id"],
                 status="pending",
                 for_month=datetime.utcnow().strftime("%Y-%m"),
-                profit_amount=user.monthly_profit
+                profit_amount=user.current_cycle_profit or 0
             )
             db.add(payment)
             db.commit()
             
             return {
                 "payment_url": charge["hosted_url"],
-                "amount": user.monthly_fee_due,
-                "for_month": datetime.utcnow().strftime("%Y-%m"),
-                "profit": user.monthly_profit
+                "amount": pending_amount,
+                "current_cycle_profit": user.current_cycle_profit or 0
             }
         else:
             raise HTTPException(status_code=500, detail="Failed to create payment")
@@ -1425,9 +1442,12 @@ async def coinbase_webhook(
                 payment.completed_at = datetime.utcnow()
                 payment.tx_hash = charge.get("payments", [{}])[0].get("transaction_id")
             
-            # Mark user as paid and restore access
-            user.monthly_fee_paid = True
-            user.total_fees_paid += user.monthly_fee_due
+            # Mark user as paid and restore access (30-day billing system)
+            paid_amount = user.pending_invoice_amount or 0
+            user.pending_invoice_id = None
+            user.pending_invoice_amount = 0
+            user.invoice_due_date = None
+            user.total_fees_paid = (user.total_fees_paid or 0) + paid_amount
             user.access_granted = True
             user.suspended_at = None
             user.suspension_reason = None
@@ -1435,7 +1455,7 @@ async def coinbase_webhook(
             db.commit()
             
             logger.info(f"✅ Payment confirmed for {user.email}")
-            logger.info(f"   Amount: ${user.monthly_fee_due:.2f}")
+            logger.info(f"   Amount: ${paid_amount:.2f}")
             logger.info(f"   Access restored!")
             
             return {"status": "processed"}
