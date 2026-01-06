@@ -1,0 +1,17 @@
+# Test dependencies for Nike Rocket
+# Install with: pip install -r requirements-test.txt
+
+# Testing framework
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Database
+asyncpg>=0.27.0
+
+# Mocking
+pytest-mock>=3.10.0
+
+# Coverage (optional)
+pytest-cov>=4.0.0
+
+# Note: Also requires main project dependencies from requirements.txt
