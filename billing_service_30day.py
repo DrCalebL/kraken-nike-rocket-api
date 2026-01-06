@@ -29,12 +29,20 @@ import asyncio
 import logging
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional, Dict, Any
 
 import asyncpg
 import requests
+
+# Import centralized configuration
+from config import (
+    get_fee_rate, get_tier_display, get_tier_percentage_str, get_valid_tiers,
+    utc_now, to_naive_utc,
+    BILLING_CYCLE_DAYS, PAYMENT_GRACE_DAYS, REMINDER_DAYS,
+    ERROR_MESSAGE_MAX_LENGTH, ERROR_CONTEXT_MAX_LENGTH
+)
 
 # Configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -45,11 +53,6 @@ BASE_URL = os.getenv("BASE_URL", "https://nike-rocket-api-production.up.railway.
 # Coinbase Commerce
 COINBASE_API_KEY = os.getenv("COINBASE_COMMERCE_API_KEY", "")
 COINBASE_API_URL = "https://api.commerce.coinbase.com"
-
-# Billing configuration
-BILLING_CYCLE_DAYS = 30
-PAYMENT_GRACE_DAYS = 7
-REMINDER_DAYS = [3, 5, 7]  # Days after invoice to send reminders
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +68,8 @@ async def log_error_to_db(pool, api_key: str, error_type: str, error_message: st
                    VALUES ($1, $2, $3, $4)""",
                 api_key[:20] + "..." if api_key and len(api_key) > 20 else api_key,
                 error_type,
-                error_message[:500] if error_message else None,
-                json.dumps(context) if context else None
+                error_message[:ERROR_MESSAGE_MAX_LENGTH] if error_message else None,
+                json.dumps(context)[:ERROR_CONTEXT_MAX_LENGTH] if context else None
             )
     except Exception as e:
         logger.error(f"Failed to log error to DB: {e}")
@@ -113,7 +116,7 @@ class BillingServiceV2:
                 return False
             
             # Start new cycle
-            now = datetime.utcnow()
+            now = to_naive_utc(utc_now())
             await conn.execute("""
                 UPDATE follower_users SET
                     billing_cycle_start = $1,
@@ -187,7 +190,7 @@ class BillingServiceV2:
         
         async with self.db_pool.acquire() as conn:
             # Find users whose 30-day cycle has ended
-            cycle_end_threshold = datetime.utcnow() - timedelta(days=BILLING_CYCLE_DAYS)
+            cycle_end_threshold = to_naive_utc(utc_now() - timedelta(days=BILLING_CYCLE_DAYS))
             
             users = await conn.fetch("""
                 SELECT 
@@ -234,99 +237,96 @@ class BillingServiceV2:
         user_id = user['id']
         profit = float(user['current_cycle_profit'] or 0)
         trades = int(user['current_cycle_trades'] or 0)
-        fee_tier = user['fee_tier'] or 'standard'
+        # Use centralized fee tier handling (handles None and empty string)
+        fee_tier = user['fee_tier'] if user['fee_tier'] else 'standard'
         cycle_start = user['billing_cycle_start']
-        cycle_end = datetime.utcnow()
+        cycle_end = to_naive_utc(utc_now())
         
         self.logger.info(f"📅 Ending cycle for user {user_id}: ${profit:.2f} profit, {trades} trades")
         
         async with self.db_pool.acquire() as conn:
-            # Get cycle number
-            cycle_count = await conn.fetchval("""
-                SELECT COUNT(*) FROM billing_cycles WHERE user_id = $1
-            """, user_id) or 0
-            cycle_number = cycle_count + 1
-            
-            # Calculate fee
-            fee_rates = {'team': 0.0, 'vip': 0.05, 'standard': 0.10}
-            fee_percentage = fee_rates.get(fee_tier, 0.10)
-            fee_amount = max(0, profit * fee_percentage) if profit > 0 else 0
-            
-            # Record the billing cycle
-            cycle_id = await conn.fetchval("""
-                INSERT INTO billing_cycles 
-                (user_id, cycle_start, cycle_end, cycle_number, 
-                 total_profit, total_trades, fee_tier, fee_percentage, fee_amount)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id
-            """, user_id, cycle_start, cycle_end, cycle_number,
-                profit, trades, fee_tier, fee_percentage, fee_amount)
-            
-            if profit > 0 and fee_amount > 0 and fee_tier != 'team':
-                # Profitable cycle - generate invoice
-                invoice_result = await self._generate_coinbase_invoice(
-                    user_id=user_id,
-                    email=user['email'],
-                    api_key=user['api_key'],
-                    amount=fee_amount,
-                    profit=profit,
-                    fee_tier=fee_tier,
-                    fee_percentage=fee_percentage,
-                    cycle_start=cycle_start,
-                    cycle_end=cycle_end,
-                    cycle_id=cycle_id
-                )
+            # Use transaction to ensure atomicity
+            async with conn.transaction():
+                # Get cycle number
+                cycle_count = await conn.fetchval("""
+                    SELECT COUNT(*) FROM billing_cycles WHERE user_id = $1
+                """, user_id) or 0
+                cycle_number = cycle_count + 1
                 
-                if invoice_result:
-                    # Update user with pending invoice
-                    await conn.execute("""
-                        UPDATE follower_users SET
-                            pending_invoice_id = $1,
-                            pending_invoice_amount = $2,
-                            invoice_due_date = $3,
-                            current_cycle_profit = 0,
-                            current_cycle_trades = 0,
-                            billing_cycle_start = $4
-                        WHERE id = $5
-                    """, invoice_result['charge_id'], fee_amount, 
-                        datetime.utcnow() + timedelta(days=PAYMENT_GRACE_DAYS),
-                        datetime.utcnow(), user_id)
+                # Calculate fee using centralized config
+                fee_percentage = get_fee_rate(fee_tier)
+                fee_amount = max(0, profit * fee_percentage) if profit > 0 else 0
+                
+                # Record the billing cycle
+                cycle_id = await conn.fetchval("""
+                    INSERT INTO billing_cycles 
+                    (user_id, cycle_start, cycle_end, cycle_number, 
+                     total_profit, total_trades, fee_tier, fee_percentage, fee_amount)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id
+                """, user_id, cycle_start, cycle_end, cycle_number,
+                    profit, trades, fee_tier, fee_percentage, fee_amount)
+                
+                result = 'cycle_renewed'
+                
+                if profit > 0 and fee_amount > 0 and fee_tier != 'team':
+                    # Profitable cycle - generate invoice
+                    invoice_result = await self._generate_coinbase_invoice(
+                        user_id=user_id,
+                        email=user['email'],
+                        api_key=user['api_key'],
+                        amount=fee_amount,
+                        profit=profit,
+                        fee_tier=fee_tier,
+                        fee_percentage=fee_percentage,
+                        cycle_start=cycle_start,
+                        cycle_end=cycle_end,
+                        cycle_id=cycle_id
+                    )
                     
-                    # Apply tier change if pending
-                    if user['next_cycle_fee_tier']:
+                    if invoice_result:
+                        # Calculate due date from cycle_end (not current time)
+                        due_date = cycle_end + timedelta(days=PAYMENT_GRACE_DAYS)
+                        
+                        # Update user with pending invoice
                         await conn.execute("""
                             UPDATE follower_users SET
-                                fee_tier = next_cycle_fee_tier,
-                                next_cycle_fee_tier = NULL
-                            WHERE id = $1
-                        """, user_id)
+                                pending_invoice_id = $1,
+                                pending_invoice_amount = $2,
+                                invoice_due_date = $3,
+                                current_cycle_profit = 0,
+                                current_cycle_trades = 0,
+                                billing_cycle_start = $4
+                            WHERE id = $5
+                        """, invoice_result['charge_id'], fee_amount, 
+                            due_date, cycle_end, user_id)
+                        
+                        result = 'invoice_generated'
+                else:
+                    # No profit or team tier - just start new cycle
+                    await conn.execute("""
+                        UPDATE follower_users SET
+                            current_cycle_profit = 0,
+                            current_cycle_trades = 0,
+                            billing_cycle_start = $1
+                        WHERE id = $2
+                    """, cycle_end, user_id)
                     
-                    return 'invoice_generated'
-            
-            # No profit or team tier - just start new cycle
-            await conn.execute("""
-                UPDATE follower_users SET
-                    current_cycle_profit = 0,
-                    current_cycle_trades = 0,
-                    billing_cycle_start = $1
-                WHERE id = $2
-            """, datetime.utcnow(), user_id)
-            
-            # Apply tier change if pending
-            if user['next_cycle_fee_tier']:
-                await conn.execute("""
-                    UPDATE follower_users SET
-                        fee_tier = next_cycle_fee_tier,
-                        next_cycle_fee_tier = NULL
-                    WHERE id = $1
-                """, user_id)
-            
-            # Mark cycle as waived (no invoice needed)
-            await conn.execute("""
-                UPDATE billing_cycles SET invoice_status = 'waived' WHERE id = $1
-            """, cycle_id)
-            
-            return 'cycle_renewed'
+                    # Mark cycle as waived (no invoice needed)
+                    await conn.execute("""
+                        UPDATE billing_cycles SET invoice_status = 'waived' WHERE id = $1
+                    """, cycle_id)
+                
+                # Apply tier change if pending (moved outside if/else to always apply)
+                if user['next_cycle_fee_tier']:
+                    await conn.execute("""
+                        UPDATE follower_users SET
+                            fee_tier = next_cycle_fee_tier,
+                            next_cycle_fee_tier = NULL
+                        WHERE id = $1
+                    """, user_id)
+                
+                return result
     
     # =========================================================================
     # COINBASE COMMERCE INTEGRATION
@@ -583,7 +583,7 @@ class BillingServiceV2:
                 AND bi.status = 'pending'
             """)
             
-            now = datetime.utcnow()
+            now = to_naive_utc(utc_now())
             
             for user in users:
                 days_since_invoice = (now - user['invoice_created_at']).days
@@ -659,8 +659,7 @@ class BillingServiceV2:
             self.logger.warning("⚠️ RESEND_API_KEY not set - email not sent")
             return False
         
-        fee_rates = {'team': '0%', 'vip': '5%', 'standard': '10%'}
-        fee_rate_str = fee_rates.get(fee_tier, '10%')
+        fee_rate_str = get_tier_percentage_str(fee_tier)
         dashboard_link = f"{BASE_URL}/dashboard?key={api_key}"
         
         html_content = f"""
@@ -1009,7 +1008,7 @@ class BillingServiceV2:
             new_tier: New tier ('team', 'vip', 'standard')
             immediate: If True, apply now. If False, apply at next cycle.
         """
-        if new_tier not in ['team', 'vip', 'standard']:
+        if new_tier not in get_valid_tiers():
             return False
         
         async with self.db_pool.acquire() as conn:
@@ -1050,7 +1049,7 @@ async def billing_scheduler_v2(db_pool: asyncpg.Pool):
     
     while True:
         try:
-            now = datetime.utcnow()
+            now = utc_now()
             
             # Every hour: Check for cycle endings
             await billing.check_all_cycles()
