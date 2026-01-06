@@ -15,11 +15,13 @@ import hashlib
 import hmac
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Request, HTTPException, Query
 from fastapi.responses import JSONResponse
+
+from config import is_production, utc_now, BILLING_CYCLE_DAYS
 
 # Configuration
 COINBASE_WEBHOOK_SECRET = os.getenv("COINBASE_WEBHOOK_SECRET", "")
@@ -43,8 +45,14 @@ def verify_coinbase_signature(payload: bytes, signature: str) -> bool:
         True if signature is valid
     """
     if not COINBASE_WEBHOOK_SECRET:
-        logger.warning("⚠️ COINBASE_WEBHOOK_SECRET not set - skipping verification")
-        return True  # Allow in dev mode
+        if is_production():
+            # Hard fail in production - don't allow unverified webhooks
+            logger.error("❌ COINBASE_WEBHOOK_SECRET not set in production!")
+            return False
+        
+        # Only allow bypass in local development
+        logger.warning("⚠️ Dev mode - COINBASE_WEBHOOK_SECRET not set, skipping verification")
+        return True
     
     expected = hmac.new(
         COINBASE_WEBHOOK_SECRET.encode(),
@@ -73,8 +81,11 @@ async def coinbase_webhook(request: Request):
     # Verify signature
     signature = request.headers.get("X-CC-Webhook-Signature", "")
     if not verify_coinbase_signature(body, signature):
-        logger.warning("⚠️ Invalid Coinbase webhook signature")
-        raise HTTPException(status_code=401, detail="Invalid signature")
+        if is_production():
+            logger.error("❌ Invalid Coinbase webhook signature in production - rejecting")
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        else:
+            logger.warning("⚠️ Invalid Coinbase webhook signature in dev mode - allowing")
     
     # Parse event
     try:
@@ -148,9 +159,13 @@ async def get_billing_status(
         # Calculate cycle info
         cycle_start = user['billing_cycle_start']
         if cycle_start:
-            from datetime import timedelta
-            cycle_end = cycle_start + timedelta(days=30)
-            days_remaining = max(0, (cycle_end - datetime.utcnow()).days)
+            cycle_end = cycle_start + timedelta(days=BILLING_CYCLE_DAYS)
+            now = utc_now()
+            # Make cycle_end timezone-aware for comparison
+            if cycle_end.tzinfo is None:
+                from datetime import timezone
+                cycle_end = cycle_end.replace(tzinfo=timezone.utc)
+            days_remaining = max(0, (cycle_end - now).days)
         else:
             cycle_end = None
             days_remaining = None
