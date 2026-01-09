@@ -455,7 +455,8 @@ class BalanceChecker:
     async def get_kraken_balance(
         self, 
         api_key: str, 
-        api_secret: str
+        api_secret: str,
+        max_retries: int = 3
     ) -> dict:
         """
         Get current balance info from Kraken FUTURES account using CCXT
@@ -467,87 +468,115 @@ class BalanceChecker:
         IMPORTANT: 
         - Use cash_balance for comparing expected vs actual (deposit/withdrawal detection)
         - Use total_equity for dashboard display (matches Kraken's "Total value")
+        
+        RETRY LOGIC: Will retry up to max_retries times on transient network errors
         """
-        try:
-            import ccxt
-            
-            logger.info("🔐 Fetching balance from Kraken Futures via CCXT...")
-            
-            # Initialize Kraken Futures exchange using CCXT
-            exchange = ccxt.krakenfutures({
-                'apiKey': api_key,
-                'secret': api_secret,
-                'enableRateLimit': True,
-                'options': {
-                    'defaultType': 'future',
-                }
-            })
-            
-            # Fetch balance synchronously in thread (CCXT is sync)
-            balance = await asyncio.to_thread(exchange.fetch_balance)
-            
-            # Debug log
-            logger.info(f"🔍 Balance response keys: {list(balance.keys())}")
-            
-            total_equity = None
-            usd_cash = 0
-            
-            # Get USD cash balance first
-            if 'USD' in balance:
-                usd_info = balance['USD']
-                if isinstance(usd_info, dict):
-                    usd_cash = float(usd_info.get('total', 0) or 0)
-                else:
-                    usd_cash = float(usd_info or 0)
-            elif 'total' in balance:
-                total_info = balance['total']
-                if isinstance(total_info, dict):
-                    usd_cash = float(total_info.get('USD', 0) or 0)
-            
-            logger.info(f"💵 Cash balance: ${usd_cash:.2f}")
-            
-            # Try to get portfolio value from raw info (includes unrealized P&L)
-            if balance.get('info'):
-                info = balance['info']
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                import ccxt
                 
-                if isinstance(info, dict) and 'accounts' in info:
-                    # Check flex account for portfolio value
-                    flex = info['accounts'].get('flex', {})
-                    if flex and isinstance(flex, dict):
-                        # Try various field names for portfolio value
-                        pv = (
-                            flex.get('portfolioValue') or
-                            flex.get('pv') or
-                            flex.get('balanceValue') or
-                            flex.get('balance_value') or
-                            flex.get('equity')
-                        )
-                        if pv and float(pv) > 0:
-                            total_equity = float(pv)
-                            logger.info(f"📊 Portfolio value (flex): ${total_equity:.2f}")
-            
-            # If no portfolio value found, use cash balance
-            if total_equity is None or total_equity == 0:
-                total_equity = usd_cash
-                logger.info(f"⚠️ No portfolio value found, using cash balance")
-            
-            logger.info(f"✅ Kraken Futures: Cash ${usd_cash:.2f}, Total Equity ${total_equity:.2f}")
-            
-            return {
-                'cash_balance': Decimal(str(usd_cash)),
-                'total_equity': Decimal(str(total_equity))
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Error fetching Kraken balance: {e}")
-            import traceback
-            traceback.print_exc()
-            await log_error_to_db(
-                self.db_pool, api_key[:15] + "...", "KRAKEN_FETCH_BALANCE_ERROR",
-                str(e), {"function": "get_kraken_balance", "traceback": traceback.format_exc()[:500]}
-            )
-            # Email notification for API failure
-            await notify_api_failure(
+                if attempt > 0:
+                    logger.info(f"🔄 Retry attempt {attempt + 1}/{max_retries} for Kraken balance fetch...")
+                else:
+                    logger.info("🔐 Fetching balance from Kraken Futures via CCXT...")
+                
+                # Initialize Kraken Futures exchange using CCXT
+                exchange = ccxt.krakenfutures({
+                    'apiKey': api_key,
+                    'secret': api_secret,
+                    'enableRateLimit': True,
+                    'timeout': 30000,  # 30 second timeout
+                    'options': {
+                        'defaultType': 'future',
+                    }
+                })
+                
+                # Fetch balance synchronously in thread (CCXT is sync)
+                balance = await asyncio.to_thread(exchange.fetch_balance)
+                
+                # Debug log
+                logger.info(f"🔍 Balance response keys: {list(balance.keys())}")
+                
+                total_equity = None
+                usd_cash = 0
+                
+                # Get USD cash balance first
+                if 'USD' in balance:
+                    usd_info = balance['USD']
+                    if isinstance(usd_info, dict):
+                        usd_cash = float(usd_info.get('total', 0) or 0)
+                    else:
+                        usd_cash = float(usd_info or 0)
+                elif 'total' in balance:
+                    total_info = balance['total']
+                    if isinstance(total_info, dict):
+                        usd_cash = float(total_info.get('USD', 0) or 0)
+                
+                logger.info(f"💵 Cash balance: ${usd_cash:.2f}")
+                
+                # Try to get portfolio value from raw info (includes unrealized P&L)
+                if balance.get('info'):
+                    info = balance['info']
+                    
+                    if isinstance(info, dict) and 'accounts' in info:
+                        # Check flex account for portfolio value
+                        flex = info['accounts'].get('flex', {})
+                        if flex and isinstance(flex, dict):
+                            # Try various field names for portfolio value
+                            pv = (
+                                flex.get('portfolioValue') or
+                                flex.get('pv') or
+                                flex.get('balanceValue') or
+                                flex.get('balance_value') or
+                                flex.get('equity')
+                            )
+                            if pv and float(pv) > 0:
+                                total_equity = float(pv)
+                                logger.info(f"📊 Portfolio value (flex): ${total_equity:.2f}")
+                
+                # If no portfolio value found, use cash balance
+                if total_equity is None or total_equity == 0:
+                    total_equity = usd_cash
+                    logger.info(f"⚠️ No portfolio value found, using cash balance")
+                
+                logger.info(f"✅ Kraken Futures: Cash ${usd_cash:.2f}, Total Equity ${total_equity:.2f}")
+                
+                return {
+                    'cash_balance': Decimal(str(usd_cash)),
+                    'total_equity': Decimal(str(total_equity))
+                }
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                
+                # Check if this is a retryable error (network/timeout issues)
+                is_retryable = any(x in error_str for x in [
+                    'timeout', 'network', 'connection', 'temporary', 
+                    'instruments', '503', '502', '504', 'unavailable'
+                ])
+                
+                if is_retryable and attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(f"⚠️ Retryable error on attempt {attempt + 1}: {e}. Waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Non-retryable error or max retries reached
+                    break
+        
+        # All retries failed - log error
+        logger.error(f"❌ Error fetching Kraken balance after {max_retries} attempts: {last_error}")
+        import traceback
+        traceback.print_exc()
+        await log_error_to_db(
+            self.db_pool, api_key[:15] + "...", "KRAKEN_FETCH_BALANCE_ERROR",
+            str(last_error), {"function": "get_kraken_balance", "attempts": max_retries, "traceback": traceback.format_exc()[:500]}
+        )
+        # Email notification for API failure
+        await notify_api_failure(
                 service="Kraken Futures",
                 endpoint="GET /derivatives/api/v3/accounts",
                 error=str(e),
