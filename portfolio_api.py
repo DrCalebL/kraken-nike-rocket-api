@@ -220,14 +220,12 @@ async def initialize_portfolio_autodetect(request: Request):
         
         if not credentials:
             await conn.close()
-            await log_error_async(
-                api_key, "CREDENTIALS_NOT_FOUND", 
-                "User attempted to initialize portfolio but has no trading agent set up",
-                {"endpoint": "/api/portfolio/initialize"}
-            )
+            # NOTE: This is expected behavior for users who haven't completed setup yet
+            # Not logging as error - just return friendly message
+            print(f"ℹ️ User {api_key[:15]}... attempted portfolio init without credentials (expected if setup incomplete)")
             return {
-                "status": "error",
-                "message": "Please set up your trading agent first."
+                "status": "setup_required",
+                "message": "Please set up your trading agent first. Go to the Setup page to enter your Kraken API credentials."
             }
         
         # Check if already initialized in follower_users
