@@ -577,13 +577,13 @@ class BalanceChecker:
         )
         # Email notification for API failure
         await notify_api_failure(
-                service="Kraken Futures",
-                endpoint="GET /derivatives/api/v3/accounts",
-                error=str(e),
-                user_api_key=api_key,
-                impact="Balance check skipped for this user"
-            )
-            return None
+            service="Kraken Futures",
+            endpoint="GET /derivatives/api/v3/accounts",
+            error=str(last_error),
+            user_api_key=api_key,
+            impact="Balance check skipped for this user"
+        )
+        return None
 
 
     async def calculate_expected_balance(self, user_id: int, api_key: str) -> Decimal:
