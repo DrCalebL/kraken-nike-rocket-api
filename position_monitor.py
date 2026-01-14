@@ -1,8 +1,17 @@
 """
-Nike Rocket Position Monitor v2.6 - Fill Aggregation Time Boundary Fix
+Nike Rocket Position Monitor v2.7 - Fill Scanning Order Fix
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.6:
+- CRITICAL BUG FIX: Fill scanning before trade close corrupted entry price
+- Root cause: scan_exchange_fills() ran BEFORE record_trade_close()
+- Impact: Exit fill got aggregated into avg_entry_price → entry = exit → P&L = 0
+- Example: 50 ADA position showed entry=$0.4097 = exit=$0.4097 (should be $0.39831)
+- Fix: Moved fill scanning to AFTER trade close is recorded
+- Added safety check: if entry_price == exit_price, fallback to entry_fill_price
+- Date: 2026-01-14
 
 Key changes from v2.5:
 - CRITICAL BUG FIX: Fill aggregation included orphaned fills from previous trades
@@ -60,8 +69,8 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.6 (Fill aggregation time boundary fix)
-Updated: December 19, 2025
+Version: 2.7 (Fill scanning order fix)
+Updated: January 14, 2026
 """
 
 import asyncio
@@ -814,6 +823,20 @@ class PositionMonitor:
                 self.logger.error("Missing entry price or position size")
                 return False
             
+            # ==================== SAFETY CHECK: Entry != Exit ====================
+            # If entry_price equals exit_price, something is wrong (fills corrupted)
+            if abs(entry_price - exit_price) < 0.00001:
+                self.logger.error(
+                    f"⚠️ BUG DETECTED: entry_price ({entry_price}) equals exit_price ({exit_price})! "
+                    f"This likely means exit fill was included in entry aggregation. "
+                    f"Using entry_fill_price as fallback."
+                )
+                # Fall back to original entry_fill_price from order
+                entry_price = position.get('entry_fill_price')
+                if not entry_price or abs(entry_price - exit_price) < 0.00001:
+                    self.logger.error("   ❌ entry_fill_price also invalid - skipping trade recording")
+                    return False
+            
             # ==================== SIGNAL MATCHING CHECK ====================
             # Check if this trade matches a Nike Rocket signal
             # If the position already has a signal_id (from open_positions), use it
@@ -1026,16 +1049,20 @@ class PositionMonitor:
             if not exchange:
                 return
             
-            # First scan for any new fills
+            # NOTE: DO NOT scan fills here before checking if position closed!
+            # Scanning fills before recording trade close will pick up the EXIT fill
+            # and corrupt avg_entry_price (making entry = exit, P&L = 0)
+            # Fill scanning happens AFTER trade close is recorded (see end of function)
+            
+            kraken_symbol = position['kraken_symbol']
+            
+            # Store user_info for later fill scanning (after trade recorded)
             user_info = {
                 'id': position['user_id'],
                 'api_key': position['user_api_key'],
                 'kraken_api_key_encrypted': position['kraken_api_key_encrypted'],
                 'kraken_api_secret_encrypted': position['kraken_api_secret_encrypted'],
             }
-            await self.scan_exchange_fills(user_info)
-            
-            kraken_symbol = position['kraken_symbol']
             
             # Check if position is still open
             result = await self.check_position_closed(
@@ -1098,6 +1125,10 @@ class PositionMonitor:
                 self.logger.info(f"   ✅ Cancelled remaining {('SL' if exit_type == 'TP' else 'TP')} order")
             except Exception as e:
                 self.logger.debug(f"   Could not cancel order: {e}")
+            
+            # NOW scan fills (after trade is recorded with correct entry price)
+            # This ensures the exit fill is recorded for audit trail
+            await self.scan_exchange_fills(user_info)
                 
         except Exception as e:
             self.logger.error(f"❌ Error checking position {position['id']}: {e}")
@@ -1169,7 +1200,7 @@ class PositionMonitor:
     async def run(self):
         """Main loop - checks positions every 60 seconds"""
         self.logger.info("=" * 60)
-        self.logger.info("📊 POSITION MONITOR v2.6 STARTED")
+        self.logger.info("📊 POSITION MONITOR v2.7 STARTED")
         self.logger.info("=" * 60)
         self.logger.info(f"🔄 Check interval: {CHECK_INTERVAL_SECONDS} seconds")
         self.logger.info(f"💰 Fee tiers: {get_tier_display('team')}, {get_tier_display('vip')}, {get_tier_display('standard')}")
