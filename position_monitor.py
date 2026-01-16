@@ -1,8 +1,15 @@
 """
-Nike Rocket Position Monitor v2.8 - Entry Fill Scanning Fix
+Nike Rocket Position Monitor v2.9 - Timestamp Race Condition Fix
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.8:
+- BUG FIX: Fill timestamp race condition in get_aggregated_position()
+- Root cause: fill_timestamp > opened_at excluded fills that executed before DB insert
+- Example: Fill at 23:00:48, position recorded at 23:00:51 → fill excluded
+- Fix: Changed to fill_timestamp >= opened_at - INTERVAL '10 seconds'
+- Date: 2026-01-16
 
 Key changes from v2.7:
 - CRITICAL BUG FIX: Entry fills were never captured for users with open positions
@@ -78,7 +85,7 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.8 (Entry fill scanning fix)
+Version: 2.9 (Timestamp race condition fix)
 Updated: January 14, 2026
 """
 
@@ -465,7 +472,7 @@ class PositionMonitor:
                     WHERE user_id = $1 
                     AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2 
                     AND position_id IS NULL
-                    AND fill_timestamp > $3
+                    AND fill_timestamp >= $3 - INTERVAL '10 seconds'
                 """, user_id, base_symbol, after_timestamp)
             else:
                 result = await conn.fetchrow("""
@@ -1210,7 +1217,7 @@ class PositionMonitor:
     async def run(self):
         """Main loop - checks positions every 60 seconds"""
         self.logger.info("=" * 60)
-        self.logger.info("📊 POSITION MONITOR v2.8 STARTED")
+        self.logger.info("📊 POSITION MONITOR v2.9 STARTED")
         self.logger.info("=" * 60)
         self.logger.info(f"🔄 Check interval: {CHECK_INTERVAL_SECONDS} seconds")
         self.logger.info(f"💰 Fee tiers: {get_tier_display('team')}, {get_tier_display('vip')}, {get_tier_display('standard')}")
