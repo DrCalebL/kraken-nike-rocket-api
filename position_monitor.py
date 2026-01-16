@@ -1,8 +1,17 @@
 """
-Nike Rocket Position Monitor v2.7 - Fill Scanning Order Fix
+Nike Rocket Position Monitor v2.8 - Entry Fill Scanning Fix
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.7:
+- CRITICAL BUG FIX: Entry fills were never captured for users with open positions
+- Root cause: check_all_positions() only scanned fills for users WITHOUT positions
+- Impact: avg_entry_price = NULL when position closed → trade not recorded
+- Example: Position 136, 138 closed with filled_quantity=0, avg_entry_price=NULL
+- Fix: Now scans fills for ALL active users, not just those without positions
+- Entry fills get captured during position lifetime, exit fills handled separately
+- Date: 2026-01-16
 
 Key changes from v2.6:
 - CRITICAL BUG FIX: Fill scanning before trade close corrupted entry price
@@ -69,7 +78,7 @@ This ensures:
 - Fees billed monthly, not per-trade
 
 Author: Nike Rocket Team
-Version: 2.7 (Fill scanning order fix)
+Version: 2.8 (Entry fill scanning fix)
 Updated: January 14, 2026
 """
 
@@ -1175,13 +1184,14 @@ class PositionMonitor:
                 if i + BATCH_SIZE < len(positions_list):
                     await asyncio.sleep(BATCH_DELAY)
         
-        # Also scan fills for users without open_positions records
-        # This catches manual trades or trades from other sources
+        # Scan fills for ALL active users (not just those without positions)
+        # This ensures ENTRY fills are captured while position is open
+        # v2.8 FIX: Previously only scanned users WITHOUT positions, 
+        # which meant entry fills were never captured → NULL avg_entry_price on close
         users = await self.get_active_users()
-        users_with_positions = {p['user_id'] for p in positions} if positions else set()
         
-        # FAIRNESS: Randomize scan order for users without positions
-        users_to_scan = [u for u in users if u['id'] not in users_with_positions]
+        # FAIRNESS: Randomize scan order
+        users_to_scan = list(users)
         random.shuffle(users_to_scan)
         
         # PARALLEL BATCH EXECUTION for fill scans
@@ -1200,7 +1210,7 @@ class PositionMonitor:
     async def run(self):
         """Main loop - checks positions every 60 seconds"""
         self.logger.info("=" * 60)
-        self.logger.info("📊 POSITION MONITOR v2.7 STARTED")
+        self.logger.info("📊 POSITION MONITOR v2.8 STARTED")
         self.logger.info("=" * 60)
         self.logger.info(f"🔄 Check interval: {CHECK_INTERVAL_SECONDS} seconds")
         self.logger.info(f"💰 Fee tiers: {get_tier_display('team')}, {get_tier_display('vip')}, {get_tier_display('standard')}")
