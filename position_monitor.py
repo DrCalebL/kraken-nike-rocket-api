@@ -1,8 +1,18 @@
 """
-Nike Rocket Position Monitor v2.9 - Timestamp Race Condition Fix
+Nike Rocket Position Monitor v3.0 - Kraken Realized P&L (Source of Truth)
 ============================================================================
 
 REFACTORED: Position-based tracking instead of individual fills
+
+Key changes from v2.9:
+- CRITICAL BUG FIX: P&L was calculated using signal price instead of actual fill price
+- Root cause: entry_fill_price defaulted to signal price when fetch_order() failed
+- Impact: P&L could be off by $5-15 per trade (Jan 19 bug: ~$24.52 total error)
+- Fix: Now fetches Kraken's realized P&L directly via get_kraken_realized_pnl()
+- Kraken P&L is the SOURCE OF TRUTH - accounts for actual fills, slippage, funding
+- Falls back to calculated P&L only if Kraken P&L not available
+- Added P&L source logging for audit trail
+- Date: 2026-01-23
 
 Key changes from v2.8:
 - BUG FIX: Fill timestamp race condition in get_aggregated_position()
@@ -735,6 +745,92 @@ class PositionMonitor:
             """)
             return [dict(row) for row in rows]
     
+    async def get_kraken_realized_pnl(self, exchange: ccxt.krakenfutures, kraken_symbol: str, since_timestamp: datetime = None) -> Dict[str, Any]:
+        """
+        Fetch realized P&L directly from Kraken trades.
+        
+        This is the SOURCE OF TRUTH for P&L - Kraken calculates it correctly
+        accounting for actual fill prices, partial fills, and funding.
+        
+        Args:
+            exchange: CCXT exchange instance
+            kraken_symbol: Kraken symbol (e.g., PF_ADAUSD)
+            since_timestamp: Only consider trades after this time
+            
+        Returns:
+            {
+                'realized_pnl': float,  # Sum of realized P&L from trades
+                'trade_count': int,
+                'avg_exit_price': float,
+                'total_quantity': float,
+                'trades': list  # Raw trade data for debugging
+            }
+        """
+        try:
+            # Fetch recent trades from Kraken
+            trades = exchange.fetch_my_trades(kraken_symbol, limit=50)
+            
+            if not trades:
+                self.logger.warning(f"No trades found for {kraken_symbol}")
+                return None
+            
+            # Sort by timestamp descending (most recent first)
+            trades.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+            
+            # Filter to trades since the position opened
+            if since_timestamp:
+                since_ms = int(since_timestamp.timestamp() * 1000)
+                trades = [t for t in trades if t.get('timestamp', 0) >= since_ms]
+            
+            if not trades:
+                self.logger.warning(f"No trades found since {since_timestamp}")
+                return None
+            
+            # Sum up realized P&L from trades
+            # Note: CCXT may have this in different fields depending on exchange
+            total_pnl = 0
+            total_qty = 0
+            weighted_price_sum = 0
+            
+            for trade in trades:
+                # Try to get realized P&L from trade info
+                # Kraken Futures includes this in the trade data
+                info = trade.get('info', {})
+                
+                # Kraken Futures uses 'realized_pnl' in the raw response
+                rpnl = None
+                if 'realized_pnl' in info:
+                    rpnl = float(info['realized_pnl'])
+                elif 'realizedPnl' in info:
+                    rpnl = float(info['realizedPnl'])
+                elif 'pnl' in trade:
+                    rpnl = float(trade['pnl'])
+                
+                if rpnl is not None:
+                    total_pnl += rpnl
+                
+                # Also track quantity and price for weighted average
+                qty = float(trade.get('amount', 0))
+                price = float(trade.get('price', 0))
+                total_qty += qty
+                weighted_price_sum += qty * price
+            
+            avg_exit_price = weighted_price_sum / total_qty if total_qty > 0 else 0
+            
+            self.logger.info(f"📊 Kraken realized P&L for {kraken_symbol}: ${total_pnl:+.2f} from {len(trades)} trades")
+            
+            return {
+                'realized_pnl': total_pnl,
+                'trade_count': len(trades),
+                'avg_exit_price': avg_exit_price,
+                'total_quantity': total_qty,
+                'trades': trades
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching Kraken realized P&L: {e}")
+            return None
+
     async def check_position_closed(self, exchange: ccxt.krakenfutures, kraken_symbol: str, side: str, quantity: float, tp_order_id: str, sl_order_id: str, user_api_key: str = 'unknown') -> Dict[str, Any]:
         """
         Check if position is still open on Kraken.
@@ -821,14 +917,15 @@ class PositionMonitor:
             )
             return {'closed': False, 'error': str(e)}
     
-    async def record_trade_close(self, position: dict, exit_price: float, exit_type: str, closed_at: datetime):
+    async def record_trade_close(self, position: dict, exit_price: float, exit_type: str, closed_at: datetime, kraken_pnl: float = None):
         """
         Record a closed position as ONE trade with actual P&L.
         
         IMPORTANT: Only records trades that match a Nike Rocket signal.
         Manual trades are skipped to avoid charging fees on user's own trades.
         
-        Uses aggregated position data (avg entry, total size) for accurate P&L.
+        v3.0 UPDATE: Uses Kraken's realized P&L when available (source of truth).
+        Falls back to calculated P&L if Kraken P&L not available.
         """
         try:
             # Use aggregated entry if available, otherwise fall back to single entry
@@ -925,11 +1022,33 @@ class PositionMonitor:
             # ==================== PROCEED WITH RECORDING ====================
             # This is a Nike Rocket signal trade - record it (NO FEE - 30-day billing)
             
-            # Calculate P&L
+            # ==================== P&L CALCULATION ====================
+            # PREFER Kraken's realized P&L (source of truth) when available
+            # Fall back to calculated P&L if Kraken P&L not available
+            
+            calculated_pnl = None
             if side == 'LONG':
-                profit_usd = (exit_price - entry_price) * position_size
+                calculated_pnl = (exit_price - entry_price) * position_size
             else:  # SHORT
-                profit_usd = (entry_price - exit_price) * position_size
+                calculated_pnl = (entry_price - exit_price) * position_size
+            
+            # Use Kraken P&L if available, otherwise use calculated
+            if kraken_pnl is not None:
+                profit_usd = kraken_pnl
+                pnl_source = "kraken"
+                
+                # Log if there's a significant difference between calculated and Kraken P&L
+                if calculated_pnl is not None:
+                    diff = abs(profit_usd - calculated_pnl)
+                    if diff > 1.0:  # More than $1 difference
+                        self.logger.warning(
+                            f"⚠️ P&L DISCREPANCY: Kraken=${profit_usd:+.2f}, Calculated=${calculated_pnl:+.2f}, "
+                            f"Diff=${diff:.2f} - Using Kraken (source of truth)"
+                        )
+            else:
+                profit_usd = calculated_pnl
+                pnl_source = "calculated"
+                self.logger.info(f"   Using calculated P&L: ${profit_usd:+.2f} (Kraken P&L not available)")
             
             # Calculate profit percent with division by zero protection
             if entry_price > 0:
@@ -972,7 +1091,7 @@ class PositionMonitor:
                     profit_percent,
                     exit_type,
                     fee_charged,  # Always 0 for 30-day billing
-                    f"Signal trade. Aggregated from {fill_count} fills. Avg entry: ${entry_price:.4f}"
+                    f"Signal trade. {fill_count} fills. Entry: ${entry_price:.4f}. P&L source: {pnl_source}"
                 )
                 
                 # Update user stats - accumulate profit for 30-day billing
@@ -1140,8 +1259,24 @@ class PositionMonitor:
                 exit_type = 'SL'
                 self.logger.info(f"🛑 {user_short}: SL HIT on {position['symbol']} @ ${exit_price:.4f}")
             
+            # ==================== FETCH KRAKEN REALIZED P&L ====================
+            # Use Kraken's P&L as source of truth instead of calculating ourselves
+            # This accounts for actual fill prices, partial fills, slippage, etc.
+            kraken_pnl_data = await self.get_kraken_realized_pnl(
+                exchange, 
+                kraken_symbol, 
+                since_timestamp=position.get('opened_at')
+            )
+            
+            kraken_pnl = None
+            if kraken_pnl_data and kraken_pnl_data.get('realized_pnl') is not None:
+                kraken_pnl = kraken_pnl_data['realized_pnl']
+                self.logger.info(f"   💰 Kraken realized P&L: ${kraken_pnl:+.2f}")
+            else:
+                self.logger.warning(f"   ⚠️ Could not fetch Kraken P&L, will calculate from prices")
+            
             # Record the trade closure
-            await self.record_trade_close(position, exit_price, exit_type, datetime.utcnow())
+            await self.record_trade_close(position, exit_price, exit_type, datetime.utcnow(), kraken_pnl=kraken_pnl)
             
             # Cancel remaining order
             try:
