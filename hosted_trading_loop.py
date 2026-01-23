@@ -1,5 +1,5 @@
 """
-Nike Rocket - Hosted Trading Loop (30-Day Billing + Error Logging + Order Retry)
+Nike Rocket - Hosted Trading Loop v2.1 (Race Condition Fix)
 ==================================================================================
 Background task that polls for signals and executes trades for ALL active users.
 Runs on Railway as part of main.py startup.
@@ -15,6 +15,15 @@ Features:
 - Logs all activity for admin dashboard
 - ENFORCES 30-DAY BILLING: Skips users with overdue invoices
 - ERROR LOGGING: All errors logged to error_logs table for admin visibility
+
+v2.1 CHANGES (2026-01-23):
+- CRITICAL BUG FIX: Race condition allowing same signal to execute twice
+- Root cause: Fast TP fills (< 10 seconds) caused position to close before
+  poll cycle completed, allowing next poll to re-execute same signal
+- Fix 1: Signal acknowledged at START of execute_trade() (not end)
+- Fix 2: check_any_open_positions_or_orders() now checks DB for existing
+  positions/trades on the same signal before allowing execution
+- Impact: Jan 19 bug caused ~$24.52 false profit for Users 4 and 6
 
 OPTIMIZED:
 - Batched signal fetching (1 query instead of N queries)
@@ -33,7 +42,7 @@ FAILSAFE:
 - All failures logged to error_logs table
 
 Author: Nike Rocket Team
-Updated: December 1, 2025 - Scaled for 5000+ users
+Updated: January 23, 2026 - Race condition fix v2.1
 """
 
 import asyncio
@@ -394,7 +403,7 @@ class HostedTradingLoop:
             self.logger.warning(f"Error checking positions: {e}")
             return False
     
-    async def check_any_open_positions_or_orders(self, exchange: ccxt.krakenfutures, user_short: str) -> tuple:
+    async def check_any_open_positions_or_orders(self, exchange: ccxt.krakenfutures, user_short: str, user_id: int = None, signal_id: str = None) -> tuple:
         """
         SAFETY CHECK: Verify user has NO open positions or orders on ANY symbol
         
@@ -407,8 +416,41 @@ class HostedTradingLoop:
         1. Double positions on same symbol (entry filled, exit didn't, new signal comes)
         2. Multiple symbols open (risk management assumes single position)
         3. Orphaned TP/SL orders affecting new trades
+        4. v2.1: Race condition where same signal executes twice (DB check)
         """
         try:
+            # ===== CHECK 0: Database check for existing position on same signal =====
+            # v2.1 FIX: Prevents race condition where fast TP fills cause double execution
+            if user_id and signal_id:
+                async with self.db_pool.acquire() as conn:
+                    # Check if we already have a position for this signal (open or closed)
+                    existing_position = await conn.fetchval("""
+                        SELECT COUNT(*) FROM open_positions 
+                        WHERE user_id = $1 AND signal_id = (
+                            SELECT id FROM signals WHERE signal_id = $2 LIMIT 1
+                        )
+                    """, user_id, signal_id)
+                    
+                    if existing_position and existing_position > 0:
+                        self.logger.warning(
+                            f"   🚫 {user_short}: Position already exists for signal {signal_id[:20]}..."
+                        )
+                        return (True, f"Position already exists for this signal")
+                    
+                    # Also check for very recent trade on this signal (within 60 seconds)
+                    # This catches the case where position closed very quickly
+                    recent_trade = await conn.fetchval("""
+                        SELECT COUNT(*) FROM trades 
+                        WHERE user_id = $1 AND signal_id = $2
+                        AND closed_at > NOW() - INTERVAL '60 seconds'
+                    """, user_id, signal_id)
+                    
+                    if recent_trade and recent_trade > 0:
+                        self.logger.warning(
+                            f"   🚫 {user_short}: Trade recently closed for signal {signal_id[:20]}..."
+                        )
+                        return (True, f"Trade recently closed for this signal")
+            
             # ===== CHECK 1: Any open positions (any symbol) =====
             try:
                 positions = exchange.fetch_positions()
@@ -471,9 +513,22 @@ class HostedTradingLoop:
         1. Market entry order
         2. Limit take-profit order (reduce-only)
         3. Stop-loss order (reduce-only)
+        
+        v2.1 UPDATE: Acknowledges signal at START to prevent race condition
+        where the same signal executes twice during fast TP fills.
         """
         user_api_key = user['api_key']
         user_short = user_api_key[:15] + "..."
+        delivery_id = signal.get('delivery_id')
+        
+        # ==================== EARLY ACKNOWLEDGMENT ====================
+        # Acknowledge signal IMMEDIATELY to prevent race condition
+        # where another poll cycle picks up the same signal while this one is executing.
+        # If trade fails, we do NOT unacknowledge - signal is considered "attempted".
+        # This prevents the Jan 19 bug where fast TP fills caused double execution.
+        if delivery_id:
+            await self.acknowledge_signal(delivery_id)
+            self.logger.info(f"   🔒 {user_short}: Signal acknowledged (preventing re-execution)")
         
         try:
             # Get exchange (may raise ValueError if credentials missing/invalid)
@@ -502,7 +557,10 @@ class HostedTradingLoop:
             # - Double trades (position exists, new signal comes)
             # - Multi-symbol exposure (risk management assumes single position)
             # - Orphaned orders interfering with new trades
-            has_open, reason = await self.check_any_open_positions_or_orders(exchange, user_short)
+            # v2.1: Also checks DB for existing positions on the same signal
+            has_open, reason = await self.check_any_open_positions_or_orders(
+                exchange, user_short, user_id=user['id'], signal_id=signal.get('signal_id')
+            )
             if has_open:
                 self.logger.warning(f"   ⏭️ {user_short}: SKIPPING TRADE - {reason}")
                 self.logger.warning(f"   ℹ️ {user_short}: Clean up positions/orders on Kraken before next signal")
@@ -961,6 +1019,9 @@ class HostedTradingLoop:
         """
         Execute a single signal for a single user.
         Extracted for parallel batch execution.
+        
+        v2.1 UPDATE: Signal is acknowledged at START of execute_trade() to prevent
+        race conditions. No retry on failure - signal is considered "attempted".
         """
         user_short = item['api_key'][:15] + "..."
         
@@ -990,15 +1051,14 @@ class HostedTradingLoop:
             
             self.logger.info(f"✨ {user_short}: Signal found - {signal['action']} {signal['symbol']}")
             
-            # Execute trade
+            # Execute trade (signal is acknowledged at start of execute_trade)
             success = await self.execute_trade(user, signal)
             
             if success:
-                # Acknowledge signal
-                await self.acknowledge_signal(signal['delivery_id'])
-                self.logger.info(f"✅ {user_short}: Trade executed and acknowledged")
+                self.logger.info(f"✅ {user_short}: Trade executed successfully")
             else:
-                self.logger.warning(f"⚠️ {user_short}: Trade failed, will retry next poll")
+                # Signal was already acknowledged at start - no retry to prevent double execution
+                self.logger.warning(f"⚠️ {user_short}: Trade failed (signal already acknowledged, no retry)")
                 
         except Exception as e:
             self.logger.error(f"❌ {user_short}: Error - {e}")
