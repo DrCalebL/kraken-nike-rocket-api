@@ -1158,3 +1158,4 @@ async def start_hosted_trading(db_pool):
 if __name__ == "__main__":
     print("This module should be imported and run from main.py")
     print("See start_hosted_trading() function")
+
