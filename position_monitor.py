@@ -1413,3 +1413,4 @@ async def start_position_monitor(db_pool):
     
     monitor = PositionMonitor(db_pool)
     await monitor.run()
+
