@@ -967,9 +967,117 @@ class BillingServiceV2:
             return False
     
     # =========================================================================
+    # BILLING VERIFICATION
+    # =========================================================================
+
+    async def verify_billing_accuracy(self, auto_fix: bool = False) -> Dict[str, Any]:
+        """
+        Verify that current_cycle_profit matches sum of trades for all users.
+
+        This is a monitoring function to detect billing discrepancies.
+        Run periodically to ensure data integrity.
+
+        Args:
+            auto_fix: If True, automatically fix discrepancies by recalculating
+                     current_cycle_profit from trades table.
+
+        Returns:
+            Dict with verification results including any discrepancies found
+        """
+        self.logger.info("🔍 Verifying billing accuracy...")
+
+        results = {
+            "users_checked": 0,
+            "discrepancies_found": 0,
+            "discrepancies_fixed": 0,
+            "total_discrepancy_amount": 0.0,
+            "discrepancy_details": []
+        }
+
+        async with self.db_pool.acquire() as conn:
+            # Query to find discrepancies between stored profit and calculated profit
+            discrepancies = await conn.fetch("""
+                SELECT
+                    fu.id,
+                    fu.email,
+                    fu.api_key,
+                    fu.current_cycle_profit,
+                    fu.billing_cycle_start,
+                    COALESCE(SUM(t.profit_usd), 0) as calculated_profit,
+                    fu.current_cycle_profit - COALESCE(SUM(t.profit_usd), 0) as discrepancy
+                FROM follower_users fu
+                LEFT JOIN trades t ON t.user_id = fu.id
+                    AND t.closed_at >= fu.billing_cycle_start
+                WHERE fu.billing_cycle_start IS NOT NULL
+                GROUP BY fu.id, fu.email, fu.api_key, fu.current_cycle_profit, fu.billing_cycle_start
+                HAVING ABS(COALESCE(fu.current_cycle_profit, 0) - COALESCE(SUM(t.profit_usd), 0)) > 0.01
+            """)
+
+            # Count total users with active billing cycles
+            total_users = await conn.fetchval("""
+                SELECT COUNT(*) FROM follower_users WHERE billing_cycle_start IS NOT NULL
+            """)
+            results["users_checked"] = total_users or 0
+
+            if discrepancies:
+                results["discrepancies_found"] = len(discrepancies)
+
+                for row in discrepancies:
+                    discrepancy_info = {
+                        "user_id": row['id'],
+                        "email": row['email'][:3] + "***" if row['email'] else None,
+                        "stored_profit": float(row['current_cycle_profit'] or 0),
+                        "calculated_profit": float(row['calculated_profit'] or 0),
+                        "discrepancy": float(row['discrepancy'] or 0),
+                        "billing_cycle_start": row['billing_cycle_start'].isoformat() if row['billing_cycle_start'] else None
+                    }
+                    results["discrepancy_details"].append(discrepancy_info)
+                    results["total_discrepancy_amount"] += abs(float(row['discrepancy'] or 0))
+
+                    if auto_fix:
+                        # Fix discrepancy by setting current_cycle_profit to calculated value
+                        calculated = float(row['calculated_profit'] or 0)
+                        await conn.execute("""
+                            UPDATE follower_users
+                            SET current_cycle_profit = $1
+                            WHERE id = $2
+                        """, calculated, row['id'])
+                        results["discrepancies_fixed"] += 1
+                        self.logger.warning(
+                            f"🔧 Fixed discrepancy for user {row['id']}: "
+                            f"${row['current_cycle_profit']:.2f} -> ${calculated:.2f}"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"⚠️ Discrepancy found for user {row['id']}: "
+                            f"stored=${row['current_cycle_profit']:.2f}, "
+                            f"calculated=${row['calculated_profit']:.2f}, "
+                            f"diff=${row['discrepancy']:.2f}"
+                        )
+
+                # Log to error_logs table for admin visibility
+                if results["discrepancies_found"] > 0 and not auto_fix:
+                    await log_error_to_db(
+                        self.db_pool, "system", "BILLING_DISCREPANCY",
+                        f"Found {results['discrepancies_found']} billing discrepancies totaling ${results['total_discrepancy_amount']:.2f}",
+                        {"discrepancies": results["discrepancy_details"][:10]}  # Limit to first 10
+                    )
+
+        if results["discrepancies_found"] == 0:
+            self.logger.info(f"✅ Billing verification complete: {results['users_checked']} users checked, no discrepancies found")
+        else:
+            action = "fixed" if auto_fix else "logged"
+            self.logger.warning(
+                f"⚠️ Billing verification complete: {results['discrepancies_found']} discrepancies {action} "
+                f"(total ${results['total_discrepancy_amount']:.2f})"
+            )
+
+        return results
+
+    # =========================================================================
     # ADMIN & REPORTING
     # =========================================================================
-    
+
     async def get_billing_summary(self) -> Dict[str, Any]:
         """Get billing summary for admin dashboard"""
         async with self.db_pool.acquire() as conn:
@@ -1055,9 +1163,10 @@ async def billing_scheduler_v2(db_pool: asyncpg.Pool):
             # Every hour: Check for cycle endings
             await billing.check_all_cycles()
             
-            # Every 6 hours: Check for overdue invoices
+            # Every 6 hours: Check for overdue invoices and verify billing accuracy
             if now.hour % 6 == 0:
                 await billing.check_overdue_invoices()
+                await billing.verify_billing_accuracy(auto_fix=False)
             
             # Daily at midnight UTC: Clean up old error logs
             if now.hour == 0:
