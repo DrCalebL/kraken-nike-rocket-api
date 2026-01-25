@@ -274,6 +274,7 @@ async def root():
             "webhook": "/api/payments/webhook",
             "billing_summary": "/api/admin/billing/summary",
             "process_billing": "/api/admin/billing/process-monthly",
+            "verify_billing": "/api/admin/billing/verify-accuracy",
             "reconcile_trades": "/api/admin/reconcile-trades/{user_id}",
             "reconcile_all": "/api/admin/reconcile-all-trades"
         },
@@ -878,6 +879,39 @@ async def admin_check_overdue(password: str = ""):
         return {
             "status": "success",
             "message": "Checked overdue invoices",
+            **result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/billing/verify-accuracy")
+async def admin_verify_billing_accuracy(password: str = "", auto_fix: bool = False):
+    """
+    Verify billing accuracy by checking current_cycle_profit matches sum of trades.
+
+    This endpoint runs the recommended monitoring query to detect discrepancies
+    between stored profit values and calculated profit from the trades table.
+
+    Args:
+        password: Admin password
+        auto_fix: If True, automatically fix discrepancies by recalculating
+
+    Returns:
+        Verification results including any discrepancies found
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        billing = BillingServiceV2(db_pool)
+        result = await billing.verify_billing_accuracy(auto_fix=auto_fix)
+        await db_pool.close()
+
+        return {
+            "status": "success" if result["discrepancies_found"] == 0 else "discrepancies_found",
+            "message": f"Verified {result['users_checked']} users with active billing cycles",
             **result
         }
     except Exception as e:
