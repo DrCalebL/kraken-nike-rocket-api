@@ -425,7 +425,7 @@ class HostedTradingLoop:
                 async with self.db_pool.acquire() as conn:
                     # First, get the integer signal ID from the signals table
                     # signal_id param is VARCHAR like 'x-hIb7RDW3tHT_H6dIzoHA'
-                    # open_positions.signal_id is INTEGER
+                    # open_positions.signal_id is INTEGER (references signals.id)
                     # trades.signal_id is VARCHAR but stores the integer as string ('122')
                     signal_int_id = await conn.fetchval("""
                         SELECT id FROM signals WHERE signal_id = $1 LIMIT 1
@@ -433,10 +433,11 @@ class HostedTradingLoop:
                     
                     if signal_int_id:
                         # Check if we already have a position for this signal (open or closed)
+                        # Cast to handle any type mismatches between model and actual DB
                         existing_position = await conn.fetchval("""
                             SELECT COUNT(*) FROM open_positions 
                             WHERE user_id = $1 AND signal_id = $2
-                        """, user_id, signal_int_id)
+                        """, user_id, int(signal_int_id))
                         
                         if existing_position and existing_position > 0:
                             self.logger.warning(
@@ -451,7 +452,7 @@ class HostedTradingLoop:
                             SELECT COUNT(*) FROM trades 
                             WHERE user_id = $1 AND signal_id = $2::text
                             AND closed_at > NOW() - INTERVAL '60 seconds'
-                        """, user_id, signal_int_id)
+                        """, user_id, str(signal_int_id))
                         
                         if recent_trade and recent_trade > 0:
                             self.logger.warning(
@@ -1158,4 +1159,3 @@ async def start_hosted_trading(db_pool):
 if __name__ == "__main__":
     print("This module should be imported and run from main.py")
     print("See start_hosted_trading() function")
-
