@@ -486,7 +486,7 @@ class PositionMonitor:
             
             if after_timestamp:
                 result = await conn.fetchrow("""
-                    SELECT 
+                    SELECT
                         SUM(CASE WHEN side = 'buy' THEN quantity ELSE 0 END) as buy_qty,
                         SUM(CASE WHEN side = 'buy' THEN cost ELSE 0 END) as buy_cost,
                         SUM(CASE WHEN side = 'sell' THEN quantity ELSE 0 END) as sell_qty,
@@ -495,10 +495,10 @@ class PositionMonitor:
                         MIN(fill_timestamp) as first_fill,
                         MAX(fill_timestamp) as last_fill
                     FROM position_fills
-                    WHERE user_id = $1 
-                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2 
+                    WHERE user_id = $1
+                    AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $2
                     AND position_id IS NULL
-                    AND fill_timestamp >= $3 - INTERVAL '10 seconds'
+                    AND fill_timestamp >= $3::timestamp - INTERVAL '10 seconds'
                 """, user_id, base_symbol, after_timestamp)
             else:
                 result = await conn.fetchrow("""
@@ -1007,7 +1007,7 @@ class PositionMonitor:
                                     WHERE user_id = $2
                                     AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
                                     AND position_id IS NULL
-                                    AND fill_timestamp >= $4
+                                    AND fill_timestamp >= $4::timestamp
                                 """, position['id'], position['user_id'], base_symbol, opened_at)
                             else:
                                 # Fallback if no valid opened_at
@@ -1154,7 +1154,7 @@ class PositionMonitor:
                             WHERE user_id = $2
                             AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
                             AND position_id IS NULL
-                            AND fill_timestamp >= $4
+                            AND fill_timestamp >= $4::timestamp
                         """, position['id'], position['user_id'], base_symbol, opened_at)
                     else:
                         # Fallback if no valid opened_at
