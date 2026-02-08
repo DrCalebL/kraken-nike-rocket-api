@@ -342,72 +342,6 @@ async def place_entry_order_with_retry(
     )
 
 
-async def cancel_order_with_retry(
-    exchange,
-    order_id: str,
-    symbol: str,
-    order_description: str = "Order",
-    user_email: str = "unknown",
-    notify_on_failure: bool = True
-) -> bool:
-    """
-    Cancel an order with retry logic.
-    
-    Args:
-        exchange: CCXT exchange instance
-        order_id: Order ID to cancel
-        symbol: Trading symbol
-        order_description: Human-readable description
-        user_email: User email for notifications
-        notify_on_failure: Whether to notify on failure
-        
-    Returns:
-        True if cancelled, False if failed
-    """
-    backoff = INITIAL_BACKOFF
-    last_error = None
-    
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logger.info(f"🗑️ Cancelling {order_description} (attempt {attempt}/{MAX_RETRIES})...")
-            
-            exchange.cancel_order(order_id, symbol)
-            
-            logger.info(f"✅ {order_description} cancelled: {order_id}")
-            return True
-            
-        except Exception as e:
-            last_error = e
-            error_msg = str(e)[:200]
-            
-            # Check if order is already filled/cancelled (not a real error)
-            if "not found" in error_msg.lower() or "already" in error_msg.lower():
-                logger.info(f"ℹ️ {order_description} already filled/cancelled")
-                return True
-            
-            logger.warning(f"⚠️ Cancel failed (attempt {attempt}/{MAX_RETRIES}): {error_msg}")
-            
-            if attempt < MAX_RETRIES:
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF)
-    
-    logger.error(f"❌ Failed to cancel {order_description} after {MAX_RETRIES} attempts")
-    
-    if notify_on_failure:
-        await notify_admin(
-            title=f"⚠️ Failed to Cancel {order_description}",
-            details={
-                "User": user_email,
-                "Order ID": order_id,
-                "Symbol": symbol,
-                "Error": str(last_error)[:500],
-            },
-            level="warning"
-        )
-    
-    return False
-
-
 # ==================== CRITICAL FAILURE NOTIFICATIONS ====================
 
 async def notify_entry_failed(
@@ -459,30 +393,6 @@ async def notify_bracket_incomplete(
             "Action Required": "IMMEDIATELY place missing orders manually!",
         },
         level="error"
-    )
-
-
-async def notify_position_orphaned(
-    user_email: str,
-    user_api_key: str,
-    symbol: str,
-    position_side: str,
-    position_size: float,
-    reason: str
-):
-    """Notify admin when a position is orphaned (no TP/SL)."""
-    await notify_admin(
-        title="⚠️ Orphaned Position Detected",
-        details={
-            "User": user_email,
-            "API Key": user_api_key[:20] + "...",
-            "Symbol": symbol,
-            "Side": position_side,
-            "Size": position_size,
-            "Reason": reason,
-            "Action Required": "Review and add TP/SL if needed",
-        },
-        level="warning"
     )
 
 
