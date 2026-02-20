@@ -917,12 +917,34 @@ class PositionMonitor:
             }
             
         except Exception as e:
-            self.logger.error(f"Error checking position: {e}")
-            await log_error_to_db(
-                self.db_pool, user_api_key, "POSITION_CHECK_ERROR",
-                str(e), {"symbol": kraken_symbol, "function": "check_position_closed"}
-            )
-            return {'closed': False, 'error': str(e)}
+            # Retry once after 2s for transient Kraken API failures
+            self.logger.warning(f"Position check failed, retrying in 2s: {e}")
+            await asyncio.sleep(2)
+            try:
+                positions = exchange.fetch_positions()
+                self.logger.info(f"🔍 Retry succeeded: Kraken returned {len(positions)} positions")
+                # Re-run the same position matching logic
+                if positions:
+                    for pos in positions:
+                        symbol_base = kraken_symbol.replace('PF_', '').replace('USD', '')
+                        if symbol_base in str(pos.get('symbol', '')).upper():
+                            contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
+                            if contracts > 0:
+                                return {'closed': False, 'current_size': contracts}
+                    for pos in positions:
+                        contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
+                        if contracts > 0:
+                            return {'closed': False, 'current_size': contracts}
+                # No positions found on retry — return closed:False to recheck next cycle
+                # rather than marking closed on a potentially incomplete API response
+                return {'closed': False, 'retry_no_positions': True}
+            except Exception as retry_err:
+                self.logger.error(f"Retry also failed: {retry_err}")
+                await log_error_to_db(
+                    self.db_pool, user_api_key, "POSITION_CHECK_ERROR",
+                    str(retry_err), {"symbol": kraken_symbol, "function": "check_position_closed", "retry": True}
+                )
+                return {'closed': False, 'error': str(retry_err)}
     
     async def record_trade_close(self, position: dict, exit_price: float, exit_type: str, closed_at: datetime, kraken_pnl: float = None):
         """
@@ -1082,98 +1104,105 @@ class PositionMonitor:
             # Generate trade ID
             trade_id = f"trade_{secrets.token_urlsafe(12)}"
             
-            async with self.db_pool.acquire() as conn:
-                # Record the trade (fee_charged = 0)
-                await conn.execute("""
-                    INSERT INTO trades 
-                    (user_id, signal_id, trade_id, kraken_order_id, opened_at, closed_at,
-                     symbol, side, entry_price, exit_price, position_size, leverage,
-                     profit_usd, profit_percent, exit_type, fee_charged, notes)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-                """,
-                    position['user_id'],
-                    str(signal_id) if signal_id else None,
-                    trade_id,
-                    position.get('entry_order_id'),
-                    position.get('opened_at') or position.get('first_fill_at'),
-                    closed_at,
-                    symbol,
-                    side,
-                    entry_price,
-                    exit_price,
-                    position_size,
-                    leverage,
-                    profit_usd,
-                    profit_percent,
-                    exit_type,
-                    fee_charged,  # Always 0 for 30-day billing
-                    f"Signal trade. {fill_count} fills. Entry: ${entry_price:.4f}. P&L source: {pnl_source}"
-                )
-                
-                # Update user stats - accumulate profit for 30-day billing
-                # Note: total_fees NOT updated here - handled by billing service at cycle end
-                await conn.execute("""
-                    UPDATE follower_users SET 
-                        total_trades = COALESCE(total_trades, 0) + 1,
-                        total_profit = COALESCE(total_profit, 0) + $1,
-                        current_cycle_profit = COALESCE(current_cycle_profit, 0) + $1,
-                        current_cycle_trades = COALESCE(current_cycle_trades, 0) + 1
-                    WHERE id = $2
-                """, profit_usd, position['user_id'])
-                
-                # Start billing cycle if not started (FALLBACK - primary trigger is on position OPEN)
-                # Use position's opened_at to ensure the trade is included in the cycle
-                position_opened_at = position.get('opened_at') or position.get('first_fill_at')
-                if position_opened_at:
-                    await conn.execute("""
-                        UPDATE follower_users SET 
-                            billing_cycle_start = $2
-                        WHERE id = $1 AND billing_cycle_start IS NULL
-                    """, position['user_id'], position_opened_at)
-                else:
-                    # Ultimate fallback - shouldn't happen
-                    await conn.execute("""
-                        UPDATE follower_users SET 
-                            billing_cycle_start = CURRENT_TIMESTAMP
-                        WHERE id = $1 AND billing_cycle_start IS NULL
-                    """, position['user_id'])
-                
-                # Mark fills as assigned to this position (audit trail)
-                if position.get('id'):
-                    # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
-                    base_symbol = self.get_base_symbol(symbol)
-                    
-                    # Only assign fills from THIS position's time window
-                    # Use opened_at as lower bound to avoid old orphaned fills
-                    opened_at = position.get('opened_at')
-                    # Validate opened_at is a proper datetime (not interval/timedelta)
-                    if opened_at and isinstance(opened_at, datetime) and not isinstance(opened_at, timedelta):
-                        await conn.execute("""
-                            UPDATE position_fills
-                            SET position_id = $1
-                            WHERE user_id = $2
-                            AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
-                            AND position_id IS NULL
-                            AND fill_timestamp >= $4::timestamp
-                        """, position['id'], position['user_id'], base_symbol, opened_at)
-                    else:
-                        # Fallback if no valid opened_at
-                        if opened_at and not isinstance(opened_at, datetime):
-                            self.logger.warning(f"Invalid opened_at type {type(opened_at).__name__} for position {position.get('id')} - skipping time filter")
-                        await conn.execute("""
-                            UPDATE position_fills
-                            SET position_id = $1
-                            WHERE user_id = $2
-                            AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
-                            AND position_id IS NULL
-                        """, position['id'], position['user_id'], base_symbol)
+            # Round profit to 2 decimal places to prevent float drift between
+            # incremental addition (current_cycle_profit += x) and SUM(profit_usd)
+            profit_usd = round(profit_usd, 2)
 
-                    # Mark position as closed and update last_fill_at
+            async with self.db_pool.acquire() as conn:
+                # Explicit transaction: trade INSERT, profit UPDATE, and position
+                # status must all succeed or all roll back together
+                async with conn.transaction():
+                    # Record the trade (fee_charged = 0)
                     await conn.execute("""
-                        UPDATE open_positions
-                        SET status = 'closed', last_fill_at = NOW()
-                        WHERE id = $1
-                    """, position['id'])
+                        INSERT INTO trades
+                        (user_id, signal_id, trade_id, kraken_order_id, opened_at, closed_at,
+                         symbol, side, entry_price, exit_price, position_size, leverage,
+                         profit_usd, profit_percent, exit_type, fee_charged, notes)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                    """,
+                        position['user_id'],
+                        str(signal_id) if signal_id else None,
+                        trade_id,
+                        position.get('entry_order_id'),
+                        position.get('opened_at') or position.get('first_fill_at'),
+                        closed_at,
+                        symbol,
+                        side,
+                        entry_price,
+                        exit_price,
+                        position_size,
+                        leverage,
+                        profit_usd,
+                        profit_percent,
+                        exit_type,
+                        fee_charged,  # Always 0 for 30-day billing
+                        f"Signal trade. {fill_count} fills. Entry: ${entry_price:.4f}. P&L source: {pnl_source}"
+                    )
+
+                    # Update user stats - accumulate profit for 30-day billing
+                    # Note: total_fees NOT updated here - handled by billing service at cycle end
+                    await conn.execute("""
+                        UPDATE follower_users SET
+                            total_trades = COALESCE(total_trades, 0) + 1,
+                            total_profit = COALESCE(total_profit, 0) + $1,
+                            current_cycle_profit = COALESCE(current_cycle_profit, 0) + $1,
+                            current_cycle_trades = COALESCE(current_cycle_trades, 0) + 1
+                        WHERE id = $2
+                    """, profit_usd, position['user_id'])
+
+                    # Start billing cycle if not started (FALLBACK - primary trigger is on position OPEN)
+                    # Use position's opened_at to ensure the trade is included in the cycle
+                    position_opened_at = position.get('opened_at') or position.get('first_fill_at')
+                    if position_opened_at:
+                        await conn.execute("""
+                            UPDATE follower_users SET
+                                billing_cycle_start = $2
+                            WHERE id = $1 AND billing_cycle_start IS NULL
+                        """, position['user_id'], position_opened_at)
+                    else:
+                        # Ultimate fallback - shouldn't happen
+                        await conn.execute("""
+                            UPDATE follower_users SET
+                                billing_cycle_start = CURRENT_TIMESTAMP
+                            WHERE id = $1 AND billing_cycle_start IS NULL
+                        """, position['user_id'])
+
+                    # Mark fills as assigned to this position (audit trail)
+                    if position.get('id'):
+                        # Use base symbol matching (handles ADA/USD:USD vs ADA/USDT format differences)
+                        base_symbol = self.get_base_symbol(symbol)
+
+                        # Only assign fills from THIS position's time window
+                        # Use opened_at as lower bound to avoid old orphaned fills
+                        opened_at = position.get('opened_at')
+                        # Validate opened_at is a proper datetime (not interval/timedelta)
+                        if opened_at and isinstance(opened_at, datetime) and not isinstance(opened_at, timedelta):
+                            await conn.execute("""
+                                UPDATE position_fills
+                                SET position_id = $1
+                                WHERE user_id = $2
+                                AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                                AND position_id IS NULL
+                                AND fill_timestamp >= $4::timestamp
+                            """, position['id'], position['user_id'], base_symbol, opened_at)
+                        else:
+                            # Fallback if no valid opened_at
+                            if opened_at and not isinstance(opened_at, datetime):
+                                self.logger.warning(f"Invalid opened_at type {type(opened_at).__name__} for position {position.get('id')} - skipping time filter")
+                            await conn.execute("""
+                                UPDATE position_fills
+                                SET position_id = $1
+                                WHERE user_id = $2
+                                AND SPLIT_PART(SPLIT_PART(symbol, '/', 1), ':', 1) = $3
+                                AND position_id IS NULL
+                            """, position['id'], position['user_id'], base_symbol)
+
+                        # Mark position as closed and update last_fill_at
+                        await conn.execute("""
+                            UPDATE open_positions
+                            SET status = 'closed', last_fill_at = NOW()
+                            WHERE id = $1
+                        """, position['id'])
             
             # Log result
             emoji = "🟢" if profit_usd >= 0 else "🔴"
