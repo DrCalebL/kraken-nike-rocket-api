@@ -996,6 +996,8 @@ class BillingServiceV2:
 
         async with self.db_pool.acquire() as conn:
             # Query to find discrepancies between stored profit and calculated profit
+            # ROUND to 2 decimal places to avoid false positives from
+            # float precision drift between incremental += and SUM()
             discrepancies = await conn.fetch("""
                 SELECT
                     fu.id,
@@ -1003,14 +1005,14 @@ class BillingServiceV2:
                     fu.api_key,
                     fu.current_cycle_profit,
                     fu.billing_cycle_start,
-                    COALESCE(SUM(t.profit_usd), 0) as calculated_profit,
-                    fu.current_cycle_profit - COALESCE(SUM(t.profit_usd), 0) as discrepancy
+                    ROUND(COALESCE(SUM(t.profit_usd), 0)::numeric, 2) as calculated_profit,
+                    ROUND((fu.current_cycle_profit - COALESCE(SUM(t.profit_usd), 0))::numeric, 2) as discrepancy
                 FROM follower_users fu
                 LEFT JOIN trades t ON t.user_id = fu.id
                     AND t.closed_at >= fu.billing_cycle_start
                 WHERE fu.billing_cycle_start IS NOT NULL
                 GROUP BY fu.id, fu.email, fu.api_key, fu.current_cycle_profit, fu.billing_cycle_start
-                HAVING ABS(COALESCE(fu.current_cycle_profit, 0) - COALESCE(SUM(t.profit_usd), 0)) > 0.01
+                HAVING ABS(ROUND((COALESCE(fu.current_cycle_profit, 0) - COALESCE(SUM(t.profit_usd), 0))::numeric, 2)) > 0.01
             """)
 
             # Count total users with active billing cycles
