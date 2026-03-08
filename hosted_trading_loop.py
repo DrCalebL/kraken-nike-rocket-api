@@ -51,6 +51,7 @@ import logging
 import math
 import json
 import random
+import socket
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import os
@@ -72,12 +73,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('HOSTED_TRADING')
 
 
+def _is_transient_connection_error(exc: Exception) -> bool:
+    """Check if an exception is a transient connection/DNS error."""
+    transient_indicators = (
+        "name resolution",
+        "connection refused",
+        "connection reset",
+        "network is unreachable",
+        "connection timed out",
+        "temporary failure",
+    )
+    msg = str(exc).lower()
+    return (
+        isinstance(exc, (socket.gaierror, ConnectionRefusedError, ConnectionResetError, OSError))
+        or any(indicator in msg for indicator in transient_indicators)
+    )
+
+
 async def log_error_to_db(pool, api_key: str, error_type: str, error_message: str, context: Optional[Dict] = None):
-    """Log error to error_logs table for admin dashboard visibility"""
+    """Log error to error_logs table for admin dashboard visibility.
+    Skips DB logging for transient connection errors to avoid cascading failures.
+    """
+    if _is_transient_connection_error(Exception(error_message or "")):
+        logger.warning(f"Skipping DB error log (DB likely unreachable): {error_type}")
+        return
     try:
         async with pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO error_logs (api_key, error_type, error_message, context) 
+                """INSERT INTO error_logs (api_key, error_type, error_message, context)
                    VALUES ($1, $2, $3, $4)""",
                 api_key[:20] + "..." if api_key and len(api_key) > 20 else api_key,
                 error_type,
@@ -1092,43 +1115,59 @@ class HostedTradingLoop:
         
         poll_count = 0
         last_status_log = datetime.now()
-        
+        consecutive_conn_failures = 0
+        MAX_BACKOFF_SECONDS = 300  # Cap at 5 minutes
+
         while True:
             try:
                 poll_count += 1
-                
+
                 await self.poll_and_execute()
-                
+
+                # Reset backoff on success
+                if consecutive_conn_failures > 0:
+                    self.logger.info(f"✅ DB connection recovered after {consecutive_conn_failures} consecutive failures")
+                    consecutive_conn_failures = 0
+
                 # Log status every 5 minutes to show we're alive
                 if (datetime.now() - last_status_log).total_seconds() >= 300:
                     users = await self.get_active_users()
                     self.logger.info(f"💓 Trading loop alive - Poll #{poll_count}, {len(users)} active users")
                     last_status_log = datetime.now()
-                
+
                 # Wait before next poll
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                    
+
             except asyncio.CancelledError:
                 self.logger.info("🛑 Trading loop cancelled")
                 break
-                
+
             except Exception as e:
-                self.logger.error(f"❌ Error in trading loop: {e}")
-                import traceback
-                traceback.print_exc()
-                await log_error_to_db(
-                    self.db_pool, "system", "TRADING_LOOP_ERROR",
-                    str(e)[:200], {"poll_count": poll_count, "traceback": traceback.format_exc()[:500]}
-                )
-                # Critical system error - notify
-                await notify_critical_error(
-                    error_type="TRADING_LOOP_ERROR",
-                    error=str(e),
-                    location="hosted_trading_loop.run",
-                    context={"poll_count": poll_count, "traceback": traceback.format_exc()[:200]}
-                )
-                # Wait before retrying
-                await asyncio.sleep(10)
+                if _is_transient_connection_error(e):
+                    consecutive_conn_failures += 1
+                    backoff = min(10 * (2 ** (consecutive_conn_failures - 1)), MAX_BACKOFF_SECONDS)
+                    self.logger.warning(
+                        f"⚠️ DB connection error (attempt {consecutive_conn_failures}), "
+                        f"retrying in {backoff}s: {e}"
+                    )
+                    await asyncio.sleep(backoff)
+                else:
+                    self.logger.error(f"❌ Error in trading loop: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await log_error_to_db(
+                        self.db_pool, "system", "TRADING_LOOP_ERROR",
+                        str(e)[:200], {"poll_count": poll_count, "traceback": traceback.format_exc()[:500]}
+                    )
+                    # Critical system error - notify
+                    await notify_critical_error(
+                        error_type="TRADING_LOOP_ERROR",
+                        error=str(e),
+                        location="hosted_trading_loop.run",
+                        context={"poll_count": poll_count, "traceback": traceback.format_exc()[:200]}
+                    )
+                    # Wait before retrying
+                    await asyncio.sleep(10)
 
 
 async def start_hosted_trading(db_pool):
