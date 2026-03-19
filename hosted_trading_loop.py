@@ -740,12 +740,23 @@ class HostedTradingLoop:
                 self.logger.warning(f"   ⚠️ Could not set leverage: {e}")
             
             # ==================== EXECUTE 3-ORDER BRACKET WITH RETRY ====================
-            
+
             side = action.lower()  # 'buy' or 'sell'
             exit_side = 'sell' if side == 'buy' else 'buy'
             user_email = user.get('email', 'unknown')
             user_api_key = user.get('api_key', 'unknown')
-            
+
+            # Resolve signal DB ID early (needed for recovery if bracket fails)
+            signal_db_id = None
+            try:
+                async with self.db_pool.acquire() as conn:
+                    signal_db_id = await conn.fetchval(
+                        "SELECT id FROM signals WHERE signal_id = $1",
+                        signal.get('signal_id')
+                    )
+            except Exception as e:
+                self.logger.warning(f"   ⚠️ Could not resolve signal DB ID: {e}")
+
             # 1. Entry order (market) - WITH RETRY
             self.logger.info(f"   📝 Placing entry order...")
             entry_order = await place_entry_order_with_retry(
@@ -801,9 +812,15 @@ class HostedTradingLoop:
                 self.logger.error(f"   ❌ TP order FAILED - ABORTING TRADE!")
                 # Emergency close the entry position
                 await self._emergency_close_position(
-                    exchange, kraken_symbol, exit_side, quantity, 
+                    exchange, kraken_symbol, exit_side, quantity,
                     user_email, user_api_key, entry_order['id'],
-                    reason="TP order failed after all retries"
+                    reason="TP order failed after all retries",
+                    user_id=user['id'],
+                    signal_db_id=signal_db_id,
+                    signal_symbol=api_symbol,
+                    side=action.upper(),
+                    leverage=leverage,
+                    entry_fill_price=entry_price,
                 )
                 return False
             
@@ -836,7 +853,13 @@ class HostedTradingLoop:
                 await self._emergency_close_position(
                     exchange, kraken_symbol, exit_side, quantity,
                     user_email, user_api_key, entry_order['id'],
-                    reason="SL order failed after all retries"
+                    reason="SL order failed after all retries",
+                    user_id=user['id'],
+                    signal_db_id=signal_db_id,
+                    signal_symbol=api_symbol,
+                    side=action.upper(),
+                    leverage=leverage,
+                    entry_fill_price=entry_price,
                 )
                 return False
             
@@ -855,11 +878,7 @@ class HostedTradingLoop:
             # Save to open_positions table
             try:
                 async with self.db_pool.acquire() as conn:
-                    # Get signal DB ID from signal_id string
-                    signal_db_id = await conn.fetchval(
-                        "SELECT id FROM signals WHERE signal_id = $1",
-                        signal.get('signal_id')
-                    )
+                    # signal_db_id already resolved earlier (before bracket placement)
                     
                     # Use consistent UTC timestamp for both position and billing cycle
                     position_opened_at = datetime.utcnow()
@@ -949,39 +968,73 @@ class HostedTradingLoop:
         user_email: str,
         user_api_key: str,
         entry_order_id: str,
-        reason: str
+        reason: str,
+        user_id: int = None,
+        signal_db_id: int = None,
+        signal_symbol: str = None,
+        side: str = None,
+        leverage: float = None,
+        entry_fill_price: float = None,
     ):
         """
         Emergency market close when TP/SL placement fails.
-        
-        This protects users from having unprotected positions due to API failures.
-        The position is closed at market price and admin is notified.
+
+        Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s).
+        If all retries fail, records an unprotected position in the DB so the
+        position guardian can pick it up for recovery.
         """
+        EMERGENCY_MAX_RETRIES = 5
+        EMERGENCY_INITIAL_BACKOFF = 2.0
+
         self.logger.critical(f"   🚨🚨🚨 EMERGENCY CLOSE TRIGGERED 🚨🚨🚨")
         self.logger.critical(f"   Reason: {reason}")
         self.logger.critical(f"   Symbol: {symbol}, Side: {exit_side}, Qty: {quantity}")
-        
+
         close_success = False
         close_order_id = None
-        
-        try:
-            close_order = exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side=exit_side,
-                amount=quantity,
-                params={'reduceOnly': True}
+
+        for attempt in range(1, EMERGENCY_MAX_RETRIES + 1):
+            try:
+                close_order = exchange.create_order(
+                    symbol=symbol,
+                    type='market',
+                    side=exit_side,
+                    amount=quantity,
+                    params={'reduceOnly': True}
+                )
+                close_order_id = close_order.get('id')
+                close_success = True
+                self.logger.critical(f"   ✅ EMERGENCY CLOSE SUCCESSFUL (attempt {attempt}/{EMERGENCY_MAX_RETRIES}): {close_order_id}")
+                self.logger.critical(f"   Position closed at market - check for slippage!")
+                break
+
+            except Exception as e:
+                self.logger.critical(f"   ❌ EMERGENCY CLOSE attempt {attempt}/{EMERGENCY_MAX_RETRIES} FAILED: {e}")
+                if attempt < EMERGENCY_MAX_RETRIES:
+                    backoff = EMERGENCY_INITIAL_BACKOFF * (2 ** (attempt - 1))
+                    self.logger.critical(f"   ⏳ Retrying in {backoff:.0f}s...")
+                    await asyncio.sleep(backoff)
+
+        if not close_success:
+            self.logger.critical(f"   ❌❌❌ ALL {EMERGENCY_MAX_RETRIES} EMERGENCY CLOSE ATTEMPTS FAILED ❌❌❌")
+            self.logger.critical(f"   🚨 Recording unprotected position for guardian recovery")
+
+            # Record unprotected position so the position guardian can recover it
+            await self._record_unprotected_position(
+                user_id=user_id,
+                user_api_key=user_api_key,
+                signal_db_id=signal_db_id,
+                entry_order_id=entry_order_id,
+                signal_symbol=signal_symbol,
+                kraken_symbol=symbol,
+                side=side,
+                quantity=quantity,
+                leverage=leverage,
+                entry_fill_price=entry_fill_price,
+                reason=reason,
             )
-            close_order_id = close_order.get('id')
-            close_success = True
-            self.logger.critical(f"   ✅ EMERGENCY CLOSE SUCCESSFUL: {close_order_id}")
-            self.logger.critical(f"   Position closed at market - check for slippage!")
-            
-        except Exception as e:
-            self.logger.critical(f"   ❌❌❌ EMERGENCY CLOSE FAILED: {e} ❌❌❌")
-            self.logger.critical(f"   🚨 MANUAL INTERVENTION REQUIRED!")
-        
-        # Notify admin via Discord
+
+        # Notify admin via email
         await notify_bracket_incomplete(
             user_email=user_email,
             user_api_key=user_api_key,
@@ -989,22 +1042,72 @@ class HostedTradingLoop:
             entry_order_id=entry_order_id,
             tp_placed=False,
             sl_placed=False,
-            error=f"{reason} - Emergency close {'SUCCESSFUL' if close_success else 'FAILED'}"
+            error=f"{reason} - Emergency close {'SUCCESSFUL' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts - GUARDIAN RECOVERY PENDING'}"
         )
-        
+
         # Log to database
         await log_error_to_db(
             self.db_pool,
             user_api_key,
             "EMERGENCY_CLOSE",
-            f"{reason}. Close: {'OK' if close_success else 'FAILED'}",
+            f"{reason}. Close: {'OK' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts'}",
             {
                 "symbol": symbol,
                 "entry_order_id": entry_order_id,
                 "close_order_id": close_order_id,
-                "close_success": close_success
+                "close_success": close_success,
+                "attempts": EMERGENCY_MAX_RETRIES,
             }
         )
+
+        return close_success
+
+    async def _record_unprotected_position(
+        self,
+        user_id: int,
+        user_api_key: str,
+        signal_db_id: int,
+        entry_order_id: str,
+        signal_symbol: str,
+        kraken_symbol: str,
+        side: str,
+        quantity: float,
+        leverage: float = None,
+        entry_fill_price: float = None,
+        reason: str = None,
+    ):
+        """
+        Record an unprotected position in the DB with status='needs_recovery'.
+
+        This creates visibility for the position guardian to pick up and close.
+        Called when emergency close fails after all retries.
+        """
+        if not user_id:
+            self.logger.error("Cannot record unprotected position: missing user_id")
+            return
+
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO open_positions
+                    (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
+                     symbol, kraken_symbol, side, quantity, leverage,
+                     entry_fill_price, opened_at, status)
+                    VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, $9, NOW(), 'needs_recovery')
+                """,
+                    user_id,
+                    signal_db_id,
+                    entry_order_id,
+                    signal_symbol or kraken_symbol,
+                    kraken_symbol,
+                    side.upper() if side else 'UNKNOWN',
+                    quantity,
+                    leverage or 1.0,
+                    entry_fill_price or 0.0,
+                )
+                self.logger.critical(f"   📝 Unprotected position recorded (status='needs_recovery') for guardian")
+        except Exception as e:
+            self.logger.error(f"   ❌ Failed to record unprotected position: {e}")
     
     async def poll_and_execute(self):
         """

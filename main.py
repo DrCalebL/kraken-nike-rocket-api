@@ -53,6 +53,9 @@ from hosted_trading_loop import start_hosted_trading
 # Import position monitor to track P&L when trades close
 from position_monitor import start_position_monitor
 
+# Import position guardian for unprotected position recovery
+from position_guardian import start_position_guardian
+
 # Import tax reports for income tracking
 from tax_reports import (
     get_monthly_income,
@@ -5412,7 +5415,14 @@ async def startup_event():
             # ═══════════════════════════════════════════════════════════
             asyncio.create_task(start_billing_scheduler_v2(db_pool))
             print("💰 Billing scheduler v2 scheduled (30-day rolling, starts in 60 seconds)")
-            
+
+            # ═══════════════════════════════════════════════════════════
+            # POSITION GUARDIAN: Detects and closes unprotected positions
+            # Runs startup recovery, then periodic checks every 2 minutes
+            # ═══════════════════════════════════════════════════════════
+            asyncio.create_task(start_position_guardian(db_pool))
+            print("🛡️ Position guardian scheduled (starts in 45 seconds)")
+
         except Exception as e:
             print(f"⚠️ Background tasks failed to start: {e}")
     
