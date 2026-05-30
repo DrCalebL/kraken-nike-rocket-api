@@ -209,10 +209,40 @@ if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 if DATABASE_URL:
-    engine = create_engine(DATABASE_URL)
-    init_db(engine)
-    init_portfolio_db(engine)
-    
+    # pool_pre_ping recycles dead connections instead of handing out stale ones;
+    # connect_timeout bounds each individual connection attempt.
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        connect_args={"connect_timeout": 10},
+    )
+
+    # Railway's private network DNS (*.railway.internal) can lag a few seconds
+    # behind container start, and brief private-net blips make the internal host
+    # transiently unresolvable. init_db() opens the first real connection at
+    # import time, so without this any hiccup crashes the whole app before it can
+    # serve a request. Retry with exponential backoff so the app self-heals once
+    # private networking is back, instead of hard-crashing the deploy.
+    import time
+    from sqlalchemy.exc import OperationalError
+
+    _max_attempts = 7
+    for _attempt in range(1, _max_attempts + 1):
+        try:
+            init_db(engine)
+            init_portfolio_db(engine)
+            break
+        except OperationalError as e:
+            if _attempt == _max_attempts:
+                print(f"❌ Database unreachable after {_max_attempts} attempts: {e}")
+                raise
+            _backoff = min(2 ** _attempt, 30)
+            print(
+                f"⏳ DB connect attempt {_attempt}/{_max_attempts} failed "
+                f"({e.__class__.__name__}); retrying in {_backoff}s..."
+            )
+            time.sleep(_backoff)
+
     # Run schema migrations BEFORE any ORM queries
     try:
         import psycopg2
