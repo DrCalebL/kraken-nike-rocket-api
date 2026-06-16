@@ -798,16 +798,20 @@ class HostedTradingLoop:
                 exchange=exchange,
                 symbol=kraken_symbol,
                 entry_side=side,
-                entry_order_id=entry_order['id'],
             )
             if position_confirmed:
-                self.logger.info(f"   📊 Confirmed position: {confirmed_contracts} @ {confirmed_fill_price}")
+                self.logger.info(f"   📊 Position confirmed: {confirmed_contracts} contracts @ {confirmed_fill_price}")
+                if confirmed_contracts and confirmed_contracts + 1e-9 < quantity:
+                    self.logger.warning(
+                        f"   ⚠️ Partial fill: confirmed {confirmed_contracts} < requested {quantity}; "
+                        f"bracket sized to {quantity}"
+                    )
             else:
                 # Couldn't confirm. Proceed best-effort: a bracket rejection will
                 # trigger the emergency-close / needs_recovery safety net rather
                 # than leave a real-but-unconfirmed position silently unprotected.
                 self.logger.critical(
-                    "   ⚠️ Entry fill not confirmed within timeout — proceeding; "
+                    "   🚨 Entry fill not confirmed within timeout — proceeding; "
                     "bracket failure will trigger emergency close / guardian recovery"
                 )
             
@@ -887,16 +891,14 @@ class HostedTradingLoop:
                 return False
             
             # ==================== RECORD OPEN POSITION ====================
-            # Get entry fill price (may differ from signal due to slippage)
-            entry_fill_price = entry_price  # Default to signal price
-            try:
-                # Try to get actual fill price from order
-                filled_order = exchange.fetch_order(entry_order['id'], kraken_symbol)
-                if filled_order.get('average'):
-                    entry_fill_price = float(filled_order['average'])
-                    self.logger.info(f"   📊 Entry fill price: ${entry_fill_price:.2f}")
-            except Exception as e:
-                self.logger.warning(f"   ⚠️ Could not fetch fill price, using signal price: {e}")
+            # Entry fill price (may differ from signal due to slippage). Use the
+            # confirmed position's entry price; krakenfutures has no fetch_order,
+            # so fall back to the signal price when the position wasn't confirmed.
+            if position_confirmed and confirmed_fill_price:
+                entry_fill_price = confirmed_fill_price
+                self.logger.info(f"   📊 Entry fill price: {entry_fill_price}")
+            else:
+                entry_fill_price = entry_price  # signal price fallback
             
             # Save to open_positions table
             try:
@@ -982,17 +984,45 @@ class HostedTradingLoop:
             )
             return False
     
-    def _position_is_open(self, exchange, symbol: str) -> bool:
+    async def _get_open_position(self, exchange, symbol: str):
+        """
+        Return the live position dict for `symbol` (abs contracts > 0), or None if flat.
+
+        krakenfutures' fetch_positions(symbols=[...]) filters on the *unified*
+        symbol (e.g. 'ADA/USD:USD') and does NOT resolve native 'PF_' ids, so
+        passing the PF_ symbol returns [] (verified against ccxt 4.5.x). We
+        therefore fetch all positions and match client-side, mirroring
+        position_monitor / position_guardian. The blocking ccxt call is offloaded
+        with asyncio.to_thread so it does not stall the event loop / the rest of
+        the gather() batch. Raises on API error so callers decide how to fail.
+        """
+        try:
+            want_symbol = exchange.market(symbol)['symbol']  # unified, e.g. 'ADA/USD:USD'
+        except Exception:
+            want_symbol = None
+        base = symbol.replace('PF_', '').replace('USD', '').upper()
+
+        positions = await asyncio.to_thread(exchange.fetch_positions)
+        for pos in positions or []:
+            pos_symbol = str(pos.get('symbol') or '')
+            if want_symbol:
+                if pos_symbol != want_symbol:
+                    continue
+            elif base and base not in pos_symbol.upper():
+                continue
+            if abs(float(pos.get('contracts') or pos.get('contractSize') or 0)) > 0:
+                return pos
+        return None
+
+    async def _position_is_open(self, exchange, symbol: str) -> bool:
         """
         Return True if the exchange currently reports a non-zero position for
         `symbol`. On error, assume open — it is safer to attempt a close than to
         skip a real one.
         """
         try:
-            for pos in (exchange.fetch_positions([symbol]) or []):
-                if abs(float(pos.get('contracts') or pos.get('contractSize') or 0)) > 0:
-                    return True
-            return False
+            pos = await self._get_open_position(exchange, symbol)
+            return pos is not None
         except Exception as e:
             self.logger.warning(f"   ⚠️ Could not check position state for {symbol}: {str(e)[:120]}")
             return True
@@ -1002,8 +1032,7 @@ class HostedTradingLoop:
         exchange,
         symbol: str,
         entry_side: str,
-        entry_order_id: str = None,
-        timeout: float = 15.0,
+        timeout: float = 8.0,
         poll_interval: float = 1.0,
     ):
         """
@@ -1011,28 +1040,31 @@ class HostedTradingLoop:
         reduce-only TP/SL aren't rejected for "no position to reduce" (the race
         that left positions briefly unprotected and crashed the recovery insert).
 
-        Polls fetch_positions; if the position still isn't visible by `timeout`,
-        falls back to the entry order's fill status. Returns
-        (confirmed: bool, contracts: float, avg_price: float | None).
+        A market entry on Kraken Futures normally registers in <2s; we poll up to
+        `timeout`. Returns (confirmed: bool, contracts: float, entry_price | None).
+        krakenfutures has no fetch_order, so the position itself is the only
+        reliable confirmation signal.
         """
         want_side = 'long' if (entry_side or '').lower() == 'buy' else 'short'
+        poll_interval = max(poll_interval, 0.1)
         max_attempts = max(1, int(timeout / poll_interval))
 
         for attempt in range(1, max_attempts + 1):
             try:
-                for pos in (exchange.fetch_positions([symbol]) or []):
-                    contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
+                pos = await self._get_open_position(exchange, symbol)
+                if pos is not None:
                     pos_side = (pos.get('side') or '').lower()
-                    if contracts > 0 and pos_side in (want_side, ''):
-                        avg_price = None
+                    if pos_side in (want_side, ''):
+                        contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
+                        entry_px = None
                         try:
-                            avg_price = float(pos.get('entryPrice') or pos.get('markPrice') or 0) or None
+                            entry_px = float(pos.get('entryPrice') or 0) or None
                         except (TypeError, ValueError):
-                            avg_price = None
+                            entry_px = None
                         self.logger.info(
                             f"   ✅ Position registered ({pos_side or 'n/a'} {contracts}) after {attempt} check(s)"
                         )
-                        return True, contracts, avg_price
+                        return True, contracts, entry_px
             except Exception as e:
                 self.logger.warning(
                     f"   ⚠️ Position check failed (attempt {attempt}/{max_attempts}): {str(e)[:120]}"
@@ -1041,27 +1073,7 @@ class HostedTradingLoop:
             if attempt < max_attempts:
                 await asyncio.sleep(poll_interval)
 
-        # Position not visible — did the entry order actually fill?
-        if entry_order_id:
-            try:
-                order = exchange.fetch_order(entry_order_id, symbol)
-                status = (order.get('status') or '').lower()
-                filled = float(order.get('filled') or 0)
-                if status in ('closed', 'filled') or filled > 0:
-                    avg_price = None
-                    try:
-                        avg_price = float(order.get('average') or 0) or None
-                    except (TypeError, ValueError):
-                        avg_price = None
-                    self.logger.warning(
-                        f"   ⚠️ Position not visible after {timeout:.0f}s but entry order filled "
-                        f"(status={status}, filled={filled}) — proceeding"
-                    )
-                    return True, filled or 0.0, avg_price
-            except Exception as e:
-                self.logger.warning(f"   ⚠️ Could not verify entry fill: {str(e)[:120]}")
-
-        self.logger.error(f"   ❌ Position not confirmed for {symbol} after {timeout:.0f}s")
+        self.logger.error(f"   ❌ Position not confirmed for {symbol} after ~{timeout:.0f}s")
         return False, 0.0, None
 
     async def _emergency_close_position(
@@ -1103,7 +1115,7 @@ class HostedTradingLoop:
         # If there's no live position (entry never filled, or it already closed),
         # a reduce-only market close is rejected for "no position to reduce".
         # Check first so we don't burn retries, and treat "already flat" as done.
-        if not self._position_is_open(exchange, symbol):
+        if not await self._position_is_open(exchange, symbol):
             self.logger.critical(f"   ✅ No open position for {symbol} — nothing to emergency-close")
             close_success = True
 
@@ -1127,7 +1139,7 @@ class HostedTradingLoop:
             except Exception as e:
                 self.logger.critical(f"   ❌ EMERGENCY CLOSE attempt {attempt}/{EMERGENCY_MAX_RETRIES} FAILED: {e}")
                 # The position may simply not exist (yet/anymore); if flat, stop retrying.
-                if not self._position_is_open(exchange, symbol):
+                if not await self._position_is_open(exchange, symbol):
                     self.logger.critical(f"   ✅ Position now flat for {symbol} — treating as closed")
                     close_success = True
                     break
