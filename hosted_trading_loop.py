@@ -821,6 +821,8 @@ class HostedTradingLoop:
                     side=action.upper(),
                     leverage=leverage,
                     entry_fill_price=entry_price,
+                    target_tp=take_profit,
+                    target_sl=stop_loss,
                 )
                 return False
             
@@ -860,6 +862,8 @@ class HostedTradingLoop:
                     side=action.upper(),
                     leverage=leverage,
                     entry_fill_price=entry_price,
+                    target_tp=take_profit,
+                    target_sl=stop_loss,
                 )
                 return False
             
@@ -975,6 +979,8 @@ class HostedTradingLoop:
         side: str = None,
         leverage: float = None,
         entry_fill_price: float = None,
+        target_tp: float = None,
+        target_sl: float = None,
     ):
         """
         Emergency market close when TP/SL placement fails.
@@ -1031,6 +1037,8 @@ class HostedTradingLoop:
                 quantity=quantity,
                 leverage=leverage,
                 entry_fill_price=entry_fill_price,
+                target_tp=target_tp,
+                target_sl=target_sl,
                 reason=reason,
             )
 
@@ -1074,6 +1082,8 @@ class HostedTradingLoop:
         quantity: float,
         leverage: float = None,
         entry_fill_price: float = None,
+        target_tp: float = None,
+        target_sl: float = None,
         reason: str = None,
     ):
         """
@@ -1087,13 +1097,23 @@ class HostedTradingLoop:
             return
 
         try:
+            # target_tp / target_sl are NOT NULL on open_positions. The guardian
+            # closes needs_recovery positions at market and ignores these values,
+            # but the constraint must still be satisfied — otherwise this insert
+            # throws and a live, unprotected position is left untracked (exactly
+            # the failure mode this safety net exists to prevent). Fall back to the
+            # entry fill price if the signal targets weren't supplied so the insert
+            # can never fail on these columns.
+            fallback_price = entry_fill_price or 0.0
+            tp_value = target_tp if target_tp is not None else fallback_price
+            sl_value = target_sl if target_sl is not None else fallback_price
             async with self.db_pool.acquire() as conn:
                 await conn.execute("""
                     INSERT INTO open_positions
                     (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
                      symbol, kraken_symbol, side, quantity, leverage,
-                     entry_fill_price, opened_at, status)
-                    VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, $9, NOW(), 'needs_recovery')
+                     entry_fill_price, target_tp, target_sl, opened_at, status)
+                    VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), 'needs_recovery')
                 """,
                     user_id,
                     signal_db_id,
@@ -1104,6 +1124,8 @@ class HostedTradingLoop:
                     quantity,
                     leverage or 1.0,
                     entry_fill_price or 0.0,
+                    tp_value,
+                    sl_value,
                 )
                 self.logger.critical(f"   📝 Unprotected position recorded (status='needs_recovery') for guardian")
         except Exception as e:
