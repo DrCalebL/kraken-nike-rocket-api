@@ -3,6 +3,19 @@
 > Keep this file lean (it loads into every session). Detailed history lives in
 > `docs/progress/` — read those on demand, don't paste them here.
 
+<!-- FULL-WORKFLOW:START -->
+## Full workflow (Opus 5.5, multi-agent)
+Before each wave, reread root `CLAUDE.md`. The coordinator and every worker run Claude Opus 5.5 (`claude-opus-5-5`).
+Routine work: the coordinator builds, then one fresh, independent, read-only reviewer checks it.
+"Full workflow" (high-risk or explicitly requested) runs five stages in order, scaled to the task:
+1. **Plan** — several independent planners converge on an exact consensus spec BEFORE any code.
+2. **Build** — builders implement strictly to the spec (disjoint files, or worktrees where they would overlap).
+3. **Review** — fresh adversarial reviewers on independent lenses (correctness, coverage, regression, security/money-safety, voice).
+4. **QC** — the coordinator re-verifies every finding, fixes each worth fixing (nits too when cheap and correct), reruns affected gates, and sends material fixes to fresh review.
+5. **Deliver** — CLAUDE.md for durable facts only + a dated `docs/progress/` entry; commit, fetch, rebase on current `origin/main`, rerun gates, push only the feature branch (`--force-with-lease` only after rewriting a published branch).
+Keep this block identical in the root `CLAUDE.md` of all four rocket repos (massive-rocket-algos, kraken-nike-rocket-api, hyperliquid-nike-rocket-api, hyperliquid-vault-rocket-api) and log each touched repo in its `docs/progress/`.
+<!-- FULL-WORKFLOW:END -->
+
 ## What this is
 $NIKEPIG's Massive Rocket — a Kraken **Futures** copy-trading service. This repo is
 the **follower / hosted API**: it polls trade signals and mirrors each onto every
@@ -61,8 +74,8 @@ guardian. Symbols map via `SYMBOL_MAP` (API `ADA/USDT` → Kraken `PF_ADAUSD`).
 
 ## Conventions
 - Logging uses `   ` (3-space) indented messages with emoji prefixes (✅ ⚠️ ❌ 🚨 📊).
-- Develop on branch **`claude/gallant-allen-0i4eov`**; commit + push there; do **not**
-  open PRs unless asked. This is a **live money** system — verify before deploy.
+- Develop on the wave's feature branch (`claude/<wave>`); commit + push only that branch;
+  do **not** open PRs unless asked. This is a **live money** system — verify before deploy.
 
 ## Known pre-existing issues (not yet fixed — see progress log)
 - `hosted_trading_loop.py:415` (`check_existing_position`) still uses the broken
