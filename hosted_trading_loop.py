@@ -61,6 +61,7 @@ from order_utils import (
     place_entry_order_with_retry,
     place_tp_order_with_retry,
     place_sl_order_with_retry,
+    notify_admin,
     notify_entry_failed,
     notify_bracket_incomplete,
     notify_signal_invalid,
@@ -114,6 +115,10 @@ async def log_error_to_db(pool, api_key: str, error_type: str, error_message: st
 
 # Risk settings (default if not specified in signal)
 DEFAULT_RISK_PERCENTAGE = 0.02  # 2% default, but signal can override
+
+# Wave 1 safety timings
+VERIFY_FLAT_GAP_S = 2.0           # _verified_flat: two symbol-matched position reads this far apart
+CANCEL_VERIFY_ATTEMPTS = 3        # _cancel_order_verified: single-order cancel attempts
 
 # Polling settings
 POLL_INTERVAL_SECONDS = 10
@@ -993,6 +998,33 @@ class HostedTradingLoop:
             )
             return False
     
+    async def _verified_flat(self, exchange, symbol: str) -> bool:
+        """Two symbol-matched position reads VERIFY_FLAT_GAP_S apart, both flat. Any read error -> False."""
+        try:
+            if await self._get_open_position(exchange, symbol) is not None:
+                return False
+            await asyncio.sleep(VERIFY_FLAT_GAP_S)
+            return await self._get_open_position(exchange, symbol) is None
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ Flat verification failed for {symbol}: {str(e)[:120]}")
+            return False
+
+    async def _cancel_order_verified(self, exchange, order_id, symbol: str) -> bool:
+        """Cancel one order (up to CANCEL_VERIFY_ATTEMPTS). OrderNotFound counts as done."""
+        for attempt in range(1, CANCEL_VERIFY_ATTEMPTS + 1):
+            try:
+                await asyncio.to_thread(exchange.cancel_order, order_id, symbol)
+                self.logger.info(f"   ✅ Cancelled order {order_id}")
+                return True
+            except ccxt.OrderNotFound:
+                self.logger.info(f"   ✅ Order {order_id} already gone")
+                return True
+            except Exception as e:
+                self.logger.warning(f"   ⚠️ Cancel {order_id} attempt {attempt}/{CANCEL_VERIFY_ATTEMPTS} failed: {str(e)[:120]}")
+                if attempt < CANCEL_VERIFY_ATTEMPTS:
+                    await asyncio.sleep(attempt)
+        return False
+
     async def _get_open_position(self, exchange, symbol: str):
         """
         Return the live position dict for `symbol` (abs contracts > 0), or None if flat.
@@ -1103,13 +1135,15 @@ class HostedTradingLoop:
         entry_fill_price: float = None,
         target_tp: float = None,
         target_sl: float = None,
+        sl_order_id: str = None,
+        tp_order_id: str = None,
     ):
         """
         Emergency market close when TP/SL placement fails.
 
         Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s).
-        If all retries fail, records an unprotected position in the DB so the
-        position guardian can pick it up for recovery.
+        If all retries fail, records an unprotected position in the DB (with any
+        known service leg ids) so the position guardian can pick it up for recovery.
         """
         EMERGENCY_MAX_RETRIES = 5
         EMERGENCY_INITIAL_BACKOFF = 2.0
@@ -1176,6 +1210,8 @@ class HostedTradingLoop:
                 target_tp=target_tp,
                 target_sl=target_sl,
                 reason=reason,
+                sl_order_id=sl_order_id,
+                tp_order_id=tp_order_id,
             )
 
         # Notify admin via email
@@ -1184,8 +1220,8 @@ class HostedTradingLoop:
             user_api_key=user_api_key,
             symbol=symbol,
             entry_order_id=entry_order_id,
-            tp_placed=False,
-            sl_placed=False,
+            tp_placed=tp_order_id is not None,
+            sl_placed=sl_order_id is not None,
             error=f"{reason} - Emergency close {'SUCCESSFUL' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts - GUARDIAN RECOVERY PENDING'}"
         )
 
@@ -1221,21 +1257,30 @@ class HostedTradingLoop:
         target_tp: float = None,
         target_sl: float = None,
         reason: str = None,
+        sl_order_id: str = None,
+        tp_order_id: str = None,
     ):
         """
         Record an unprotected position in the DB with status='needs_recovery'.
 
-        This creates visibility for the position guardian to pick up and close.
-        Called when emergency close fails after all retries.
+        This creates visibility for the position guardian to pick up. Known
+        service leg ids are stored (the defaults write NULL exactly as before) so
+        the guardian can cancel or keep them. An INSERT failure is escalated as
+        NEEDS_RECOVERY_RECORD_FAILED: the position would otherwise be invisible.
         """
         if not user_id:
             self.logger.error("Cannot record unprotected position: missing user_id")
+            await notify_admin(
+                title="NEEDS_RECOVERY_RECORD_FAILED (Kraken follower)",
+                details={"Symbol": kraken_symbol, "Reason": reason, "Error": "missing user_id"},
+                level="error"
+            )
             return
 
         try:
-            # target_tp / target_sl are NOT NULL on open_positions. The guardian
-            # closes needs_recovery positions at market and ignores these values,
-            # but the constraint must still be satisfied — otherwise this insert
+            # target_tp / target_sl are NOT NULL on open_positions. In enforce mode
+            # the guardian re-brackets needs_recovery rows at these levels (legacy and
+            # shadow close them at market); the constraint must be satisfied — otherwise this insert
             # throws and a live, unprotected position is left untracked (exactly
             # the failure mode this safety net exists to prevent). Fall back to the
             # entry fill price if the signal targets weren't supplied so the insert
@@ -1249,11 +1294,13 @@ class HostedTradingLoop:
                     (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
                      symbol, kraken_symbol, side, quantity, leverage,
                      entry_fill_price, target_tp, target_sl, opened_at, status)
-                    VALUES ($1, $2, $3, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), 'needs_recovery')
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), 'needs_recovery')
                 """,
                     user_id,
                     signal_db_id,
                     entry_order_id,
+                    tp_order_id,
+                    sl_order_id,
                     signal_symbol or kraken_symbol,
                     kraken_symbol,
                     side.upper() if side else 'UNKNOWN',
@@ -1266,6 +1313,35 @@ class HostedTradingLoop:
                 self.logger.critical(f"   📝 Unprotected position recorded (status='needs_recovery') for guardian")
         except Exception as e:
             self.logger.error(f"   ❌ Failed to record unprotected position: {e}")
+            await notify_admin(
+                title="NEEDS_RECOVERY_RECORD_FAILED (Kraken follower)",
+                details={
+                    "User ID": user_id,
+                    "Symbol": kraken_symbol,
+                    "Reason": reason,
+                    "SL Order": sl_order_id or "none",
+                    "TP Order": tp_order_id or "none",
+                    "Error": str(e)[:300],
+                    "Action Required": "Position may be open with no row - check the account manually",
+                },
+                level="error"
+            )
+            return
+        await log_error_to_db(
+            self.db_pool, user_api_key, "NEEDS_RECOVERY_RECORDED", reason or "needs_recovery",
+            {"symbol": kraken_symbol, "sl_order_id": sl_order_id, "tp_order_id": tp_order_id}
+        )
+        await notify_admin(
+            title="Position recorded for guardian recovery (Kraken follower)",
+            details={
+                "User ID": user_id,
+                "Symbol": kraken_symbol,
+                "Reason": reason,
+                "SL Order": sl_order_id or "none",
+                "TP Order": tp_order_id or "none",
+            },
+            level="error"
+        )
     
     async def poll_and_execute(self):
         """
