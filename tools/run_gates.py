@@ -7,7 +7,8 @@ Local gate for kraken-nike-rocket-api (there is no GitHub Actions; spec C39 / T1
 
 1. import-check the gate dependencies; FAIL with the install hint if any is missing;
 2. py_compile the Wave 1 modules, the shared modules, tools/*.py, tests/*.py and tests/fakes/*.py;
-3. FAIL if any test file uses importorskip; run pytest over the explicit DB-free list with
+3. FAIL if any test file uses importorskip; run pytest (production credentials scrubbed from its
+   environment; tests/conftest.py blocks non-loopback network) over the explicit DB-free list with
    --junitxml, then parse the report: FAIL on any failure, error, skip or xfail, or on a listed
    module with 0 tests;
 4. sha256 (CRLF->LF normalised): bracket_guard.py + tests/test_bracket_guard.py must equal
@@ -35,7 +36,10 @@ TESTS = ('tests/test_bracket_guard.py', 'tests/test_follower_common.py', 'tests/
          'tests/test_bracket_sl_first.py', 'tests/test_position_guardian_invariant.py',
          'tests/test_guardian_row_policy.py', 'tests/test_fail_closed_and_bounds.py',
          'tests/test_endpoint_static.py', 'tests/test_post_entry_recovery.py', 'tests/test_chaos_tool.py',
-         'tests/test_admin_static.py')
+         'tests/test_admin_static.py', 'tests/test_gate_isolation.py')
+# QC security-6: never handed to the pytest child (tests/conftest.py also removes them and blocks the network)
+SCRUB_ENV = ('DATABASE_URL', 'RESEND_API_KEY', 'MASTER_API_KEY', 'ADMIN_PASSWORD', 'CREDENTIALS_ENCRYPTION_KEY',
+             'FOLLOWER_API_URL', 'COINBASE_WEBHOOK_SECRET', 'COINBASE_COMMERCE_API_KEY')
 SHARED = {
     'massive-rocket-algos': ('bracket_guard.py', 'tests/test_bracket_guard.py'),
     'hyperliquid-nike-rocket-api': ('follower_guard.py', 'signal_guard.py', 'tests/test_follower_common.py'),
@@ -104,7 +108,8 @@ def no_importorskip(gate):
 def run_pytest(gate, junit):
     cmd = [sys.executable, '-m', 'pytest', '-q', '-rA', '-p', 'no:cacheprovider', '--junitxml=%s' % junit]
     cmd += list(TESTS)
-    env = dict(os.environ, PYTHONUTF8='1')
+    env = {k: v for k, v in os.environ.items() if k not in SCRUB_ENV}
+    env['PYTHONUTF8'] = '1'
     proc = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, encoding='utf-8',
                           errors='replace')
     gate.lines.append(proc.stdout)
