@@ -217,6 +217,7 @@ class PositionGuardian:
         self.cadence_s = float(GUARDIAN_INTERVAL_SECONDS)
         self._flat = follower_guard.FlatTracker()
         self._churn = {}                      # (user_id, symbol) -> bracket_guard.ChurnGuard
+        self._churn_row = {}                  # (user_id, symbol) -> row id its ChurnGuard last served (CA-B7-4)
         self._retired = defaultdict(set)      # (user_id, symbol) -> oids this process placed or replaced
         self._alarm_last = {}                 # (user_id, symbol, code) -> last error_logs/notify time
         self._read_failures = {}              # user_id -> failed reads in a row (GUARDIAN_BLIND at BLIND_AFTER)
@@ -793,6 +794,7 @@ class PositionGuardian:
 
             await asyncio.gather(*(one(u) for u in users))
             self._flat.gc(active_ids)
+            self._gc_churn(active_ids)
             elapsed = time.monotonic() - t0
             if elapsed > self.cadence_s:
                 await self._alarm(None, '*', 'BUDGET', 'critical', {'elapsed_s': round(elapsed, 2),
@@ -802,6 +804,19 @@ class PositionGuardian:
                                   'users': len(users), 'cadence_s': self.cadence_s})
             logger.info(f"GUARDIAN_PASS full={full} dry={dry} users={len(users)} elapsed={elapsed:.2f}s")
             return elapsed
+
+    def _gc_churn(self, active_ids):
+        """
+        CA-B7-4 (runs with FlatTracker.gc at the end of every pass): drop the ChurnGuard state of each
+        (user, symbol) pair whose row is no longer active (closed, or a rowless pair), so repair history and
+        TP backoff never outlive the position they were counted for. A busy user's active row keeps its state:
+        active_ids is filled before the busy check.
+        """
+        for key in list(self._churn):
+            if self._churn_row.get(key) not in active_ids:
+                del self._churn[key]
+        for key in [k for k in self._churn_row if k not in self._churn]:
+            del self._churn_row[key]
 
     async def _enforce_user(self, user, dry, active_ids):
         uid = user['id']
@@ -904,6 +919,7 @@ class PositionGuardian:
         raw = list(acts)
         acts, alarms = follower_guard.filter_actions(acts, row, owned, pos=pos, ref_px=ref.get('last'))
         churn = self._churn.setdefault((uid, sym), bg.ChurnGuard())
+        self._churn_row[(uid, sym)] = row['id'] if row is not None else None       # CA-B7-4: GC binding
         acts, more = churn.filter(acts, legs, now, qty=pos.qty if pos is not None else None, rec=rec)
         for alarm_code, severity, ctx in alarms + more:
             await self._alarm(user, sym, alarm_code, severity, ctx)

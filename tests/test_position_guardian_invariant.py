@@ -277,3 +277,25 @@ async def test_a_service_sl_at_a_wrong_level_is_replaced_make_before_break(monke
     kinds = [(m, info.get('type')) for m, info in ex.calls() if m in ('create_order', 'cancel_order')]
     assert kinds == [('create_order', 'stop'), ('cancel_order', None)]   # new SL live BEFORE the old one goes
     assert sl_oid not in ex.orders and env.db.row(row['id'])['sl_order_id'] in ex.orders
+
+
+# ---------------- coordinator amendment CA-B7-4: churn state lives only while its row is active ----------------
+
+async def test_churn_state_is_dropped_once_its_row_is_no_longer_active(monkeypatch, notify_log):
+    """CA-B7-4: the pass-end GC (with FlatTracker.gc) drops ChurnGuard state of pairs without an active row."""
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    ex.external_cancel(sl_oid)
+    await env.g.invariant_pass(full=False, dry=False)          # SL repaired: churn state for (user, symbol)
+    key = (user['id'], SYM)
+    assert env.g._churn[key].placed['SL']
+    env.db.ack(user['id'], env.clock.utcnow())                 # an execute_trade in flight: the user yields
+    await env.g.invariant_pass(full=False, dry=False)
+    assert env.g._churn[key].placed['SL']                      # the row is still active: its state is kept
+    env.db.row(row['id'])['status'] = 'closed'                 # position_monitor recorded the close ...
+    ex.positions.clear()
+    ex.orders.clear()                                          # ... and cancelled the leftover leg
+    env.clock.advance(200)
+    await env.g.invariant_pass(full=True, dry=False)
+    assert key not in env.g._churn
