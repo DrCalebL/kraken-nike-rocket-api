@@ -871,7 +871,7 @@ class HostedTradingLoop:
             if sl_order is None:
                 self.logger.error(f"   ❌ SL order FAILED - ABORTING TRADE!")
                 # Emergency close the entry position (records needs_recovery if the close fails)
-                await self._emergency_close_position(
+                closed = await self._emergency_close_position(
                     exchange, kraken_symbol, exit_side, bracket_qty,
                     user_email, user_api_key, entry_order['id'],
                     reason="SL order failed after all retries",
@@ -884,6 +884,16 @@ class HostedTradingLoop:
                     target_tp=take_profit,
                     target_sl=stop_loss,
                 )
+                if closed and not await self._verified_flat(exchange, kraken_symbol):
+                    # CA-B7-1: a "successful" close may rest on ONE flat read; with no SL placed, a position that
+                    # is not verified flat must never be left without a row.
+                    await self._record_unprotected_position(
+                        user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
+                        entry_order_id=entry_order['id'], signal_symbol=api_symbol,
+                        kraken_symbol=kraken_symbol, side=action.upper(), quantity=bracket_qty,
+                        leverage=leverage, entry_fill_price=entry_price, target_tp=take_profit,
+                        target_sl=stop_loss, reason='SL_FAILED_CLOSE_UNVERIFIED',
+                    )
                 stage = 'done'
                 return False
             self.logger.info(f"   ✅ SL @ ${sl_price}: {sl_order['id']}")

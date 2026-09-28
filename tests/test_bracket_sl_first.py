@@ -254,3 +254,29 @@ async def test_risk_log_prints_two_decimals(monkeypatch, fast_sleep, notify_log,
     with caplog.at_level(logging.INFO, logger='HOSTED_TRADING'):
         assert await loop.execute_trade(user, signal) is True
     assert '(1.25%)' in caplog.text
+
+
+# ---------------- coordinator amendments (CA-B7-1, CA-B7-2) ----------------
+
+async def test_sl_failure_close_that_read_flat_once_records_needs_recovery(monkeypatch, fast_sleep, notify_log):
+    """CA-B7-1: the emergency close reports success on ONE flat read; the position is visible on the next read."""
+    loop, db, pool, ex, user, signal = _setup(monkeypatch)
+    sl_calls = {'n': 0}
+
+    def sl_rejected(info):
+        if not _is_sl(info):
+            return False
+        sl_calls['n'] += 1
+        if sl_calls['n'] == 6:                                      # the last SL attempt fails, then ...
+            ex.empty_position_reads = 1                             # ... the close helper's check reads flat once
+        return True
+
+    ex.fault('create_order', ccxt.ExchangeError('sl rejected'), times=6, when=sl_rejected)
+    assert await loop.execute_trade(user, signal) is False
+    assert [c for c in ex.calls('create_order') if _is_close(c[1])] == []   # 'already flat': no close was sent
+    assert ex.calls('create_limit_order') == []                             # never a TP
+    assert 'ADA/USD:USD' in ex.positions                                    # the position is still open
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] is None and row['tp_order_id'] is None
+    assert (row['quantity'], row['target_sl'], row['target_tp']) == (12500.0, 0.49, 0.52)
+    assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'SL_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
