@@ -22,6 +22,7 @@ from sqlalchemy import create_engine
 import os
 import asyncio
 import asyncpg
+import hmac
 
 # Import follower system
 from follower_models import init_db
@@ -46,6 +47,18 @@ from admin_dashboard import (
     create_error_logs_table,
     ADMIN_PASSWORD
 )
+
+
+def admin_password_ok(candidate: Optional[str]) -> bool:
+    """
+    SEC-3 (QC security-2): the admin password has no default. While ADMIN_PASSWORD is unset every admin
+    route answers 503; otherwise the candidate must match in constant time. Never log either value.
+    """
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=503, detail="Admin disabled: ADMIN_PASSWORD not configured")
+    if not candidate:
+        return False
+    return hmac.compare_digest(candidate.encode('utf-8'), ADMIN_PASSWORD.encode('utf-8'))
 
 # Import hosted trading loop for automatic signal execution
 from hosted_trading_loop import start_hosted_trading
@@ -288,8 +301,6 @@ async def root():
             "login": "/login",
             "setup": "/setup",
             "dashboard": "/dashboard",
-            "admin": "/admin?password=xxx",
-            "reset_database": "/admin/reset-database?password=xxx",
             "broadcast": "/api/broadcast-signal",
             "latest_signal": "/api/latest-signal",
             "report_pnl": "/api/report-pnl",
@@ -353,7 +364,7 @@ async def admin_dashboard(password: str = ""):
     - Error logs
     """
     # Check password
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         return HTMLResponse("""
             <!DOCTYPE html>
             <html>
@@ -522,7 +533,7 @@ async def reset_database(password: str = ""):
     """
     
     # Check password
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Invalid password")
     
     try:
@@ -613,7 +624,7 @@ async def delete_review_position(
     Admin only endpoint to clean up positions that have been manually reviewed
     """
     # Verify admin authentication
-    if x_admin_key != ADMIN_PASSWORD:
+    if not admin_password_ok(x_admin_key):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -656,20 +667,14 @@ async def update_user_tier_endpoint(
     - vip: 5% fees
     - standard: 10% fees
     """
-    print(f"[DEBUG] update-user-tier called")
-    print(f"[DEBUG] x_admin_key header received: {x_admin_key[:10] if x_admin_key else 'None'}...")
-    print(f"[DEBUG] Expected: {ADMIN_PASSWORD[:10]}...")
-    
     # Verify admin authentication
-    if x_admin_key != ADMIN_PASSWORD:
-        print(f"[DEBUG] Auth failed - header doesn't match")
+    if not admin_password_ok(x_admin_key):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
         data = await request.json()
         user_id = data.get('user_id')
         new_tier = data.get('new_tier')
-        print(f"[DEBUG] user_id={user_id}, new_tier={new_tier}")
         
         if not user_id or not new_tier:
             raise HTTPException(status_code=400, detail="Missing user_id or new_tier")
@@ -721,7 +726,7 @@ async def download_monthly_csv(
     
     Returns CSV file for download
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -754,7 +759,7 @@ async def download_yearly_csv(
     
     Returns CSV file for download
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -789,7 +794,7 @@ async def download_user_fees_csv(
     
     Returns CSV file for download
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -822,7 +827,7 @@ async def get_income_summary(
     
     Returns JSON with income data
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -842,7 +847,7 @@ async def get_available_years(password: str = ""):
     
     Returns years from earliest trade to current year
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -879,7 +884,7 @@ async def admin_check_billing_cycles(password: str = ""):
     
     Auth: Admin password required
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -900,7 +905,7 @@ async def admin_check_billing_cycles(password: str = ""):
 @app.post("/api/admin/billing/check-overdue")
 async def admin_check_overdue(password: str = ""):
     """Manually trigger overdue invoice check (reminders & suspensions)"""
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -933,7 +938,7 @@ async def admin_verify_billing_accuracy(password: str = "", auto_fix: bool = Fal
     Returns:
         Verification results including any discrepancies found
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
@@ -960,7 +965,7 @@ async def admin_test_kraken_uid(password: str = "", email: str = ""):
     """
     Debug endpoint: Test what Kraken UID we can retrieve for a user
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     import ccxt
@@ -1059,7 +1064,7 @@ async def admin_backfill_kraken_ids(password: str = "", force: bool = False):
     
     Auth: Admin password required
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     import ccxt
@@ -1236,7 +1241,7 @@ async def admin_billing_summary(password: str = ""):
     - Current cycle total profit
     - Total collected lifetime
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -1268,7 +1273,7 @@ async def admin_change_user_tier(
         tier: New tier ('team', 'vip', 'standard')
         immediate: If True, apply now. If False (default), apply at next cycle.
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     if tier not in ['team', 'vip', 'standard']:
@@ -1296,7 +1301,7 @@ async def admin_change_user_tier(
 @app.post("/api/admin/billing/waive-invoice/{user_id}")
 async def admin_waive_invoice(user_id: int, password: str = ""):
     """Waive current pending invoice for a user"""
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -1342,7 +1347,7 @@ async def admin_waive_invoice(user_id: int, password: str = ""):
 @app.post("/api/admin/billing/restore-access/{user_id}")
 async def admin_restore_access(user_id: int, password: str = ""):
     """Manually restore access for suspended user"""
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -1376,7 +1381,7 @@ async def admin_restore_access(user_id: int, password: str = ""):
 @app.get("/api/admin/billing/user-cycles/{user_id}")
 async def admin_get_user_cycles(user_id: int, password: str = ""):
     """Get billing cycle history for a user"""
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -1456,7 +1461,7 @@ async def admin_reconcile_user_trades(user_id: int, password: str = ""):
     
     Auth: Admin password required
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
@@ -1479,7 +1484,7 @@ async def admin_reconcile_all_trades(password: str = ""):
     
     Auth: Admin password required
     """
-    if password != ADMIN_PASSWORD:
+    if not admin_password_ok(password):
         raise HTTPException(status_code=401, detail="Unauthorized")
     
     try:
