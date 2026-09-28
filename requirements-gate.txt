@@ -1,6 +1,7 @@
 # Local gate dependencies for kraken-nike-rocket-api (spec C39 / R3-M4).
 # Installs on CPython 3.11-3.13 (cp313 wheels exist for all of them). This is NOT the production set:
 # Railway keeps using requirements.txt. Usage: python -m pip install -r requirements-gate.txt
+# Alternative gate env (R3-M4): py3.11 venv + pip install -r requirements.txt -r requirements-test.txt "httpx<0.28"
 pytest>=8.3
 pytest-asyncio>=0.24
 pytest-mock>=3.14
