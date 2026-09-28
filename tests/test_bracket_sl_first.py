@@ -35,15 +35,33 @@ async def test_market_entry_error_with_a_possible_position_is_not_resent(fast_sl
     assert len(ex.calls('create_market_order')) == 1
 
 
-async def test_market_entry_error_on_a_flat_account_is_retried(fast_sleep, notify_log):
+@pytest.mark.parametrize('exc', [ccxt.InvalidOrder('invalidSize'), ccxt.InsufficientFunds('margin'),
+                                 ccxt.BadRequest('bad'), ccxt.RateLimitExceeded('429')])
+async def test_market_entry_definitive_rejection_on_a_flat_account_is_retried(fast_sleep, notify_log, exc):
     ex = FakeKrakenFutures()
-    ex.fault('create_market_order', ccxt.NetworkError('timeout before the order reached Kraken'))
+    ex.fault('create_market_order', exc)
 
     async def flat():
         return False
 
     order = await order_utils.place_entry_order_with_retry(ex, 'PF_ADAUSD', 'buy', 100, confirm_position_fn=flat)
     assert order['id'].startswith('ord-') and len(ex.calls('create_market_order')) == 2
+
+
+@pytest.mark.parametrize('exc', [ccxt.NetworkError('connection reset'), ccxt.RequestTimeout('timeout'),
+                                 ccxt.ExchangeNotAvailable('502'), ccxt.ExchangeError('unknown status'),
+                                 KeyError('parse failure')])
+async def test_market_entry_transport_error_is_never_resent_even_when_the_read_is_flat(fast_sleep, notify_log, exc):
+    """QC money-followers-1: a lost response may still fill (registration lags); one flat read proves nothing."""
+    ex = FakeKrakenFutures()
+    ex.fault('create_market_order', exc)
+
+    async def flat():
+        return False
+
+    order = await order_utils.place_entry_order_with_retry(ex, 'PF_ADAUSD', 'buy', 100, confirm_position_fn=flat)
+    assert order == {'id': 'unknown-after-exception', 'info': {}}
+    assert len(ex.calls('create_market_order')) == 1
 
 
 async def test_a_failing_position_check_counts_as_a_possible_position(fast_sleep, notify_log):
@@ -238,6 +256,28 @@ async def test_market_entry_exception_with_a_position_is_not_resent(monkeypatch,
     assert ex.positions['ADA/USD:USD']['contracts'] == 12500.0
     row, = [r for r in db.rows if r['user_id'] == user['id']]
     assert row['entry_order_id'] == 'unknown-after-exception' and row['sl_order_id'] and row['tp_order_id']
+
+
+async def test_lost_entry_response_with_a_lagging_position_read_is_not_resent(monkeypatch, fast_sleep, notify_log):
+    """QC money-followers-1 / correctness-followers-3: the fill registers late, so the first read after the
+    exception is flat. The entry must not be re-sent (2x size); the bracket and row cover the one fill."""
+    loop, db, pool, ex, user, signal = _setup(monkeypatch)
+    ex.raise_after_entry_fill = 1
+    real = ex.create_market_order
+
+    def lagging(*args, **kwargs):
+        try:
+            return real(*args, **kwargs)
+        except ccxt.RequestTimeout:
+            ex.empty_position_reads = 1                             # not registered yet
+            raise
+
+    monkeypatch.setattr(ex, 'create_market_order', lagging)
+    assert await loop.execute_trade(user, signal) is True
+    assert len(ex.calls('create_market_order')) == 1
+    assert ex.positions['ADA/USD:USD']['contracts'] == 12500.0
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['quantity'] == 12500.0 and row['status'] == 'open'
 
 
 async def test_insert_failure_raises_position_record_failed(monkeypatch, fast_sleep, notify_log):

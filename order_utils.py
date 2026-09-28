@@ -35,6 +35,11 @@ from datetime import datetime
 
 import aiohttp
 
+try:
+    import ccxt
+except ImportError:          # pure-logic sandboxes: every exception then counts as non-definitive (never re-sent)
+    ccxt = None
+
 # Setup logging
 logger = logging.getLogger("ORDER_UTILS")
 
@@ -42,6 +47,21 @@ logger = logging.getLogger("ORDER_UTILS")
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
 MAX_BACKOFF = 8.0  # seconds
+
+
+
+def _definitive_rejection(exc: Exception) -> bool:
+    """
+    QC money-followers-1: True only when the venue answered and refused the order, so it was NOT executed
+    and a re-send cannot double the position. Transport errors (NetworkError, RequestTimeout,
+    ExchangeNotAvailable, DDoSProtection), a generic ExchangeError and non-ccxt errors (e.g. a response
+    ccxt failed to parse) are ambiguous: the order may have filled and registered late.
+    """
+    if ccxt is None:
+        return False
+    return isinstance(exc, (ccxt.InvalidOrder, ccxt.InsufficientFunds, ccxt.BadRequest,
+                            ccxt.AuthenticationError, ccxt.RateLimitExceeded))
+
 
 # Resend email configuration
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
@@ -178,9 +198,11 @@ async def place_order_with_retry(
         user_email: User email for notifications
         user_api_key: User API key for notifications
         notify_on_failure: Whether to send Discord notification on failure
-        confirm_position_fn: Market orders only. Awaited after an exception; True (a position
-            exists, or the read failed) means the order may have filled, so it is NOT re-sent and
-            {'id': 'unknown-after-exception', 'info': {}} is returned (double-entry guard).
+        confirm_position_fn: Market orders only (double-entry guard). After a non-definitive
+            exception (transport error, generic ExchangeError, parse failure) the order may have
+            filled, so it is NEVER re-sent and {'id': 'unknown-after-exception', 'info': {}} is
+            returned. After a definitive rejection (_definitive_rejection) it is awaited; True (a
+            position exists, or the read failed) also returns 'unknown-after-exception'.
         
     Returns:
         Order dict on success, None on failure (after all retries)
@@ -213,6 +235,14 @@ async def place_order_with_retry(
             logger.warning(f"⚠️ {order_description} failed (attempt {attempt}/{MAX_RETRIES}): {error_msg}")
 
             if order_type == "market" and confirm_position_fn is not None:
+                if not _definitive_rejection(e):
+                    # QC money-followers-1: the order may have filled while its position is not registered
+                    # yet (fill lag, gotcha 4). Never re-send; _wait_for_position and the post-entry path
+                    # decide (bracket, or needs_recovery / verified flat).
+                    logger.critical(
+                        f"🚨 {order_description} raised a non-definitive error - NOT re-sending (double-entry guard)"
+                    )
+                    return {'id': 'unknown-after-exception', 'info': {}}
                 try:
                     maybe_open = await confirm_position_fn()
                 except Exception as confirm_error:
