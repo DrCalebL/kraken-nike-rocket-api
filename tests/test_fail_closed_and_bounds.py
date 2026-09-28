@@ -161,3 +161,23 @@ def test_sec2_wrong_or_missing_key_is_401_and_the_right_key_passes(monkeypatch):
     assert client.post('/api/broadcast-signal', json=GOOD, headers={'X-Master-Key': 'wrong'}).status_code == 401
     assert client.post('/api/broadcast-signal', json=GOOD).status_code == 401
     assert client.post('/api/broadcast-signal', json=GOOD, headers=HEADERS).status_code == 200
+
+
+# ---------------- QC regression-followers-2: GUARDIAN_MAX_CONCURRENCY parsed tolerantly ----------------
+
+@pytest.mark.parametrize('raw, want', [('', 8), ('abc', 8), ('0', 1), ('-3', 1), ('700.0', 64), ('12', 12),
+                                       ('6.0', 6), (None, 8)])
+def test_guardian_max_concurrency_env_never_breaks_the_import_or_the_guardian(monkeypatch, raw, want):
+    import position_guardian as pg
+    if raw is None:
+        monkeypatch.delenv('GUARDIAN_MAX_CONCURRENCY', raising=False)
+    else:
+        monkeypatch.setenv('GUARDIAN_MAX_CONCURRENCY', raw)
+    assert pg._env_int('GUARDIAN_MAX_CONCURRENCY', 8, 1, 64) == want
+
+
+@pytest.mark.parametrize('workers', [0, -1])
+def test_guardian_constructs_with_a_nonsensical_concurrency(workers):
+    import position_guardian as pg
+    g = pg.PositionGuardian(None, max_concurrency=workers)
+    assert g._executor._max_workers >= 1

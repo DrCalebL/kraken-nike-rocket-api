@@ -48,6 +48,26 @@ from order_utils import notify_admin
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('POSITION_GUARDIAN')
 
+
+
+def _env_int(name, default, lo, hi):
+    """QC regression-followers-2: a blank, non-numeric or out-of-range owner-tuned value never breaks the import
+    (main.py imports this module) or the guardian; int(float(v)) accepts '6.0'; the result is clamped to
+    [lo, hi] and a value that differs from the raw setting is logged."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        logger.warning(f"{name}={raw!r} is not a number - using {default}")
+        return default
+    clamped = max(lo, min(hi, value))
+    if clamped != value:
+        logger.warning(f"{name}={raw!r} is outside [{lo}, {hi}] - using {clamped}")
+    return clamped
+
+
 # Configuration
 GUARDIAN_INTERVAL_SECONDS = 120       # cycle cadence
 EXCHANGE_SCAN_EVERY_N_CYCLES = 5      # legacy / rowless exchange scan every 5th cycle
@@ -55,7 +75,7 @@ INVARIANT_SCAN_EVERY_N_CYCLES = 2     # shadow dry pass / enforce full pass ever
 CLOSE_MAX_RETRIES = 5
 CLOSE_INITIAL_BACKOFF = 2.0           # 2s, 4s, 8s, 16s
 MODES = ('legacy', 'shadow', 'enforce')
-GUARDIAN_MAX_CONCURRENCY = int(os.getenv('GUARDIAN_MAX_CONCURRENCY', '8'))
+GUARDIAN_MAX_CONCURRENCY = _env_int('GUARDIAN_MAX_CONCURRENCY', 8, 1, 64)
 LEGACY_FLAT_CONFIRM_S = 5.0           # legacy recovery: a flat finding needs a re-read this much later
 ALARM_DEDUP_S = 3600.0                # error_logs + notify_admin dedup per (user, symbol, code)
 PASS_SLOW_FRACTION = 0.8              # GUARDIAN_PASS_SLOW above 80% of the cadence
@@ -210,7 +230,7 @@ class PositionGuardian:
         self._markets_loaded = set()
         self._clock = clock
         self._sleep = sleep or asyncio.sleep
-        workers = int(max_concurrency or GUARDIAN_MAX_CONCURRENCY)
+        workers = max(1, int(max_concurrency or GUARDIAN_MAX_CONCURRENCY))
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='guardian')
         self._sem = asyncio.Semaphore(workers)
         self._pass_lock = asyncio.Lock()
