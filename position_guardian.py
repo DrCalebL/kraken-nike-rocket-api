@@ -35,6 +35,7 @@ GUARDIAN_INTERVAL_SECONDS = 120       # DB-driven check every 2 minutes
 EXCHANGE_SCAN_EVERY_N_CYCLES = 5     # Full exchange scan every 5th cycle (~10 min)
 CLOSE_MAX_RETRIES = 5
 CLOSE_INITIAL_BACKOFF = 2.0          # 2s, 4s, 8s, 16s, 32s
+MODES = ('legacy', 'shadow', 'enforce')  # GUARDIAN_MODE values (follower_guard.guardian_mode)
 
 # Encryption
 ENCRYPTION_KEY = os.getenv("CREDENTIALS_ENCRYPTION_KEY")

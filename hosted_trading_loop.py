@@ -56,6 +56,8 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import os
 
+import follower_guard
+
 # Import order utilities with retry logic
 from order_utils import (
     place_entry_order_with_retry,
@@ -68,6 +70,7 @@ from order_utils import (
     notify_signal_invalid_values,
     notify_critical_error
 )
+from position_guardian import MODES as GUARDIAN_MODES
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -557,12 +560,22 @@ class HostedTradingLoop:
         
         Then places 3-order bracket:
         1. Market entry order
-        2. Limit take-profit order (reduce-only)
-        3. Stop-loss order (reduce-only)
+        2. Stop-loss order (stop, reduce-only) - FIRST, sized to the confirmed fill
+        3. Limit take-profit order (reduce-only)
         
         v2.1 UPDATE: Acknowledges signal at START to prevent race condition
         where the same signal executes twice during fast TP fills.
+        Wave 1: an in-flight token (follower_guard) is held for the whole
+        execution; the guardian never acts on a user while one is held.
         """
+        tok = follower_guard.mark(user['id'])
+        try:
+            return await self._execute_trade_locked(user, signal)
+        finally:
+            follower_guard.clear(user['id'], tok)
+
+    async def _execute_trade_locked(self, user: Dict, signal: Dict) -> bool:
+        """Body of execute_trade; runs while the user's in-flight token is held."""
         user_api_key = user['api_key']
         user_short = user_api_key[:15] + "..."
         delivery_id = signal.get('delivery_id')
@@ -576,6 +589,13 @@ class HostedTradingLoop:
             await self.acknowledge_signal(delivery_id)
             self.logger.info(f"   🔒 {user_short}: Signal acknowledged (preventing re-execution)")
         
+        # Post-entry bookkeeping (R3-H1): 'pre_entry' -> 'entry_sent' -> 'done'.
+        stage = 'pre_entry'
+        sl_order = None
+        tp_order = None
+        bracket_qty = None
+        kraken_symbol = None
+        action = signal.get('action')
         try:
             # Get exchange (may raise ValueError if credentials missing/invalid)
             try:
@@ -742,7 +762,7 @@ class HostedTradingLoop:
                     )
             
             self.logger.info(f"   💰 Equity: ${equity:,.2f}")
-            self.logger.info(f"   🎯 Risk: ${risk_amount:,.2f} ({risk_pct*100:.0f}%)")
+            self.logger.info(f"   🎯 Risk: ${risk_amount:,.2f} ({risk_pct*100:.2f}%)")
             self.logger.info(f"   📐 Position: {quantity} units @ {leverage}x leverage")
             self.logger.info(f"   💵 Position value: ${position_value:,.2f}, Margin needed: ${position_value/leverage:,.2f}")
             
@@ -779,7 +799,8 @@ class HostedTradingLoop:
                 side=side,
                 quantity=quantity,
                 user_email=user_email,
-                user_api_key=user_api_key
+                user_api_key=user_api_key,
+                confirm_position_fn=lambda: self._position_is_open(exchange, kraken_symbol),
             )
             
             if not entry_order:
@@ -799,8 +820,9 @@ class HostedTradingLoop:
                     "Entry order failed after all retries",
                     {"symbol": kraken_symbol, "side": side, "quantity": quantity}
                 )
-                return
+                return False
             
+            stage = 'entry_sent'
             self.logger.info(f"   ✅ Entry: {entry_order['id']}")
             
             # Confirm the entry fill is registered on the exchange BEFORE placing
@@ -813,12 +835,16 @@ class HostedTradingLoop:
                 symbol=kraken_symbol,
                 entry_side=side,
             )
+            if position_confirmed and confirmed_contracts and confirmed_contracts > 0:
+                bracket_qty = float(exchange.amount_to_precision(kraken_symbol, confirmed_contracts))
+            else:
+                bracket_qty = quantity
             if position_confirmed:
                 self.logger.info(f"   📊 Position confirmed: {confirmed_contracts} contracts @ {confirmed_fill_price}")
                 if confirmed_contracts and confirmed_contracts + 1e-9 < quantity:
                     self.logger.warning(
                         f"   ⚠️ Partial fill: confirmed {confirmed_contracts} < requested {quantity}; "
-                        f"bracket sized to {quantity}"
+                        f"bracket sized to {bracket_qty}"
                     )
             else:
                 # Couldn't confirm. Proceed best-effort: a bracket rejection will
@@ -829,68 +855,24 @@ class HostedTradingLoop:
                     "bracket failure will trigger emergency close / guardian recovery"
                 )
             
-            # 2. Take-profit order (limit, reduce-only) - WITH RETRY
-            self.logger.info(f"   📝 Placing take-profit order...")
-            tp_price = float(exchange.price_to_precision(kraken_symbol, take_profit))
-            tp_order = await place_tp_order_with_retry(
-                exchange=exchange,
-                symbol=kraken_symbol,
-                exit_side=exit_side,
-                quantity=quantity,
-                tp_price=tp_price,
-                user_email=user_email,
-                user_api_key=user_api_key
-            )
-            
-            tp_placed = tp_order is not None
-            if tp_placed:
-                self.logger.info(f"   ✅ TP @ ${tp_price}: {tp_order['id']}")
-            else:
-                self.logger.error(f"   ❌ TP order FAILED - ABORTING TRADE!")
-                # Emergency close the entry position
-                await self._emergency_close_position(
-                    exchange, kraken_symbol, exit_side, quantity,
-                    user_email, user_api_key, entry_order['id'],
-                    reason="TP order failed after all retries",
-                    user_id=user['id'],
-                    signal_db_id=signal_db_id,
-                    signal_symbol=api_symbol,
-                    side=action.upper(),
-                    leverage=leverage,
-                    entry_fill_price=entry_price,
-                    target_tp=take_profit,
-                    target_sl=stop_loss,
-                )
-                return False
-            
-            # 3. Stop-loss order (stop, reduce-only) - WITH RETRY
+            # 2. Stop-loss order (stop, reduce-only) - WITH RETRY. SL FIRST (I6).
             self.logger.info(f"   📝 Placing stop-loss order...")
             sl_price = float(exchange.price_to_precision(kraken_symbol, stop_loss))
             sl_order = await place_sl_order_with_retry(
                 exchange=exchange,
                 symbol=kraken_symbol,
                 exit_side=exit_side,
-                quantity=quantity,
+                quantity=bracket_qty,
                 sl_price=sl_price,
                 user_email=user_email,
                 user_api_key=user_api_key
             )
-            
-            sl_placed = sl_order is not None
-            if sl_placed:
-                self.logger.info(f"   ✅ SL @ ${sl_price}: {sl_order['id']}")
-            else:
+
+            if sl_order is None:
                 self.logger.error(f"   ❌ SL order FAILED - ABORTING TRADE!")
-                # Cancel the orphaned TP order
-                try:
-                    exchange.cancel_order(tp_order['id'], kraken_symbol)
-                    self.logger.info(f"   ✅ Orphaned TP order {tp_order['id']} cancelled")
-                except Exception as cancel_e:
-                    self.logger.warning(f"   ⚠️ Could not cancel orphaned TP: {cancel_e}")
-                
-                # Emergency close the entry position
+                # Emergency close the entry position (records needs_recovery if the close fails)
                 await self._emergency_close_position(
-                    exchange, kraken_symbol, exit_side, quantity,
+                    exchange, kraken_symbol, exit_side, bracket_qty,
                     user_email, user_api_key, entry_order['id'],
                     reason="SL order failed after all retries",
                     user_id=user['id'],
@@ -902,8 +884,82 @@ class HostedTradingLoop:
                     target_tp=take_profit,
                     target_sl=stop_loss,
                 )
+                stage = 'done'
                 return False
-            
+            self.logger.info(f"   ✅ SL @ ${sl_price}: {sl_order['id']}")
+
+            # 3. Take-profit order (limit, reduce-only) - WITH RETRY
+            self.logger.info(f"   📝 Placing take-profit order...")
+            tp_price = float(exchange.price_to_precision(kraken_symbol, take_profit))
+            tp_order = await place_tp_order_with_retry(
+                exchange=exchange,
+                symbol=kraken_symbol,
+                exit_side=exit_side,
+                quantity=bracket_qty,
+                tp_price=tp_price,
+                user_email=user_email,
+                user_api_key=user_api_key
+            )
+
+            if tp_order is not None:
+                self.logger.info(f"   ✅ TP @ ${tp_price}: {tp_order['id']}")
+            elif follower_guard.guardian_mode(GUARDIAN_MODES) == 'enforce':
+                # Keep the SL-protected position; the enforce-mode guardian re-places the TP.
+                self.logger.error(f"   ❌ TP order FAILED - keeping the position (SL live, guardian re-places TP)")
+                await log_error_to_db(
+                    self.db_pool, user_api_key, "TP_PLACE_FAILED",
+                    "TP order failed after all retries; SL live, position kept for the guardian",
+                    {"symbol": kraken_symbol, "sl_order_id": str(sl_order['id']), "tp_price": tp_price}
+                )
+                await notify_admin(
+                    title="TP_PLACE_FAILED (Kraken follower)",
+                    details={
+                        "User": user_email,
+                        "Symbol": kraken_symbol,
+                        "SL Order": str(sl_order['id']),
+                        "TP Price": tp_price,
+                        "Action": "Position kept with its SL; guardian (enforce) re-places the TP",
+                    },
+                    level="warning"
+                )
+            else:
+                # Close FIRST while the SL is live (R3-M1); cancel the SL only once flat is verified.
+                self.logger.error(f"   ❌ TP order FAILED - closing while the SL stays live")
+                sl_oid = str(sl_order['id'])
+                closed = await self._emergency_close_position(
+                    exchange, kraken_symbol, exit_side, bracket_qty,
+                    user_email, user_api_key, entry_order['id'],
+                    reason="TP order failed after all retries",
+                    user_id=user['id'],
+                    signal_db_id=signal_db_id,
+                    signal_symbol=api_symbol,
+                    side=action.upper(),
+                    leverage=leverage,
+                    entry_fill_price=entry_price,
+                    target_tp=take_profit,
+                    target_sl=stop_loss,
+                    sl_order_id=sl_oid,
+                )
+                if closed and await self._verified_flat(exchange, kraken_symbol):
+                    if not await self._cancel_order_verified(exchange, sl_oid, kraken_symbol):
+                        await self._record_unprotected_position(
+                            user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
+                            entry_order_id=entry_order['id'], signal_symbol=api_symbol,
+                            kraken_symbol=kraken_symbol, side=action.upper(), quantity=bracket_qty,
+                            leverage=leverage, entry_fill_price=entry_price, target_tp=take_profit,
+                            target_sl=stop_loss, reason='LEFTOVER_SL_CANCEL_FAILED', sl_order_id=sl_oid,
+                        )
+                elif closed:
+                    await self._record_unprotected_position(
+                        user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
+                        entry_order_id=entry_order['id'], signal_symbol=api_symbol,
+                        kraken_symbol=kraken_symbol, side=action.upper(), quantity=bracket_qty,
+                        leverage=leverage, entry_fill_price=entry_price, target_tp=take_profit,
+                        target_sl=stop_loss, reason='TP_FAILED_CLOSE_UNVERIFIED', sl_order_id=sl_oid,
+                    )
+                stage = 'done'
+                return False
+
             # ==================== RECORD OPEN POSITION ====================
             # Entry fill price (may differ from signal due to slippage). Use the
             # confirmed position's entry price; krakenfutures has no fetch_order,
@@ -937,7 +993,7 @@ class HostedTradingLoop:
                         signal['symbol'],  # BTC/USDT format
                         kraken_symbol,  # PF_XBTUSD format
                         action.upper(),  # BUY or SELL
-                        quantity,
+                        bracket_qty,
                         leverage,
                         entry_fill_price,
                         tp_price,
@@ -957,7 +1013,27 @@ class HostedTradingLoop:
                     self.logger.info(f"   📝 Open position recorded in database")
             except Exception as e:
                 self.logger.error(f"   ⚠️ Failed to record position (trade still placed): {e}")
+                await log_error_to_db(
+                    self.db_pool, user_api_key, "POSITION_RECORD_FAILED",
+                    str(e)[:200],
+                    {"symbol": kraken_symbol, "entry_order_id": str(entry_order['id']),
+                     "sl_order_id": str(sl_order['id']), "tp_order_id": str(tp_order['id']) if tp_order else None}
+                )
+                await notify_admin(
+                    title="POSITION_RECORD_FAILED (Kraken follower)",
+                    details={
+                        "User": user_email,
+                        "Symbol": kraken_symbol,
+                        "Entry Order": str(entry_order['id']),
+                        "SL Order": str(sl_order['id']),
+                        "TP Order": str(tp_order['id']) if tp_order else "none",
+                        "Error": str(e)[:300],
+                        "Impact": "Position keeps its SL/TP but has no open_positions row",
+                    },
+                    level="error"
+                )
             
+            stage = 'done'
             self.logger.info(f"   🎉 {user_short}: Trade executed successfully!")
             
             return True
