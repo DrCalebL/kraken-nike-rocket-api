@@ -36,6 +36,8 @@ import logging
 import ccxt
 from pydantic import BaseModel, EmailStr
 
+import signal_guard
+
 from follower_models import (
     User, Signal, SignalDelivery, Trade, Payment, SystemStats,
     get_db_session
@@ -253,7 +255,7 @@ class SignalBroadcast(BaseModel):
     stop_loss: float
     take_profit: float
     leverage: float
-    risk_pct: Optional[float] = 0.02  # Risk % (0.02=2% aggressive, 0.03=3% conservative)
+    risk_pct: float  # Required: the master's actual risk fraction, (0, MAX_BROADCAST_RISK_PCT] (signal_guard)
     timeframe: Optional[str] = None
     trend_strength: Optional[float] = None
     volatility: Optional[float] = None
@@ -373,6 +375,11 @@ async def broadcast_signal(
     Called by: Your Kraken algo when it opens a position
     Auth: Requires MASTER_API_KEY
     """
+    err = signal_guard.validate_signal_payload(
+        signal.action, signal.entry_price, signal.stop_loss, signal.take_profit, signal.leverage, signal.risk_pct)
+    if err:
+        logger.warning(f"🚫 Signal rejected (422): {err}")
+        raise HTTPException(status_code=422, detail=err)
     try:
         # Generate signal ID
         signal_id = secrets.token_urlsafe(16)
