@@ -591,11 +591,14 @@ class PositionGuardian:
                 str(e), {"function": "recover_db_positions"}
             )
 
-    async def _row_bracket_intact(self, exchange, row, symbol, live):
+    async def _row_bracket_intact(self, exchange, user, row, symbol, live):
         """
         A7: before a legacy close, read the orders. True when a valid SL AND a valid TP
         rest at the row's recorded levels (bracket_guard.decide finds nothing to place),
         False otherwise, None when the orders read failed (no action this cycle).
+        CA-B7-3: a failed orders read goes through _read_failed (READ_FAILED, and the 3rd
+        failed read of the user in a row raises GUARDIAN_BLIND); a good one completes a good
+        book read (the caller has just read the live position), which ends the streak.
         """
         rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT)
         pos = _pos_from_ccxt(live)
@@ -603,9 +606,15 @@ class PositionGuardian:
             return False
         try:
             orders = await self._call(exchange.fetch_open_orders)
-            market = exchange.market(self._unified(exchange, symbol))
         except Exception as e:
             logger.warning(f"⚠️ GUARDIAN: order read before legacy close failed for row {row['id']}: {e}")
+            await self._read_failed(user, symbol, 'fetch_open_orders', e)
+            return None
+        self._read_ok(user)
+        try:
+            market = exchange.market(self._unified(exchange, symbol))
+        except Exception as e:                  # a local market lookup, not an exchange read: plain READ_FAILED
+            await self._alarm(user, symbol, 'READ_FAILED', 'warning', {'call': 'market', 'error': repr(e)[:200]})
             return None
         legs = [bg.leg_from_kraken(o) for o in orders or []
                 if bg.kraken_order_matches(o, market['symbol'], market['id'])]
@@ -660,7 +669,7 @@ class PositionGuardian:
             await self._mark_position_status(pos['id'], 'closed_manual')
             return
 
-        intact = await self._row_bracket_intact(exchange, pos, kraken_symbol, live)   # A7
+        intact = await self._row_bracket_intact(exchange, user, pos, kraken_symbol, live)   # A7
         if intact is None:
             return
         if intact:

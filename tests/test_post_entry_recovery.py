@@ -325,3 +325,40 @@ async def test_enforce_close_that_reads_flat_cancels_nothing_and_keeps_the_row(m
     assert 'GUARDIAN_CLOSE_SKIPPED_FLAT' in env.db.error_types() and 'GUARDIAN_CLOSE' not in env.db.error_types()
     await env.g.invariant_pass(full=False, dry=False)                      # the next pass sees it: a real close
     assert ex.positions == {} and 'ord-tp' not in ex.orders and env.db.row(row['id'])['status'] == 'closed'
+
+
+# ---------------- coordinator amendments (CA-B7-3, CA-B7-5): legacy recovery reads and closes ----------------
+
+async def test_legacy_recovery_orders_read_failure_counts_toward_guardian_blind(monkeypatch, notify_log):
+    """CA-B7-3: the orders read before a legacy close goes through _read_failed (I1), never only a log line."""
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.fault('fetch_open_orders', ccxt.NetworkError('orders timeout'), times=3)
+    for n in (1, 2, 3):
+        await env.g._recover_single_position(_nr_view(env, row))
+        assert env.db.error_types().count('GUARDIAN_BLIND') == (1 if n == 3 else 0)
+    assert 'GUARDIAN_READ_FAILED' in env.db.error_types()
+    assert ex.calls('create_order') == [] and ex.calls('cancel_order') == []   # a failed read never acts
+    assert SYM in ex.positions and env.db.row(row['id'])['status'] == 'needs_recovery'
+    assert [n['level'] for n in notify_log if n['title'].endswith('GUARDIAN_BLIND')] == ['error']
+
+
+async def test_legacy_recovery_good_orders_read_resets_the_failed_read_streak(monkeypatch, notify_log):
+    """CA-B7-3: a good position + orders read on the legacy path ends the user's failed-read streak."""
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id='ord-tp', quantity=100.0)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.add_order(SYM, 'lmt', 'sell', 100, 0.52, oid='ord-tp')
+    ex.fault('fetch_open_orders', ccxt.NetworkError('orders timeout'), times=2)
+    view = _nr_view(env, row)
+    for _ in range(2):
+        await env.g._recover_single_position(view)
+    assert env.g._read_failures.get(user['id']) == 2
+    await env.g._recover_single_position(view)                            # a good read: A7 restores the row
+    assert env.db.row(row['id'])['status'] == 'open'
+    assert user['id'] not in env.g._read_failures and 'GUARDIAN_BLIND' not in env.db.error_types()
