@@ -359,12 +359,27 @@ class PositionGuardian:
             logger.warning(f"   ⚠️ GUARDIAN: cancel {order_id} on {symbol} failed: {e}")
             return False
 
-    async def _cancel_row_legs(self, exchange, row, symbol):
-        """Legacy edit (4): cancel the row's own real leg ids (only rows from the new failure paths carry ids)."""
+    async def _cancel_row_legs(self, exchange, row, symbol) -> bool:
+        """Legacy edit (4): cancel the row's own real leg ids (only rows from the new failure paths carry ids).
+        True when every real leg is gone (OrderNotFound counts as done). QC money-followers-3 (HL CA-B8-3 twin):
+        callers keep a row needs_recovery when this is False, so a later cycle retries the cancel."""
+        ok = True
         for key in ('sl_order_id', 'tp_order_id'):
             oid = follower_guard.real_oid(row.get(key))
             if oid:
-                await self._cancel_single(exchange, oid, symbol)
+                ok = await self._cancel_single(exchange, oid, symbol) and ok
+        return ok
+
+    async def _finish_recovery_row(self, exchange, user, row, symbol, status) -> bool:
+        """Cancel a needs_recovery row's own legs, then mark it `status`. A failed cancel keeps the row
+        needs_recovery (retried next cycle) and raises the critical GUARDIAN_RECOVERY_CANCEL_FAILED."""
+        if not await self._cancel_row_legs(exchange, row, symbol):
+            await self._alarm(user, symbol, 'RECOVERY_CANCEL_FAILED', 'critical',
+                              {'row': row['id'], 'sl_order_id': row.get('sl_order_id'),
+                               'tp_order_id': row.get('tp_order_id'), 'wanted_status': status})
+            return False
+        await self._mark_position_status(row['id'], status)
+        return True
 
     async def _attempt_market_close(
         self,
@@ -666,8 +681,7 @@ class PositionGuardian:
         if live is None:
             # Position already closed (user closed manually or liquidated)
             logger.info(f"✅ GUARDIAN: Position {pos['id']} no longer exists on Kraken - marking closed")
-            await self._cancel_row_legs(exchange, pos, kraken_symbol)       # edit (4)
-            await self._mark_position_status(pos['id'], 'closed_manual')
+            await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual')   # edit (4)
             return
 
         intact = await self._row_bracket_intact(exchange, user, pos, kraken_symbol, live)   # A7
@@ -702,13 +716,11 @@ class PositionGuardian:
                                f"position {pos['id']} stays needs_recovery for the next cycle")
                 return
             logger.info(f"✅ GUARDIAN: Position {pos['id']} flat on two reads 5 s apart - marking closed_manual")
-            await self._cancel_row_legs(exchange, pos, kraken_symbol)       # edit (4): confirmed flat
-            await self._mark_position_status(pos['id'], 'closed_manual')
+            await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual')   # edit (4)
             return
 
         if order_id:
-            await self._cancel_row_legs(exchange, pos, kraken_symbol)       # edit (4)
-            await self._mark_position_status(pos['id'], 'closed')
+            await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed')   # edit (4)
             logger.info(f"✅ GUARDIAN: Position {pos['id']} closed successfully: {order_id}")
             await self._alarm(user, kraken_symbol, 'RECOVERY_CLOSE', 'warning',      # CA-B7-5: error_logs row
                               {'position_id': pos['id'], 'order': order_id, 'side': side, 'quantity': quantity})
@@ -1038,8 +1050,7 @@ class PositionGuardian:
         self._churn.pop((user['id'], sym), None)
         await self._alarm(user, sym, 'CLOSE', severity, {'code': code, 'order': order_id})
         if row is not None and row['status'] == 'needs_recovery':
-            await self._cancel_row_legs(exchange, row, sym)
-            await self._mark_position_status(row['id'], 'closed')
+            await self._finish_recovery_row(exchange, user, row, sym, 'closed')
         return True                            # an 'open' row is left for position_monitor to record
 
     async def _execute(self, exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since) -> bool:
@@ -1049,6 +1060,7 @@ class PositionGuardian:
         protected = {o for o in (bg.trusted_sl_oid(rec), churn.placed['SL'][-1][1] if churn.placed['SL'] else None) if o}
         plan_places_sl = any(a.kind == 'PLACE_SL' for a in acts)
         placed_sl_ok = False
+        cancels_ok = True                      # QC money-followers-3: MARK_ROW_CLOSED_MANUAL needs every cancel
         done = set()
         for a in acts:
             if a.kind == 'ALARM':
@@ -1099,11 +1111,15 @@ class PositionGuardian:
                     continue
                 if a.code == 'SL_EXTRA_OR_INVALID' and plan_places_sl and not placed_sl_ok:
                     continue                   # make-before-break: the old SL stays until a new one is live
-                await self._cancel_single(exchange, oid, sym)
+                cancels_ok = await self._cancel_single(exchange, oid, sym) and cancels_ok
             elif a.kind == 'CLOSE':
                 await self._close(exchange, user, sym, row, pos, a.code, a.severity)
                 return True
             elif a.kind == 'MARK_ROW_CLOSED_MANUAL':
+                if not cancels_ok:             # a leg is still resting: keep the row; the next pass retries
+                    await self._alarm(user, sym, 'RECOVERY_CANCEL_FAILED', 'critical',
+                                      {'row': row['id'], 'wanted_status': 'closed_manual'})
+                    continue
                 await self._mark_position_status(row['id'], 'closed_manual')
                 await self._alarm(user, sym, 'ROW_CLOSED_MANUAL', 'warning', {'row': row['id']})
         if (not dry and row is not None and row['status'] == 'needs_recovery' and pos is not None

@@ -393,3 +393,101 @@ async def test_legacy_recovery_close_emits_guardian_recovery_close(monkeypatch, 
     alarms = [e for e in env.db.errors if e[0] == 'GUARDIAN_RECOVERY_CLOSE']
     assert len(alarms) == 1 and '(warning)' in alarms[0][1]
     assert [n['level'] for n in notify_log if 'GUARDIAN_RECOVERY_CLOSE' in n['title']] == ['warning']
+
+
+# ---------------- QC money-followers-3 / regression-followers-1 / coverage-followers-2 ----------------
+# A failed cancel of a needs_recovery row's own leg keeps the row needs_recovery (critical
+# GUARDIAN_RECOVERY_CANCEL_FAILED) so a later cycle retries it; the leftover SL never orphans (HL CA-B8-3 twin).
+
+def _cancel_fail_asserts(env, row, notify_log):
+    assert env.db.row(row['id'])['status'] == 'needs_recovery'
+    assert 'GUARDIAN_RECOVERY_CANCEL_FAILED' in env.db.error_types()
+    assert [n['level'] for n in notify_log if n['title'].endswith('GUARDIAN_RECOVERY_CANCEL_FAILED')] == ['error']
+
+
+async def _recover_until_inactive(env, row, cycles=6):
+    for _ in range(cycles):
+        if env.db.row(row['id'])['status'] != 'needs_recovery':
+            return
+        env.clock.advance(pg.GUARDIAN_INTERVAL_SECONDS)
+        await env.g._recover_single_position(_nr_view(env, row))
+
+
+async def test_legacy_recovery_close_with_a_failed_leg_cancel_keeps_the_row(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.fault('cancel_order', ccxt.NetworkError('cancel timeout'))
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.positions == {} and 'ord-sl' in ex.orders                 # closed; the SL cancel failed
+    _cancel_fail_asserts(env, row, notify_log)
+    await _recover_until_inactive(env, row)                             # later cycles retry the cancel
+    assert 'ord-sl' not in ex.orders and env.db.row(row['id'])['status'] == 'closed_manual'
+
+
+async def test_legacy_recovery_confirmed_flat_with_a_failed_leg_cancel_keeps_the_row(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')          # flat account, leftover service SL
+    ex.fault('cancel_order', ccxt.ExchangeNotAvailable('cancel endpoint down'))
+    await _recover_until_inactive(env, row, cycles=1)
+    for _ in range(6):
+        if ex.calls('cancel_order'):
+            break
+        await _recover_until_inactive(env, row, cycles=1)
+    assert ex.calls('cancel_order') and 'ord-sl' in ex.orders
+    _cancel_fail_asserts(env, row, notify_log)
+    await _recover_until_inactive(env, row)
+    assert 'ord-sl' not in ex.orders and env.db.row(row['id'])['status'] == 'closed_manual'
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'shadow'])
+async def test_shadow_and_legacy_cycles_never_orphan_a_leftover_sl(monkeypatch, notify_log, mode):
+    env = guardian_env(monkeypatch, mode=mode)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.fault('cancel_order', ccxt.RateLimitExceeded('429'))
+    for cycle in range(1, 9):
+        await env.g.run_cycle(cycle, mode)
+        env.clock.advance(pg.GUARDIAN_INTERVAL_SECONDS)
+    assert ex.orders == {} and env.db.row(row['id'])['status'] == 'closed_manual'
+    loop = HostedTradingLoop(env.pool)
+    blocked, _reason = await loop.check_any_open_positions_or_orders(ex, 'u')
+    assert blocked is False, _reason                                    # dedup CHECK 2 no longer blocks
+
+
+async def test_enforce_close_with_a_failed_leg_cancel_keeps_the_row(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id=None, tp_order_id='ord-tp', quantity=100.0)
+    ex.open_position(SYM, 'long', 100, 0.5, ts_ms=env.clock.ms() - 700_000)
+    ex.add_order(SYM, 'lmt', 'sell', 100, 0.52, oid='ord-tp')
+    ex.prices[SYM] = 0.485                                                 # no SL, price beyond it: CLOSE
+    ex.fault('cancel_order', ccxt.NetworkError('cancel timeout'))
+    await env.g.invariant_pass(full=False, dry=False)
+    assert ex.positions == {} and 'ord-tp' in ex.orders
+    _cancel_fail_asserts(env, row, notify_log)
+    for _ in range(4):
+        env.clock.advance(pg.GUARDIAN_INTERVAL_SECONDS)
+        await env.g.invariant_pass(full=False, dry=False)
+    assert ex.orders == {} and env.db.row(row['id'])['status'] == 'closed_manual'
+
+
+async def test_enforce_mark_closed_manual_waits_for_every_cancel_to_succeed(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='svc-sl', tp_order_id=None)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='svc-sl')
+    await env.g.invariant_pass(full=False, dry=False)
+    env.clock.advance(250)
+    ex.fault('cancel_order', ccxt.NetworkError('cancel timeout'))
+    await env.g.invariant_pass(full=False, dry=False)                      # the CANCEL fails
+    assert 'svc-sl' in ex.orders and env.db.row(row['id'])['status'] == 'needs_recovery'
+    assert 'GUARDIAN_RECOVERY_CANCEL_FAILED' in env.db.error_types()
+    env.clock.advance(pg.GUARDIAN_INTERVAL_SECONDS)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert ex.orders == {} and env.db.row(row['id'])['status'] == 'closed_manual'
