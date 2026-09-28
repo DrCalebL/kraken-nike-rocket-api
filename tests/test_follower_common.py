@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import bracket_guard as bg  # noqa: E402
 import follower_guard as fg  # noqa: E402
+import signal_guard as sg  # noqa: E402
 
 LOT, TICK = 1.0, 0.0001
 T0 = datetime(2026, 9, 28, 10, 0)                     # naive UTC, as stored in open_positions.opened_at
@@ -368,3 +369,47 @@ def test_gc_drops_inactive_rows():
         ft.resolve(rid, new_position=True)
     ft.gc([2])
     assert (set(ft.flat), set(ft.fp), ft.evidence) == ({2}, {2}, {2})
+
+
+# ---- signal_guard (I11: 422 before any DB write) ----
+
+@pytest.mark.parametrize('risk', [0.01, 0.0125, 0.02, 0.025, 0.03])
+def test_signal_guard_accepts_the_configured_fractions(risk, monkeypatch):
+    monkeypatch.delenv('MAX_BROADCAST_RISK_PCT', raising=False)
+    assert sg.validate_signal_payload('BUY', 0.47, 0.46, 0.49, 5, risk) is None
+    assert sg.validate_signal_payload('SELL', 0.47, 0.48, 0.45, 5, risk) is None
+    assert sg.validate_signal_payload('buy', '0.47', '0.46', '0.49', '1', str(risk)) is None
+
+
+@pytest.mark.parametrize('kwargs, reason', [
+    (dict(risk_pct=0), 'risk_pct must be in (0, 0.03]'),
+    (dict(risk_pct=0.05), 'risk_pct must be in (0, 0.03]'),
+    (dict(risk_pct=-0.01), 'risk_pct must be in (0, 0.03]'),
+    (dict(risk_pct=float('nan')), 'must be finite numbers'),
+    (dict(risk_pct=None), 'must be finite numbers'),
+    (dict(risk_pct='abc'), 'must be finite numbers'),
+    (dict(stop_loss=0.48), 'BUY requires 0 < stop_loss < entry_price < take_profit'),
+    (dict(take_profit=0.465), 'BUY requires 0 < stop_loss < entry_price < take_profit'),
+    (dict(stop_loss=0), 'BUY requires 0 < stop_loss < entry_price < take_profit'),
+    (dict(action='SELL'), 'SELL requires 0 < take_profit < entry_price < stop_loss'),
+    (dict(leverage=0), 'leverage must be in [1, 50]'),
+    (dict(leverage=100), 'leverage must be in [1, 50]'),
+    (dict(leverage=0.5), 'leverage must be in [1, 50]'),
+    (dict(leverage=51), 'leverage must be in [1, 50]'),
+    (dict(action='HOLD'), 'action must be BUY or SELL'),
+    (dict(action=None), 'action must be BUY or SELL'),
+])
+def test_signal_guard_rejects(kwargs, reason, monkeypatch):
+    monkeypatch.delenv('MAX_BROADCAST_RISK_PCT', raising=False)
+    payload = dict(action='BUY', entry_price=0.47, stop_loss=0.46, take_profit=0.49, leverage=5, risk_pct=0.02)
+    payload.update(kwargs)
+    got = sg.validate_signal_payload(**payload)
+    assert got is not None and reason in got
+
+
+def test_signal_guard_max_risk_from_env_or_argument(monkeypatch):
+    monkeypatch.setenv('MAX_BROADCAST_RISK_PCT', '0.02')
+    assert sg.validate_signal_payload('BUY', 0.47, 0.46, 0.49, 5, 0.025) == 'risk_pct must be in (0, 0.02]'
+    assert sg.validate_signal_payload('BUY', 0.47, 0.46, 0.49, 5, 0.025, max_risk=0.03) is None
+    monkeypatch.setenv('MAX_BROADCAST_RISK_PCT', 'junk')
+    assert sg.validate_signal_payload('BUY', 0.47, 0.46, 0.49, 5, 0.03) is None
