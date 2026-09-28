@@ -5,6 +5,7 @@ Owner-run chaos test of the Kraken follower guardian on the Kraken Futures DEMO 
 
   ROCKET_TESTNET=1 python tools/chaos_follower.py --cases a,b,c,d,e --runs 20 --i-accept-demo-orders
   python tools/chaos_follower.py --fake --cases a,b,c,d,e --runs 2      # offline self-test, no network
+  (the gate runs the --fake self-test once per case: tests/test_chaos_tool.py)
 
 Interlocks (checked before any network call; any failure exits 2):
 - --i-accept-demo-orders and ROCKET_TESTNET=1 (not needed with --fake);
@@ -244,7 +245,8 @@ async def main_async(args):
     pg.notify_admin = printed
     clock = Clock(args.fake)
     ex = make_exchange(args, clock)
-    out_dir = os.path.join(ROOT, 'chaos_out', datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+    out_dir = os.path.join(args.out or os.path.join(ROOT, 'chaos_out'),
+                           datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     os.makedirs(out_dir, exist_ok=True)
     rows, shapes = [], {}
     for case in args.cases.split(','):
@@ -283,7 +285,15 @@ def main(argv=None):
     parser.add_argument('--symbol', default=DEFAULT_SYMBOL)
     parser.add_argument('--fake', action='store_true', help='offline self-test against the test fake (no network)')
     parser.add_argument('--i-accept-demo-orders', action='store_true')
+    parser.add_argument('--out', default=None, help='output root (default: chaos_out/ in the repo)')
     args = parser.parse_args(argv)
+    # QC coverage-followers-7: emoji alarm titles must never crash a run whose output is redirected to a
+    # non-UTF-8 stream (Windows cp1252); unencodable characters are escaped instead.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='backslashreplace')
+        except (AttributeError, ValueError):
+            pass
     bad = refusals(args, os.environ)
     if bad:
         for reason in bad:
