@@ -173,6 +173,29 @@ async def test_shadow_tp_failure_unverified_close_records_row_and_keeps_the_sl(m
     assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'TP_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
 
 
+async def test_shadow_tp_failure_flat_reads_without_a_sent_close_keep_the_sl(monkeypatch, fast_sleep, notify_log):
+    """QC correctness-followers-2: the close helper read flat and sent NO close; two more false-empty reads
+    must not strip the SL of a live position. The SL stays and a needs_recovery row carries its id."""
+    loop, db, pool, ex, user, signal = _setup(monkeypatch)
+    tp_calls = {'n': 0}
+
+    def tp_rejected(info):
+        tp_calls['n'] += 1
+        if tp_calls['n'] == 3:
+            ex.empty_position_reads = 3                             # pre-check + both _verified_flat reads
+        return True
+
+    ex.fault('create_limit_order', ccxt.ExchangeError('tp rejected'), times=3, when=tp_rejected)
+    assert await loop.execute_trade(user, signal) is False
+    assert [c for c in ex.calls('create_order') if _is_close(c[1])] == []   # no close was ever sent
+    assert ex.calls('cancel_order') == []                                   # the SL was never cancelled
+    assert ex.positions['ADA/USD:USD']['contracts'] == 12500.0
+    sl_oid, = list(ex.orders)
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
+    assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'TP_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
+
+
 async def test_sl_failure_closes_once_and_never_places_a_tp(monkeypatch, fast_sleep, notify_log):
     loop, db, pool, ex, user, signal = _setup(monkeypatch)
     ex.fault('create_order', ccxt.ExchangeError('sl rejected'), times=6, when=_is_sl)

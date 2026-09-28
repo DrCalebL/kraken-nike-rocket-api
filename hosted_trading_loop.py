@@ -936,6 +936,7 @@ class HostedTradingLoop:
                 # Close FIRST while the SL is live (R3-M1); cancel the SL only once flat is verified.
                 self.logger.error(f"   ❌ TP order FAILED - closing while the SL stays live")
                 sl_oid = str(sl_order['id'])
+                close_outcome = {}
                 closed = await self._emergency_close_position(
                     exchange, kraken_symbol, exit_side, bracket_qty,
                     user_email, user_api_key, entry_order['id'],
@@ -949,8 +950,12 @@ class HostedTradingLoop:
                     target_tp=take_profit,
                     target_sl=stop_loss,
                     sl_order_id=sl_oid,
+                    outcome=close_outcome,
                 )
-                if closed and await self._verified_flat(exchange, kraken_symbol):
+                # QC correctness-followers-2: flat reads prove a close only after a close order was SENT. A
+                # "success" that rests on flat reads alone (no order sent) may be false-empty reads of a live
+                # position; its SL is kept and a needs_recovery row carries the SL id.
+                if closed and close_outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol):
                     if not await self._cancel_order_verified(exchange, sl_oid, kraken_symbol):
                         await self._record_unprotected_position(
                             user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
@@ -1287,9 +1292,14 @@ class HostedTradingLoop:
         target_sl: float = None,
         sl_order_id: str = None,
         tp_order_id: str = None,
+        outcome: Optional[Dict] = None,
     ):
         """
         Emergency market close when TP/SL placement fails.
+
+        Returns True when a close order was accepted OR the symbol read flat. `outcome` (optional dict)
+        receives 'sent': True only when a reduce-only close order was actually accepted (QC
+        correctness-followers-2: a flat read alone is never proof of a close).
 
         Retries up to 5 times with exponential backoff (2s, 4s, 8s, 16s, 32s).
         If all retries fail, records an unprotected position in the DB (with any
@@ -1303,6 +1313,7 @@ class HostedTradingLoop:
         self.logger.critical(f"   Symbol: {symbol}, Side: {exit_side}, Qty: {quantity}")
 
         close_success = False
+        close_sent = False
         close_order_id = None
 
         # If there's no live position (entry never filled, or it already closed),
@@ -1325,6 +1336,7 @@ class HostedTradingLoop:
                 )
                 close_order_id = close_order.get('id')
                 close_success = True
+                close_sent = True
                 self.logger.critical(f"   ✅ EMERGENCY CLOSE SUCCESSFUL (attempt {attempt}/{EMERGENCY_MAX_RETRIES}): {close_order_id}")
                 self.logger.critical(f"   Position closed at market - check for slippage!")
                 break
@@ -1363,6 +1375,9 @@ class HostedTradingLoop:
                 sl_order_id=sl_order_id,
                 tp_order_id=tp_order_id,
             )
+
+        if outcome is not None:
+            outcome['sent'] = close_sent
 
         # Notify admin via email
         await notify_bracket_incomplete(

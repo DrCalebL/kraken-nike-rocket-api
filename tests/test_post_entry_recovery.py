@@ -139,6 +139,23 @@ async def test_post_entry_exception_after_the_sl_records_the_sl_id(monkeypatch, 
     assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
 
 
+async def test_post_entry_exception_one_false_flat_read_keeps_the_sl_and_records_the_row(
+        monkeypatch, fast_sleep, notify_log):
+    """QC coverage-followers-5: one false-empty read after the exception is not flat (two reads needed)."""
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+
+    async def tp_raises(**kwargs):
+        ex.empty_position_reads = 1                       # the next position read is false-empty
+        raise TypeError('boom after the SL')
+
+    monkeypatch.setattr(htl, 'place_tp_order_with_retry', tp_raises)
+    assert await loop.execute_trade(user, signal) is False
+    assert ex.calls('cancel_order') == [] and SYM in ex.positions
+    sl_oid, = list(ex.orders)
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
+
+
 async def test_post_entry_exception_verified_flat_cancels_the_placed_legs(monkeypatch, fast_sleep, notify_log):
     loop, db, pool, ex, user, signal = _trading(monkeypatch)
 
