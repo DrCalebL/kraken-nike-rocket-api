@@ -216,6 +216,7 @@ class PositionGuardian:
         self._pass_lock = asyncio.Lock()
         self.cadence_s = float(GUARDIAN_INTERVAL_SECONDS)
         self._flat = follower_guard.FlatTracker()
+        self._legacy_flat = {}                # needs_recovery row id -> first confirmed-flat epoch (legacy recovery)
         self._churn = {}                      # (user_id, symbol) -> bracket_guard.ChurnGuard
         self._churn_row = {}                  # (user_id, symbol) -> row id its ChurnGuard last served (CA-B7-4)
         self._retired = defaultdict(set)      # (user_id, symbol) -> oids this process placed or replaced
@@ -592,10 +593,14 @@ class PositionGuardian:
                 positions = await conn.fetch(SQL_NEEDS_RECOVERY_ROWS)
 
             if not positions:
+                self._legacy_flat.clear()
                 return
 
             logger.info(f"🔧 Found {len(positions)} position(s) needing recovery")
 
+            ids = {p['id'] for p in positions}
+            for row_id in [k for k in self._legacy_flat if k not in ids]:
+                del self._legacy_flat[row_id]
             for pos in positions:
                 pos = dict(pos)
                 await self._recover_single_position(pos)
@@ -639,6 +644,20 @@ class PositionGuardian:
                          level_policy=follower_guard.DECIDE_LEVEL_POLICY)
         return not any(a.kind in ('PLACE_SL', 'PLACE_TP', 'CLOSE') for a in acts)
 
+    async def _legacy_flat_persisted(self, row) -> bool:
+        """
+        QC correctness-followers-2: a legacy confirmed flat (two reads 5 s apart) cancels the row's legs and
+        marks it closed_manual only once the flat has persisted bg.FLAT_PERSIST_S (240 s) across cycles, the
+        rule the invariant applies to needs_recovery rows. Two false-empty reads never strip a live SL.
+        """
+        now = self._clock()
+        first = self._legacy_flat.setdefault(row['id'], now)
+        if now - first < bg.FLAT_PERSIST_S:
+            logger.info(f"   GUARDIAN: row {row['id']} confirmed flat for {int(now - first)}s - legs kept until "
+                        f"{bg.FLAT_PERSIST_S}s")
+            return False
+        return True
+
     async def _recover_single_position(self, pos: dict):
         """Legacy close of one needs_recovery row, with the Wave 1 safety edits (1)-(6) and A7."""
         user_short = pos['api_key'][:15] + "..."
@@ -680,9 +699,13 @@ class PositionGuardian:
 
         if live is None:
             # Position already closed (user closed manually or liquidated)
+            if not await self._legacy_flat_persisted(pos):
+                return
             logger.info(f"✅ GUARDIAN: Position {pos['id']} no longer exists on Kraken - marking closed")
-            await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual')   # edit (4)
+            if await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual'):   # edit (4)
+                self._legacy_flat.pop(pos['id'], None)
             return
+        self._legacy_flat.pop(pos['id'], None)                              # seen live: the flat clock restarts
 
         intact = await self._row_bracket_intact(exchange, user, pos, kraken_symbol, live)   # A7
         if intact is None:
@@ -715,8 +738,11 @@ class PositionGuardian:
                 logger.warning(f"⚠️ GUARDIAN: {kraken_symbol} read flat once but is still open - "
                                f"position {pos['id']} stays needs_recovery for the next cycle")
                 return
-            logger.info(f"✅ GUARDIAN: Position {pos['id']} flat on two reads 5 s apart - marking closed_manual")
-            await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual')   # edit (4)
+            if not await self._legacy_flat_persisted(pos):
+                return
+            logger.info(f"✅ GUARDIAN: Position {pos['id']} confirmed flat for {bg.FLAT_PERSIST_S}s - marking closed_manual")
+            if await self._finish_recovery_row(exchange, user, pos, kraken_symbol, 'closed_manual'):   # edit (4)
+                self._legacy_flat.pop(pos['id'], None)
             return
 
         if order_id:

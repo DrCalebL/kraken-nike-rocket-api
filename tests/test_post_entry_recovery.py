@@ -220,6 +220,10 @@ async def test_legacy_recovery_is_symbol_matched_and_confirms_flat_after_5s(monk
     ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl-old')
     await env.g._recover_single_position(_nr_view(env, row))
     assert pg.LEGACY_FLAT_CONFIRM_S in env.sleep.delays                 # confirming re-read 5 s later
+    assert env.db.row(row['id'])['status'] == 'needs_recovery'          # QC: flat must persist 240 s first
+    assert 'ord-sl-old' in ex.orders and ex.calls('cancel_order') == []
+    env.clock.advance(pg.bg.FLAT_PERSIST_S)
+    await env.g._recover_single_position(_nr_view(env, row))
     assert env.db.row(row['id'])['status'] == 'closed_manual'
     assert 'ord-sl-old' not in ex.orders                                # the row's own leg was cancelled
     assert 'BTC/USD:USD' in ex.positions                                # the BTC position was not touched
@@ -304,6 +308,9 @@ async def test_legacy_recovery_flat_read_at_close_time_is_confirmed_before_anyth
     assert ex.calls('create_order') == []                                  # ALREADY_FLAT: no close order was sent
     assert env.sleep.delays == [pg.LEGACY_FLAT_CONFIRM_S]                   # edit (3): re-read 5 s later
     if really_flat:                                                        # confirmed flat: legs cancelled, closed_manual
+        assert env.db.row(row['id'])['status'] == 'needs_recovery' and 'ord-sl' in ex.orders   # not before 240 s
+        env.clock.advance(pg.bg.FLAT_PERSIST_S)
+        await env.g._recover_single_position(_nr_view(env, row))
         assert env.db.row(row['id'])['status'] == 'closed_manual' and 'ord-sl' not in ex.orders
     else:                                                                  # one false-empty read changes nothing
         assert env.db.row(row['id'])['status'] == 'needs_recovery' and SYM in ex.positions
@@ -491,3 +498,20 @@ async def test_enforce_mark_closed_manual_waits_for_every_cancel_to_succeed(monk
     env.clock.advance(pg.GUARDIAN_INTERVAL_SECONDS)
     await env.g.invariant_pass(full=False, dry=False)
     assert ex.orders == {} and env.db.row(row['id'])['status'] == 'closed_manual'
+
+
+async def test_legacy_recovery_flat_reads_under_240s_never_strip_the_sl_of_a_live_position(monkeypatch, notify_log):
+    """QC correctness-followers-2: two flat reads 5 s apart (false-empty) must not cancel the row's SL; only a
+    flat that persists FLAT_PERSIST_S across cycles does. A position seen live again resets the clock."""
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.empty_position_reads = 2                                            # both legacy reads false-empty
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.calls('cancel_order') == [] and 'ord-sl' in ex.orders
+    assert env.db.row(row['id'])['status'] == 'needs_recovery'
+    env.clock.advance(pg.bg.FLAT_PERSIST_S)
+    await env.g._recover_single_position(_nr_view(env, row))              # the position is read live: closed
+    assert ex.positions == {} and env.db.row(row['id'])['status'] == 'closed'
