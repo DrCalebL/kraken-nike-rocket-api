@@ -871,6 +871,7 @@ class HostedTradingLoop:
             if sl_order is None:
                 self.logger.error(f"   ❌ SL order FAILED - ABORTING TRADE!")
                 # Emergency close the entry position (records needs_recovery if the close fails)
+                sl_close_outcome = {}
                 closed = await self._emergency_close_position(
                     exchange, kraken_symbol, exit_side, bracket_qty,
                     user_email, user_api_key, entry_order['id'],
@@ -883,10 +884,13 @@ class HostedTradingLoop:
                     entry_fill_price=entry_price,
                     target_tp=take_profit,
                     target_sl=stop_loss,
+                    outcome=sl_close_outcome,
                 )
-                if closed and not await self._verified_flat(exchange, kraken_symbol):
-                    # CA-B7-1: a "successful" close may rest on ONE flat read; with no SL placed, a position that
-                    # is not verified flat must never be left without a row.
+                # CA-B7-1 + QC round 2: flat reads prove a close only after a close order was SENT (as in the TP
+                # branch). A "success" resting on flat reads alone may be false-empty reads of a live, SL-less
+                # position, so it always gets a needs_recovery row; the guardian retires it once flat persists.
+                if closed and not (sl_close_outcome.get('sent')
+                                   and await self._verified_flat(exchange, kraken_symbol)):
                     await self._record_unprotected_position(
                         user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
                         entry_order_id=entry_order['id'], signal_symbol=api_symbol,

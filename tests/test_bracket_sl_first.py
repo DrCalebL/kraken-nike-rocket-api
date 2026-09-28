@@ -345,6 +345,29 @@ async def test_sl_failure_close_that_read_flat_once_records_needs_recovery(monke
     assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'SL_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
 
 
+async def test_sl_failure_close_that_read_flat_three_times_still_records_needs_recovery(monkeypatch, fast_sleep, notify_log):
+    """QC round 2 (kraken-follower): the SL-failure branch follows the TP branch - flat reads prove a close
+    only after a close order was SENT. Pre-check + both _verified_flat reads false-empty must still leave a row."""
+    loop, db, pool, ex, user, signal = _setup(monkeypatch)
+    sl_calls = {'n': 0}
+
+    def sl_rejected(info):
+        if not _is_sl(info):
+            return False
+        sl_calls['n'] += 1
+        if sl_calls['n'] == 6:
+            ex.empty_position_reads = 3                             # pre-check + both _verified_flat reads
+        return True
+
+    ex.fault('create_order', ccxt.ExchangeError('sl rejected'), times=6, when=sl_rejected)
+    assert await loop.execute_trade(user, signal) is False
+    assert [c for c in ex.calls('create_order') if _is_close(c[1])] == []   # no close was ever sent
+    assert 'ADA/USD:USD' in ex.positions                                    # the position is still open
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] is None and row['tp_order_id'] is None
+    assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'SL_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
+
+
 async def test_billing_cycle_failure_after_the_insert_is_not_a_position_record_failure(monkeypatch, fast_sleep, notify_log):
     """CA-B7-2: the INSERT has its own try; a billing_cycle_start failure never claims the row is missing."""
     loop, db, pool, ex, user, signal = _setup(monkeypatch)
