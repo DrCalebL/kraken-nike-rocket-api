@@ -372,3 +372,49 @@ async def test_a2_the_rows_own_entry_fill_is_not_new_entry_evidence(monkeypatch,
     assert 'GUARDIAN_ROW_AMBIGUOUS' not in env.db.error_types()
     assert [info['type'] for m, info in ex.calls('create_order')] == ['stop', 'limit']
     assert env.db.row(row['id'])['status'] == 'open'
+
+
+# ---------------- QC coverage-followers-6: busy re-checks right before a legacy market close ----------------
+
+def _mark_busy_on_orders_read(monkeypatch, ex, user, tokens):
+    real = ex.fetch_open_orders
+
+    def fetch_open_orders(*args, **kwargs):
+        if not tokens:                                   # execute_trade starts after the first busy check
+            tokens.append(follower_guard.mark(user['id']))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ex, 'fetch_open_orders', fetch_open_orders)
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'shadow'])
+async def test_legacy_recovery_rechecks_busy_after_its_reads_and_never_closes(monkeypatch, notify_log, mode):
+    env = guardian_env(monkeypatch, mode=mode)
+    user, ex = env.user()
+    row = env.row(user, status='needs_recovery', sl_order_id=None, tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    tokens = []
+    _mark_busy_on_orders_read(monkeypatch, ex, user, tokens)
+    try:
+        await env.g._recover_single_position(next(r for r in env.db._needs_recovery_rows('fetch', '', ())
+                                                  if r['id'] == row['id']))
+    finally:
+        for tok in tokens:
+            follower_guard.clear(user['id'], tok)
+    assert tokens and ex.calls('create_order') == [] and SYM in ex.positions
+    assert env.db.row(row['id'])['status'] == 'needs_recovery'
+
+
+@pytest.mark.parametrize('rowless_only', [False, True])
+async def test_rowless_scan_rechecks_busy_before_closing(monkeypatch, notify_log, rowless_only):
+    env = guardian_env(monkeypatch, mode='enforce' if rowless_only else 'legacy')
+    user, ex = env.user()
+    ex.open_position(SYM, 'long', 100, 0.5)              # rowless, no orders: today's rule would close it
+    tokens = []
+    _mark_busy_on_orders_read(monkeypatch, ex, user, tokens)
+    try:
+        closed = await env.g._check_user_for_unprotected(dict(user), rowless_only=rowless_only)
+    finally:
+        for tok in tokens:
+            follower_guard.clear(user['id'], tok)
+    assert tokens and closed == 0 and ex.calls('create_order') == [] and SYM in ex.positions
