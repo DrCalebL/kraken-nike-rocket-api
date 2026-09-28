@@ -497,8 +497,13 @@ class HostedTradingLoop:
                         )
                         return (True, f"Open position exists: {symbol} {side}")
             except Exception as e:
-                self.logger.warning(f"   ⚠️ {user_short}: Error fetching positions: {e}")
-                # Continue to check orders even if positions check fails
+                # Fail CLOSED: a failed read must never let a second position stack.
+                self.logger.warning(f"   ⚠️ {user_short}: Error fetching positions: {e} - skipping trade")
+                await log_error_to_db(
+                    self.db_pool, user_short, "DEDUP_SKIPPED_READ_ERROR",
+                    str(e)[:200], {"function": "check_any_open_positions_or_orders", "check": "positions"}
+                )
+                return (True, f"Position check failed ({type(e).__name__}) - skipping to avoid stacking")
             
             # ===== CHECK 2: Any open orders (TP/SL leftovers) =====
             try:
@@ -516,9 +521,13 @@ class HostedTradingLoop:
                     )
                     return (True, f"Open orders exist: {len(open_orders)} orders on {symbols_list}")
             except Exception as e:
-                self.logger.warning(f"   ⚠️ {user_short}: Error fetching open orders: {e}")
-                # If we can't check orders, be cautious and allow trade
-                # (positions check is more critical)
+                # Fail CLOSED: an unreadable order book may hide a live bracket.
+                self.logger.warning(f"   ⚠️ {user_short}: Error fetching open orders: {e} - skipping trade")
+                await log_error_to_db(
+                    self.db_pool, user_short, "DEDUP_SKIPPED_READ_ERROR",
+                    str(e)[:200], {"function": "check_any_open_positions_or_orders", "check": "orders"}
+                )
+                return (True, f"Order check failed ({type(e).__name__}) - skipping to avoid stacking")
             
             # ===== ALL CLEAR =====
             return (False, None)
@@ -526,11 +535,11 @@ class HostedTradingLoop:
         except Exception as e:
             self.logger.error(f"   ❌ {user_short}: Error in safety check: {e}")
             await log_error_to_db(
-                self.db_pool, user_short, "SAFETY_CHECK_ERROR",
-                str(e), {"function": "check_any_open_positions_or_orders"}
+                self.db_pool, user_short, "DEDUP_SKIPPED_READ_ERROR",
+                str(e)[:200], {"function": "check_any_open_positions_or_orders", "check": "outer"}
             )
-            # On error, be cautious - allow trade but log warning
-            return (False, None)
+            # Fail CLOSED: skip this signal rather than risk stacking a second position
+            return (True, "Safety check error - skipping")
     
     async def execute_trade(self, user: Dict, signal: Dict) -> bool:
         """
