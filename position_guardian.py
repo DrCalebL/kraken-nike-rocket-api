@@ -59,8 +59,8 @@ def _env_int(name, default, lo, hi):
         return default
     try:
         value = int(float(raw))
-    except (TypeError, ValueError):
-        logger.warning(f"{name}={raw!r} is not a number - using {default}")
+    except (TypeError, ValueError, OverflowError):   # QC round 2: 'inf' / '1e400' raise OverflowError
+        logger.warning(f"{name}={raw!r} is not a finite number - using {default}")
         return default
     clamped = max(lo, min(hi, value))
     if clamped != value:
