@@ -166,3 +166,128 @@ async def test_post_entry_exception_verified_flat_failed_cancel_records_leftover
     row, = [r for r in db.rows if r['user_id'] == user['id']]
     assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
     assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'POST_ENTRY_EXCEPTION_LEFTOVER' for e in db.errors)
+
+
+# ---------------- legacy _recover_single_position with the safety edits (C37, A7) ----------------
+
+def _recovery_row(env, user, **fields):
+    fields.setdefault('status', 'needs_recovery')
+    return env.row(user, **fields)
+
+
+def _nr_view(env, row):
+    return next(r for r in env.db._needs_recovery_rows('fetch', '', ()) if r['id'] == row['id'])
+
+
+async def test_legacy_recovery_skips_only_while_a_later_delivery_is_acknowledged(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, opened_at=env.clock.utcnow() - timedelta(seconds=30))
+    ex.open_position(SYM, 'long', 100, 0.5)
+    env.db.ack(user['id'], env.clock.utcnow() - timedelta(seconds=60))   # acknowledged BEFORE the row: ignored
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert env.db.row(row['id'])['status'] == 'closed'                   # acted at once (today's timing)
+    row2 = _recovery_row(env, user, opened_at=env.clock.utcnow() - timedelta(seconds=30))
+    ex.open_position(SYM, 'long', 100, 0.5)
+    env.db.ack(user['id'], env.clock.utcnow() - timedelta(seconds=5))    # a LATER delivery: busy
+    before = len(ex.calls())
+    await env.g._recover_single_position(_nr_view(env, row2))
+    assert len(ex.calls()) == before and env.db.row(row2['id'])['status'] == 'needs_recovery'
+
+
+async def test_legacy_recovery_is_symbol_matched_and_confirms_flat_after_5s(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl-old', tp_order_id=None)
+    ex.open_position('BTC/USD:USD', 'long', 0.01, 60000)                # another symbol: never 'the position'
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl-old')
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert pg.LEGACY_FLAT_CONFIRM_S in env.sleep.delays                 # confirming re-read 5 s later
+    assert env.db.row(row['id'])['status'] == 'closed_manual'
+    assert 'ord-sl-old' not in ex.orders                                # the row's own leg was cancelled
+    assert 'BTC/USD:USD' in ex.positions                                # the BTC position was not touched
+    (_, sql, args), = env.pool.sql('SET status = $1, last_fill_at = NOW()')
+    assert "AND status = 'needs_recovery'" in sql and args[0] == 'closed_manual'
+
+
+async def test_legacy_recovery_single_empty_read_is_not_flat(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.empty_position_reads = 1                                         # one false-empty read
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert env.db.row(row['id'])['status'] == 'closed'                  # the re-read saw it: closed, not closed_manual
+    assert ex.positions == {} and 'ord-sl' not in ex.orders             # closed, then the row's SL cancelled
+
+
+async def test_legacy_recovery_another_active_row_is_ambiguous(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user)
+    env.row(user, status='open')
+    ex.open_position(SYM, 'long', 100, 0.5)
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.calls() == [] and 'GUARDIAN_ROW_AMBIGUOUS' in env.db.error_types()
+    assert env.db.row(row['id'])['status'] == 'needs_recovery'
+
+
+async def test_legacy_recovery_restores_an_intact_bracket_instead_of_closing(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id='ord-tp', quantity=100.0)
+    ex.open_position(SYM, 'long', 100, 0.501)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    ex.add_order(SYM, 'lmt', 'sell', 100, 0.52, oid='ord-tp')
+    await env.g._recover_single_position(_nr_view(env, row))            # A7
+    assert ex.calls('create_order') == [] and ex.calls('cancel_order') == []
+    r = env.db.row(row['id'])
+    assert r['status'] == 'open' and r['quantity'] == 100.0 and r['entry_fill_price'] == 0.501
+
+
+async def test_legacy_recovery_sl_only_still_closes(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.positions == {} and env.db.row(row['id'])['status'] == 'closed'
+    assert 'ord-sl' not in ex.orders
+
+
+def _empty_position_read(monkeypatch, ex, n, really_flat=False):
+    """fetch_positions() call number n reads []: one false-empty read, or (really_flat) because the position
+    closed just before it and stays gone. In these flows read 2 is _attempt_market_close's flat check."""
+    real, count = ex.fetch_positions, [0]
+
+    def fetch_positions(symbols=None, params=None):
+        count[0] += 1
+        if count[0] == n:
+            if really_flat:
+                ex.positions.clear()
+            else:
+                ex.empty_position_reads = 1
+        return real(symbols, params)
+
+    monkeypatch.setattr(ex, 'fetch_positions', fetch_positions)
+
+
+@pytest.mark.parametrize('really_flat', [False, True])
+async def test_legacy_recovery_flat_read_at_close_time_is_confirmed_before_anything_changes(
+        monkeypatch, notify_log, really_flat):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)   # a TP_FAILED_CLOSE_UNVERIFIED row
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')             # its SL is live
+    _empty_position_read(monkeypatch, ex, 2, really_flat)                  # only the close-time read is flat
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.calls('create_order') == []                                  # ALREADY_FLAT: no close order was sent
+    assert env.sleep.delays == [pg.LEGACY_FLAT_CONFIRM_S]                   # edit (3): re-read 5 s later
+    if really_flat:                                                        # confirmed flat: legs cancelled, closed_manual
+        assert env.db.row(row['id'])['status'] == 'closed_manual' and 'ord-sl' not in ex.orders
+    else:                                                                  # one false-empty read changes nothing
+        assert env.db.row(row['id'])['status'] == 'needs_recovery' and SYM in ex.positions
+        assert ex.calls('cancel_order') == [] and 'ord-sl' in ex.orders
