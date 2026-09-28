@@ -710,9 +710,11 @@ class PositionGuardian:
             await self._cancel_row_legs(exchange, pos, kraken_symbol)       # edit (4)
             await self._mark_position_status(pos['id'], 'closed')
             logger.info(f"✅ GUARDIAN: Position {pos['id']} closed successfully: {order_id}")
+            await self._alarm(user, kraken_symbol, 'RECOVERY_CLOSE', 'warning',      # CA-B7-5: error_logs row
+                              {'position_id': pos['id'], 'order': order_id, 'side': side, 'quantity': quantity})
 
-            await notify_admin(
-                title="🛡️ Guardian: Recovery Close Successful",
+            await notify_admin(                                                     # CA-B7-5: every close notifies
+                title="🛡️ Guardian: GUARDIAN_RECOVERY_CLOSE (recovery close successful)",
                 details={
                     "User": pos.get('email', user_short),
                     "Position ID": pos['id'],

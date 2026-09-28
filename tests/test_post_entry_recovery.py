@@ -362,3 +362,17 @@ async def test_legacy_recovery_good_orders_read_resets_the_failed_read_streak(mo
     await env.g._recover_single_position(view)                            # a good read: A7 restores the row
     assert env.db.row(row['id'])['status'] == 'open'
     assert user['id'] not in env.g._read_failures and 'GUARDIAN_BLIND' not in env.db.error_types()
+
+
+async def test_legacy_recovery_close_emits_guardian_recovery_close(monkeypatch, notify_log):
+    """CA-B7-5: a legacy needs_recovery close writes GUARDIAN_RECOVERY_CLOSE (warning) and notifies the admin."""
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None)
+    ex.open_position(SYM, 'long', 100, 0.5)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    await env.g._recover_single_position(_nr_view(env, row))
+    assert ex.positions == {} and env.db.row(row['id'])['status'] == 'closed'
+    alarms = [e for e in env.db.errors if e[0] == 'GUARDIAN_RECOVERY_CLOSE']
+    assert len(alarms) == 1 and '(warning)' in alarms[0][1]
+    assert [n['level'] for n in notify_log if 'GUARDIAN_RECOVERY_CLOSE' in n['title']] == ['warning']
