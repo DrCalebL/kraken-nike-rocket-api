@@ -1128,8 +1128,11 @@ class PositionGuardian:
             if a.kind == 'PLACE_SL':
                 oid = await self._place_leg(exchange, sym, 'SL', pos, a.level)
                 if oid is None:
-                    await self._alarm(user, sym, 'SL_REPAIR_FAILED_CLOSED', 'critical', {'level': a.level})
-                    await self._close(exchange, user, sym, row, pos, 'SL_REPAIR_FAILED_CLOSED')
+                    # QC voice-2: alarm AFTER the close, with its outcome; '..._CLOSED' only when a close went out
+                    # (a failed close already raised GUARDIAN_CLOSE_FAILED; the SL-less position stays critical).
+                    closed = await self._close(exchange, user, sym, row, pos, 'SL_REPAIR_FAILED_CLOSED')
+                    await self._alarm(user, sym, 'SL_REPAIR_FAILED_CLOSED' if closed else 'SL_REPAIR_FAILED',
+                                      'critical', {'level': a.level, 'closed': closed})
                     return True
                 await self._set_row_leg(row, SQL_SET_SL, oid)
                 self._retired[(uid, sym)].update(

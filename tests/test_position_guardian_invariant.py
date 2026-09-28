@@ -317,3 +317,36 @@ async def test_a_new_row_on_the_same_symbol_starts_with_fresh_churn_state(monkey
     env.bracket(user, ex)                                      # a new position with its own row and bracket
     await env.g.invariant_pass(full=False, dry=False)
     assert env.g._churn[key] is not old and env.g._churn[key].placed['SL'] == []
+
+
+# ---------------- QC voice-2: the SL-repair-failed alarm reports the close outcome ----------------
+
+def _is_sl_create(info):
+    return info.get('type') == 'stop'
+
+
+async def test_sl_repair_failure_with_a_successful_close_is_reported_closed(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    ex.external_cancel(sl_oid)
+    ex.fault('create_order', ccxt.ExchangeError('sl rejected'), times=3, when=_is_sl_create)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert ex.positions == {}
+    types = env.db.error_types()
+    assert 'GUARDIAN_SL_REPAIR_FAILED_CLOSED' in types and 'GUARDIAN_SL_REPAIR_FAILED' not in types
+    assert types.index('GUARDIAN_CLOSE') < types.index('GUARDIAN_SL_REPAIR_FAILED_CLOSED')   # after the close
+
+
+async def test_sl_repair_failure_with_a_failed_close_is_never_labelled_closed(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    ex.external_cancel(sl_oid)
+    ex.fault('create_order', ccxt.ExchangeError('rejected'), times=10)   # SL and every close attempt fail
+    await env.g.invariant_pass(full=False, dry=False)
+    assert SYM in ex.positions
+    types = env.db.error_types()
+    assert 'GUARDIAN_SL_REPAIR_FAILED_CLOSED' not in types
+    assert 'GUARDIAN_SL_REPAIR_FAILED' in types and 'GUARDIAN_CLOSE_FAILED' in types
+    assert not any(n['title'].endswith('SL_REPAIR_FAILED_CLOSED') for n in notify_log)
