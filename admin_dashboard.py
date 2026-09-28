@@ -188,6 +188,7 @@ def get_all_users_with_status() -> List[Dict]:
                     cur.execute("""
                         SELECT COUNT(*) FROM error_logs 
                         WHERE api_key = %s AND timestamp > NOW() - INTERVAL '24 hours'
+                          AND COALESCE(context->>'severity', '') <> 'info'
                     """, (api_key,))
                     recent_errors = cur.fetchone()[0]
                 except:
@@ -451,7 +452,9 @@ def get_stats_summary() -> Dict:
     errors_1h = 0
     if table_exists('error_logs'):
         try:
-            cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '1 hour'")
+            # QC regression-followers-4: info-severity guardian rows (YIELD_INFLIGHT, WOULD_*) are not errors
+            cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '1 hour' "
+                        "AND COALESCE(context->>'severity', '') <> 'info'")
             errors_1h = cur.fetchone()[0]
         except:
             pass
@@ -619,15 +622,17 @@ def get_error_stats() -> Dict:
         cur = conn.cursor()
         
         # Total errors
-        cur.execute("SELECT COUNT(*) FROM error_logs")
+        cur.execute("SELECT COUNT(*) FROM error_logs WHERE COALESCE(context->>'severity', '') <> 'info'")
         total = cur.fetchone()[0]
         
         # Last 24 hours
-        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '24 hours'")
+        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '24 hours' "
+                    "AND COALESCE(context->>'severity', '') <> 'info'")
         last_24h = cur.fetchone()[0]
         
         # Last 7 days
-        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '7 days'")
+        cur.execute("SELECT COUNT(*) FROM error_logs WHERE timestamp > NOW() - INTERVAL '7 days' "
+                    "AND COALESCE(context->>'severity', '') <> 'info'")
         last_7d = cur.fetchone()[0]
         
         # By type (top 10)
@@ -635,6 +640,7 @@ def get_error_stats() -> Dict:
             SELECT error_type, COUNT(*) as cnt 
             FROM error_logs 
             WHERE timestamp > NOW() - INTERVAL '7 days'
+              AND COALESCE(context->>'severity', '') <> 'info'
             GROUP BY error_type 
             ORDER BY cnt DESC 
             LIMIT 10
