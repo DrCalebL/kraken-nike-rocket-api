@@ -299,3 +299,21 @@ async def test_churn_state_is_dropped_once_its_row_is_no_longer_active(monkeypat
     env.clock.advance(200)
     await env.g.invariant_pass(full=True, dry=False)
     assert key not in env.g._churn
+
+
+async def test_a_new_row_on_the_same_symbol_starts_with_fresh_churn_state(monkeypatch, notify_log):
+    """CA-B7-4: churn state is per row, so a row that replaced a closed one between two passes inherits nothing."""
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    ex.external_cancel(sl_oid)
+    await env.g.invariant_pass(full=False, dry=False)          # SL repaired for the first row
+    key = (user['id'], SYM)
+    old = env.g._churn[key]
+    assert old.placed['SL']
+    env.db.row(row['id'])['status'] = 'closed'                 # closed and replaced before the next pass
+    ex.positions.clear()
+    ex.orders.clear()
+    env.bracket(user, ex)                                      # a new position with its own row and bracket
+    await env.g.invariant_pass(full=False, dry=False)
+    assert env.g._churn[key] is not old and env.g._churn[key].placed['SL'] == []

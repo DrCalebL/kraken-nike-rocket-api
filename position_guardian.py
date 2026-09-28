@@ -918,8 +918,11 @@ class PositionGuardian:
                 return False
         raw = list(acts)
         acts, alarms = follower_guard.filter_actions(acts, row, owned, pos=pos, ref_px=ref.get('last'))
+        rid = row['id'] if row is not None else None
+        if self._churn_row.get((uid, sym), rid) != rid:
+            self._churn.pop((uid, sym), None)          # CA-B7-4: churn state is per row, never inherited
         churn = self._churn.setdefault((uid, sym), bg.ChurnGuard())
-        self._churn_row[(uid, sym)] = row['id'] if row is not None else None       # CA-B7-4: GC binding
+        self._churn_row[(uid, sym)] = rid              # CA-B7-4: binding for the pass-end GC
         acts, more = churn.filter(acts, legs, now, qty=pos.qty if pos is not None else None, rec=rec)
         for alarm_code, severity, ctx in alarms + more:
             await self._alarm(user, sym, alarm_code, severity, ctx)
