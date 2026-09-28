@@ -980,14 +980,14 @@ class HostedTradingLoop:
             else:
                 entry_fill_price = entry_price  # signal price fallback
             
-            # Save to open_positions table
+            # Save to open_positions table. CA-B7-2: the INSERT runs in its own try, separate from the
+            # billing_cycle_start UPDATE below, so a billing-only failure never claims the row is missing.
+            # Use consistent UTC timestamp for both position and billing cycle
+            position_opened_at = datetime.utcnow()
+            position_recorded = False
             try:
                 async with self.db_pool.acquire() as conn:
                     # signal_db_id already resolved earlier (before bracket placement)
-                    
-                    # Use consistent UTC timestamp for both position and billing cycle
-                    position_opened_at = datetime.utcnow()
-                    
                     await conn.execute("""
                         INSERT INTO open_positions 
                         (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
@@ -1011,16 +1011,8 @@ class HostedTradingLoop:
                         position_opened_at,
                         'open'
                     )
-                    
-                    # Start billing cycle if not started (first trade OPEN)
-                    # Use position's opened_at to ensure the trade is included in the cycle
-                    await conn.execute("""
-                        UPDATE follower_users SET 
-                            billing_cycle_start = $2
-                        WHERE id = $1 AND billing_cycle_start IS NULL
-                    """, user['id'], position_opened_at)
-                    
-                    self.logger.info(f"   📝 Open position recorded in database")
+                position_recorded = True
+                self.logger.info(f"   📝 Open position recorded in database")
             except Exception as e:
                 self.logger.error(f"   ⚠️ Failed to record position (trade still placed): {e}")
                 await log_error_to_db(
@@ -1042,6 +1034,23 @@ class HostedTradingLoop:
                     },
                     level="error"
                 )
+
+            if position_recorded:
+                # Start billing cycle if not started (first trade OPEN)
+                # Use position's opened_at to ensure the trade is included in the cycle
+                try:
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute("""
+                            UPDATE follower_users SET 
+                                billing_cycle_start = $2
+                            WHERE id = $1 AND billing_cycle_start IS NULL
+                        """, user['id'], position_opened_at)
+                except Exception as e:
+                    self.logger.error(f"   ⚠️ Failed to start the billing cycle (position recorded): {e}")
+                    await log_error_to_db(
+                        self.db_pool, user_api_key, "BILLING_CYCLE_START_FAILED",
+                        str(e)[:200], {"function": "execute_trade", "user_id": user['id'], "symbol": kraken_symbol}
+                    )
             
             stage = 'done'
             self.logger.info(f"   🎉 {user_short}: Trade executed successfully!")

@@ -280,3 +280,15 @@ async def test_sl_failure_close_that_read_flat_once_records_needs_recovery(monke
     assert row['status'] == 'needs_recovery' and row['sl_order_id'] is None and row['tp_order_id'] is None
     assert (row['quantity'], row['target_sl'], row['target_tp']) == (12500.0, 0.49, 0.52)
     assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'SL_FAILED_CLOSE_UNVERIFIED' for e in db.errors)
+
+
+async def test_billing_cycle_failure_after_the_insert_is_not_a_position_record_failure(monkeypatch, fast_sleep, notify_log):
+    """CA-B7-2: the INSERT has its own try; a billing_cycle_start failure never claims the row is missing."""
+    loop, db, pool, ex, user, signal = _setup(monkeypatch)
+    pool.fail_on('UPDATE follower_users', RuntimeError('billing update failed'))
+    assert await loop.execute_trade(user, signal) is True
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'open' and row['sl_order_id'] and row['tp_order_id']
+    assert 'POSITION_RECORD_FAILED' not in db.error_types()
+    assert not any('POSITION_RECORD_FAILED' in n['title'] for n in notify_log)
+    assert 'BILLING_CYCLE_START_FAILED' in db.error_types()
