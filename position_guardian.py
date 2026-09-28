@@ -838,33 +838,109 @@ class PositionGuardian:
         active = [r for r in srows if r['status'] in follower_guard.ACTIVE_STATUSES]
         pos = _pos_from_ccxt(p)
         row, code = follower_guard.select_row(active, pos, lot, self._flat.evidence)
+        if row is not None and pos is not None and self._flat.pending_check(row['id']):
+            if not await self._resolve_reappearance(exchange, user, sym, row, p):
+                return True
+            row, code = follower_guard.select_row(active, pos, lot, self._flat.evidence)
         if code:
             await self._alarm(user, sym, code, 'critical', {'rows': [r['id'] for r in active]})
             return True
-        if pos is None:
-            return True                        # flat symbols: confirmed-flat handling comes with the FlatTracker
-        if row is None:
+        if row is None and pos is not None:
             return True                        # rowless live position: the 5th-cycle legacy scan owns it
+        if row is not None and pos is not None:
+            self._flat.note_live(row['id'], _fingerprint(p))
+        if row is not None and row['status'] == 'open' and pos is None:
+            await self._note_open_row_flat(exchange, user, sym, row)
+            return True                        # position_monitor records the trade, then cancels the leftover
         legs = [bg.leg_from_kraken(o) for o in orders if bg.kraken_order_matches(o, market['symbol'], market['id'])]
         owned = follower_guard.service_oids(srows) | self._retired[(uid, sym)]
-        rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT)
-        if rec is None:
+        if row is None and not any(leg.oid in owned for leg in legs):
+            return True                        # flat, rowless, only foreign orders: nothing to do
+        rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT) if row is not None else None
+        if row is not None and rec is None:
             return await self._invalid_levels(exchange, user, sym, row, dry)
         now = self._clock()
-        ref = {'last': await self._ticker_last(exchange, sym)}
+        ref = {'last': await self._ticker_last(exchange, sym)} if pos is not None else {}
         busy = await self._busy(uid, since)
         acts = bg.decide(pos, rec, legs, ref, tick, lot, now, in_flight=busy,
                          level_policy=follower_guard.DECIDE_LEVEL_POLICY)
         if busy:
             await self._yield(user)
             return False
+        if any(a.kind == 'CONFIRM_FLAT' for a in acts):
+            await self._sleep(bg.FLAT_CONFIRM_S)
+            try:
+                orders = await self._call(exchange.fetch_open_orders)     # re-read: orders FIRST
+                p = await self._symbol_position(exchange, sym)           # positions SECOND
+            except Exception as e:
+                await self._read_failed(user, sym, 'confirm_flat_reread', e)
+                return True
+            if p is not None:
+                return True                    # flat not confirmed; the next pass evaluates the position
+            legs = [bg.leg_from_kraken(o) for o in orders or []
+                    if bg.kraken_order_matches(o, market['symbol'], market['id'])]
+            now = self._clock()
+            flat_since = None
+            if row is not None:
+                age = self._flat.note_confirmed_flat(row['id'], now)
+                flat_since = now - age
+                if row['status'] == 'needs_recovery' and age < bg.FLAT_PERSIST_S:
+                    return True                # needs_recovery -> closed_manual only after 240 s confirmed flat
+            busy = await self._busy(uid, since)
+            acts = bg.decide(None, rec, legs, {}, tick, lot, now, flat_confirmed=True, flat_since=flat_since,
+                             in_flight=busy, level_policy=follower_guard.DECIDE_LEVEL_POLICY)
+            if busy:
+                await self._yield(user)
+                return False
         raw = list(acts)
         acts, alarms = follower_guard.filter_actions(acts, row, owned, pos=pos, ref_px=ref.get('last'))
         churn = self._churn.setdefault((uid, sym), bg.ChurnGuard())
-        acts, more = churn.filter(acts, legs, now, qty=pos.qty, rec=rec)
+        acts, more = churn.filter(acts, legs, now, qty=pos.qty if pos is not None else None, rec=rec)
         for alarm_code, severity, ctx in alarms + more:
             await self._alarm(user, sym, alarm_code, severity, ctx)
         return await self._execute(exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since)
+
+    async def _resolve_reappearance(self, exchange, user, sym, row, p) -> bool:
+        """
+        R3-M6 + A2: a position reappeared for a row with a confirmed flat. Same fillTime
+        fingerprint -> false flat. Otherwise fills decide: an entry-side fill since
+        FlatTracker.since_ms(row) (clamped to the row's opened_at), other than the row's own
+        entry order, is new-entry evidence (ROW_AMBIGUOUS from then on). False = fills read failed.
+        """
+        fp = _fingerprint(p)
+        if fp == self._flat.fp.get(row['id']):
+            self._flat.resolve(row['id'], False, fp)
+            await self._alarm(user, sym, 'FALSE_FLAT_CLEARED', 'warning', {'row': row['id']})
+            return True
+        since_ms = self._flat.since_ms(row)
+        try:
+            trades = await self._call(exchange.fetch_my_trades, sym, since_ms)
+        except Exception as e:
+            await self._read_failed(user, sym, 'fetch_my_trades', e)
+            return False
+        fills = [{'side': t.get('side'), 'ts_ms': t.get('timestamp'), 'opening': None,
+                  'order_id': str(t['order']) if t.get('order') is not None else None} for t in trades or []]
+        new = follower_guard.fills_show_new_entry(fills, follower_guard.row_side(row), since_ms,
+                                                  row.get('entry_order_id'))
+        self._flat.resolve(row['id'], new, None if new else fp)
+        if not new:
+            await self._alarm(user, sym, 'FALSE_FLAT_CLEARED', 'warning', {'row': row['id']})
+        return True
+
+    async def _note_open_row_flat(self, exchange, user, sym, row):
+        """'open' row, symbol flat: re-read both after 5 s; no decide(), no cancel, no UPDATE."""
+        await self._sleep(bg.FLAT_CONFIRM_S)
+        try:
+            await self._call(exchange.fetch_open_orders)                 # re-read: orders FIRST
+            p = await self._symbol_position(exchange, sym)               # positions SECOND
+        except Exception as e:
+            await self._read_failed(user, sym, 'open_row_flat_reread', e)
+            return
+        if p is not None:
+            return                             # a single empty read never counts as flat
+        age = self._flat.note_confirmed_flat(row['id'], self._clock())
+        if age > follower_guard.FLAT_ROW_UNRECORDED_S:
+            await self._alarm(user, sym, 'FLAT_ROW_UNRECORDED', 'warning', {'row': row['id'], 'flat_s': int(age)})
 
     async def _invalid_levels(self, exchange, user, sym, row, dry) -> bool:
         if row['status'] != 'needs_recovery':

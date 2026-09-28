@@ -229,3 +229,146 @@ async def test_a_pass_longer_than_its_cadence_raises_budget_and_passes_never_ove
                          env.g.invariant_pass(full=False, dry=False))
     assert peak[0] == 1
     assert 'GUARDIAN_BUDGET' in env.db.error_types()
+
+
+# ---------------- confirmed flats and fill evidence (R3-M6, A2) ----------------
+
+async def test_flat_open_row_alarms_hourly_and_a_manual_reopen_is_ambiguous(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    await env.g.invariant_pass(full=False, dry=False)          # live pass: fingerprint noted
+    ex.positions.clear()                                      # flat (the SL/TP leftovers stay)
+    for step in (0, 300, 400, 600):
+        env.clock.advance(step)
+        await env.g.invariant_pass(full=False, dry=False)
+    assert env.db.error_types().count('GUARDIAN_FLAT_ROW_UNRECORDED') == 1
+    assert env.order_calls(ex) == [] and env.pool.mutations() == []
+    ex.create_market_order(SYM, 'buy', 100)                    # the customer re-opens by hand
+    await env.g.invariant_pass(full=False, dry=False)
+    assert 'GUARDIAN_ROW_AMBIGUOUS' in env.db.error_types()
+    assert [c for c in env.order_calls(ex) if c[0] != 'create_market_order'] == []
+
+
+async def test_needs_recovery_closed_manual_only_after_240s_confirmed_flat(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row = env.row(user, status='needs_recovery', sl_order_id='svc-sl')
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='svc-sl')
+    open_row = env.row(user, symbol='BTC/USDT', kraken_symbol='PF_XBTUSD', status='open',
+                       target_sl=59000.0, target_tp=62000.0, quantity=0.01)
+    await env.g.invariant_pass(full=False, dry=False)
+    env.clock.advance(120)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert env.db.row(row['id'])['status'] == 'needs_recovery' and 'svc-sl' in ex.orders
+    env.clock.advance(130)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert env.db.row(row['id'])['status'] == 'closed_manual' and ex.orders == {}
+    (_, sql, args), = env.pool.sql('SET status = $1, last_fill_at = NOW()')
+    assert "AND status = 'needs_recovery'" in sql and args == ('closed_manual', row['id'])
+    assert env.db.row(open_row['id'])['status'] == 'open'     # CLEAR never touches an 'open' row
+
+
+async def test_rowless_flat_leftovers_only_service_orders_are_cancelled(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    env.row(user, status='closed', sl_order_id='svc-sl', last_fill_at=env.clock.utcnow() - timedelta(minutes=5))
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='svc-sl')
+    ex.add_order(SYM, 'lmt', 'sell', 50, 0.60, oid='cust-tp')
+    await env.g.invariant_pass(full=True, dry=False)
+    assert pg.bg.FLAT_CONFIRM_S in env.sleep.delays
+    assert list(ex.orders) == ['cust-tp']
+    assert 'GUARDIAN_FOREIGN_LEG_KEPT' in env.db.error_types()
+
+
+async def test_execute_trade_starting_during_confirm_flat_blocks_every_mutation(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    env.row(user, status='closed', sl_order_id='svc-sl', last_fill_at=env.clock.utcnow() - timedelta(minutes=5))
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='svc-sl')
+    tokens = []
+    env.sleep.hooks.append(lambda: tokens.append(follower_guard.mark(user['id'])))
+    try:
+        await env.g.invariant_pass(full=True, dry=False)
+    finally:
+        for tok in tokens:
+            follower_guard.clear(user['id'], tok)
+    assert tokens and ex.calls('cancel_order') == [] and 'svc-sl' in ex.orders
+    assert 'GUARDIAN_YIELD_INFLIGHT' in env.db.error_types()
+
+
+async def test_single_empty_read_is_never_counted_as_flat(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    ex.empty_position_reads = 1
+    await env.g.invariant_pass(full=False, dry=False)
+    assert pg.bg.FLAT_CONFIRM_S in env.sleep.delays                 # the 5 s confirming re-read happened
+    assert row['id'] not in env.g._flat.flat and env.order_calls(ex) == []
+
+
+async def _two_false_flats(env, ex):
+    await env.g.invariant_pass(full=False, dry=False)          # live: fingerprint noted
+    for _ in range(2):
+        env.clock.advance(120)
+        ex.empty_position_reads = 2                           # both the read and the 5 s re-read are empty
+        await env.g.invariant_pass(full=False, dry=False)
+    env.clock.advance(120)
+
+
+async def test_false_flats_then_the_same_fill_time_clears_and_repairs(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    await _two_false_flats(env, ex)
+    assert env.g._flat.pending_check(row['id'])
+    ex.external_cancel(sl_oid)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert 'GUARDIAN_FALSE_FLAT_CLEARED' in env.db.error_types()
+    assert [info['type'] for m, info in ex.calls('create_order')] == ['stop']
+    assert ex.calls('fetch_my_trades') == []                  # equal fingerprint: no fills read needed
+
+
+async def test_false_flats_then_a_new_fill_time_without_an_entry_fill_clears_and_repairs(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    await _two_false_flats(env, ex)
+    # fillTime moved (still within ROW_POS_SKEW_S of the row) but no entry-side fill exists
+    ex.positions[SYM]['timestamp'] = int(follower_guard.row_ts(row['opened_at']) * 1000) + 60_000
+    ex.external_cancel(sl_oid)
+    await env.g.invariant_pass(full=False, dry=False)
+    assert len(ex.calls('fetch_my_trades')) == 1
+    assert [info['type'] for m, info in ex.calls('create_order')] == ['stop']
+
+
+async def test_fills_read_error_means_no_action_that_pass(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, sl_oid, tp_oid = env.bracket(user, ex)
+    await _two_false_flats(env, ex)
+    ex.positions[SYM]['timestamp'] = int(follower_guard.row_ts(row['opened_at']) * 1000) + 60_000
+    ex.external_cancel(sl_oid)
+    ex.fault('fetch_my_trades', ccxt.NetworkError('fills timeout'))
+    await env.g.invariant_pass(full=False, dry=False)
+    assert ex.calls('create_order') == [] and 'GUARDIAN_READ_FAILED' in env.db.error_types()
+    await env.g.invariant_pass(full=False, dry=False)
+    assert [info['type'] for m, info in ex.calls('create_order')] == ['stop']
+
+
+async def test_a2_the_rows_own_entry_fill_is_not_new_entry_evidence(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    entry = ex.create_market_order(SYM, 'buy', 100)            # the row's own entry fill (t0)
+    ex.positions.clear()                                      # hidden: the reads come back empty
+    env.clock.advance(5)
+    row = env.row(user, status='needs_recovery', entry_order_id=entry['id'], quantity=100.0,
+                  opened_at=env.clock.utcnow())
+    for _ in range(2):                                        # two confirmed flats, inside the 60 s pad
+        env.clock.advance(15)
+        await env.g.invariant_pass(full=False, dry=False)
+    ex.open_position(SYM, 'long', 100, 0.5, ts_ms=env.clock.ms() - 40_000)   # the position becomes visible
+    await env.g.invariant_pass(full=False, dry=False)
+    assert 'GUARDIAN_ROW_AMBIGUOUS' not in env.db.error_types()
+    assert [info['type'] for m, info in ex.calls('create_order')] == ['stop', 'limit']
+    assert env.db.row(row['id'])['status'] == 'open'
