@@ -749,13 +749,278 @@ class PositionGuardian:
         except Exception as e:
             logger.error(f"❌ Exchange scan failed: {e}")
 
+    # ==================== Two-leg invariant (shadow = dry, enforce = acts) ====================
+
+    async def _pass_users(self, full: bool):
+        """Users with an active row first (oldest row first); full adds active and recently-closed users."""
+        async with self.db_pool.acquire() as conn:
+            first = [dict(r) for r in await conn.fetch(SQL_USERS_WITH_ACTIVE_ROWS)]
+            if not full:
+                return first
+            rest = ([dict(r) for r in await conn.fetch(SQL_ACTIVE_USERS)]
+                    + [dict(r) for r in await conn.fetch(SQL_RECENTLY_CLOSED_USERS)])
+        seen = {u['id'] for u in first}
+        users = list(first)
+        for u in rest:
+            if u['id'] not in seen:
+                seen.add(u['id'])
+                users.append(u)
+        return users
+
+    async def invariant_pass(self, full: bool, dry: bool) -> float:
+        """One pass over the users; passes never overlap. Returns the pass duration in seconds."""
+        async with self._pass_lock:
+            t0 = time.monotonic()
+            self._ticker_cache = {}
+            users = await self._pass_users(full)
+            active_ids = set()
+
+            async def one(user):
+                async with self._sem:
+                    try:
+                        await self._enforce_user(user, dry, active_ids)
+                    except Exception as e:
+                        await self._alarm(user, '*', 'EXCEPTION', 'critical', {'error': repr(e)[:200]})
+
+            await asyncio.gather(*(one(u) for u in users))
+            self._flat.gc(active_ids)
+            elapsed = time.monotonic() - t0
+            if elapsed > self.cadence_s:
+                await self._alarm(None, '*', 'BUDGET', 'critical', {'elapsed_s': round(elapsed, 2),
+                                  'users': len(users), 'cadence_s': self.cadence_s})
+            elif elapsed > PASS_SLOW_FRACTION * self.cadence_s:
+                await self._alarm(None, '*', 'PASS_SLOW', 'warning', {'elapsed_s': round(elapsed, 2),
+                                  'users': len(users), 'cadence_s': self.cadence_s})
+            logger.info(f"GUARDIAN_PASS full={full} dry={dry} users={len(users)} elapsed={elapsed:.2f}s")
+            return elapsed
+
+    async def _enforce_user(self, user, dry, active_ids):
+        uid = user['id']
+        rows = await self._rows_for_user(uid)
+        active_ids.update(r['id'] for r in rows if r['status'] in follower_guard.ACTIVE_STATUSES)
+        since = _busy_since(rows)
+        if await self._busy(uid, since):
+            return await self._yield(user)
+        exchange = await self._exchange_for(user)
+        if exchange is None:
+            return
+        call = 'fetch_open_orders'
+        try:
+            orders = await self._call(exchange.fetch_open_orders)      # FIRST (no-arg: includes trigger orders)
+            call = 'fetch_positions'
+            positions = await self._call(exchange.fetch_positions)     # SECOND (no-arg: PF_ gotcha)
+        except Exception as e:
+            return await self._read_failed(user, '*', call, e)         # never acts; the 3rd in a row: GUARDIAN_BLIND
+        self._read_ok(user)
+        if await self._busy(uid, since):
+            return await self._yield(user)
+        by_sym = defaultdict(list)
+        for r in rows:                                                  # LISTS, never one row per symbol
+            by_sym[self._unified(exchange, r.get('kraken_symbol') or r.get('symbol'))].append(r)
+        live = {p.get('symbol'): p for p in positions or [] if abs(float(p.get('contracts') or 0)) > 0}
+        syms = (set(live)
+                | {s for s, rs in by_sym.items() if any(r['status'] in follower_guard.ACTIVE_STATUSES for r in rs)}
+                | {o.get('symbol') for o in orders or [] if o.get('symbol')})
+        for sym in sorted(s for s in syms if s):
+            if not await self._enforce_symbol(exchange, user, sym, by_sym.get(sym, []), orders or [],
+                                              live.get(sym), dry, since):
+                return
+
+    async def _enforce_symbol(self, exchange, user, sym, srows, orders, p, dry, since) -> bool:
+        """Evaluate one (user, symbol). Returns False when the user became busy (yield the rest of the pass)."""
+        uid = user['id']
+        try:
+            market = exchange.market(sym)
+            tick, lot = float(market['precision']['price']), float(market['precision']['amount'])
+        except Exception as e:
+            await self._alarm(user, sym, 'READ_FAILED', 'warning', {'call': 'market', 'error': repr(e)[:200]})
+            return True
+        active = [r for r in srows if r['status'] in follower_guard.ACTIVE_STATUSES]
+        pos = _pos_from_ccxt(p)
+        row, code = follower_guard.select_row(active, pos, lot, self._flat.evidence)
+        if code:
+            await self._alarm(user, sym, code, 'critical', {'rows': [r['id'] for r in active]})
+            return True
+        if pos is None:
+            return True                        # flat symbols: confirmed-flat handling comes with the FlatTracker
+        if row is None:
+            return True                        # rowless live position: the 5th-cycle legacy scan owns it
+        legs = [bg.leg_from_kraken(o) for o in orders if bg.kraken_order_matches(o, market['symbol'], market['id'])]
+        owned = follower_guard.service_oids(srows) | self._retired[(uid, sym)]
+        rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT)
+        if rec is None:
+            return await self._invalid_levels(exchange, user, sym, row, dry)
+        now = self._clock()
+        ref = {'last': await self._ticker_last(exchange, sym)}
+        busy = await self._busy(uid, since)
+        acts = bg.decide(pos, rec, legs, ref, tick, lot, now, in_flight=busy,
+                         level_policy=follower_guard.DECIDE_LEVEL_POLICY)
+        if busy:
+            await self._yield(user)
+            return False
+        raw = list(acts)
+        acts, alarms = follower_guard.filter_actions(acts, row, owned, pos=pos, ref_px=ref.get('last'))
+        churn = self._churn.setdefault((uid, sym), bg.ChurnGuard())
+        acts, more = churn.filter(acts, legs, now, qty=pos.qty, rec=rec)
+        for alarm_code, severity, ctx in alarms + more:
+            await self._alarm(user, sym, alarm_code, severity, ctx)
+        return await self._execute(exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since)
+
+    async def _invalid_levels(self, exchange, user, sym, row, dry) -> bool:
+        if row['status'] != 'needs_recovery':
+            await self._alarm(user, sym, 'ROW_LEVELS_INVALID', 'critical', {'row': row['id']})
+            return True
+        if dry:
+            await self._alarm(user, sym, 'WOULD_LEGACY_CLOSE', 'info', {'row': row['id']})
+            return True
+        await self._recover_single_position(dict(
+            row, api_key=user['api_key'], email=user.get('email'),
+            kraken_api_key_encrypted=user.get('kraken_api_key_encrypted'),
+            kraken_api_secret_encrypted=user.get('kraken_api_secret_encrypted')))
+        return True
+
+    async def _ticker_last(self, exchange, sym):
+        if sym in self._ticker_cache:
+            return self._ticker_cache[sym]
+        try:
+            ticker = await self._call(exchange.fetch_ticker, sym)
+            px = float(ticker['last']) if ticker and ticker.get('last') is not None else None
+        except Exception as e:
+            logger.warning(f"⚠️ GUARDIAN: ticker read failed for {sym}: {e}")
+            px = None
+        self._ticker_cache[sym] = px
+        return px
+
+    async def _place_leg(self, exchange, sym, leg, pos, level) -> Optional[str]:
+        """PLACE_SL: stop (stop-market) reduce-only; PLACE_TP: limit reduce-only. 3 attempts."""
+        xs = 'sell' if pos.side > 0 else 'buy'
+        for attempt in range(1, bg.SL_PLACE_ATTEMPTS + 1):
+            try:
+                if leg == 'SL':
+                    order = await self._call(exchange.create_order, sym, 'stop', xs, pos.qty, None,
+                                             {'triggerPrice': level, 'reduceOnly': True})
+                else:
+                    order = await self._call(exchange.create_order, sym, 'limit', xs, pos.qty, level,
+                                             {'reduceOnly': True})
+                return str(order['id'])
+            except Exception as e:
+                logger.warning(f"   ❌ GUARDIAN: {leg} placement attempt {attempt}/{bg.SL_PLACE_ATTEMPTS} "
+                               f"failed for {sym}: {e}")
+                if attempt < bg.SL_PLACE_ATTEMPTS:
+                    await self._sleep(attempt)
+        return None
+
+    async def _set_row_leg(self, row, sql, oid):
+        if row is None:
+            return
+        async with self.db_pool.acquire() as conn:
+            await conn.execute(sql, oid, row['id'])
+
+    async def _close(self, exchange, user, sym, row, pos, code, severity='critical') -> bool:
+        """Reduce-only market close. True only when a close order went out."""
+        xs = 'sell' if pos.side > 0 else 'buy'
+        order_id = await self._attempt_market_close(exchange, sym, xs, pos.qty)
+        if not order_id:
+            await self._alarm(user, sym, 'CLOSE_FAILED', 'critical', {'code': code})
+            return False
+        if order_id == ALREADY_FLAT:
+            # ONE flat read is neither a close nor a confirmed flat (I5): no leg cancel, no row change. The next
+            # pass re-reads: a live position is decided again; a real flat goes through CONFIRM_FLAT and the
+            # FlatTracker (a needs_recovery row becomes closed_manual only after 240 s of confirmed flat).
+            await self._alarm(user, sym, 'CLOSE_SKIPPED_FLAT', 'warning', {'code': code})
+            return False
+        self._churn.pop((user['id'], sym), None)
+        await self._alarm(user, sym, 'CLOSE', severity, {'code': code, 'order': order_id})
+        if row is not None and row['status'] == 'needs_recovery':
+            await self._cancel_row_legs(exchange, row, sym)
+            await self._mark_position_status(row['id'], 'closed')
+        return True                            # an 'open' row is left for position_monitor to record
+
+    async def _execute(self, exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since) -> bool:
+        """Make-before-break executor; _busy() re-checked before every mutation."""
+        uid = user['id']
+        now = self._clock()
+        protected = {o for o in (bg.trusted_sl_oid(rec), churn.placed['SL'][-1][1] if churn.placed['SL'] else None) if o}
+        plan_places_sl = any(a.kind == 'PLACE_SL' for a in acts)
+        placed_sl_ok = False
+        done = set()
+        for a in acts:
+            if a.kind == 'ALARM':
+                await self._alarm(user, sym, a.code, a.severity, _action_ctx(a))
+                continue
+            if dry:
+                await self._alarm(user, sym, 'WOULD_' + a.kind, 'info', dict(_action_ctx(a), code=a.code))
+                continue
+            if await self._busy(uid, since):
+                await self._yield(user)
+                return False
+            if a.kind in ('PLACE_SL', 'PLACE_TP'):
+                try:
+                    if await self._symbol_position(exchange, sym) is None:
+                        logger.info(f"   GUARDIAN: {sym} is flat now - repair skipped")
+                        return True
+                except Exception as e:
+                    logger.warning(f"   ⚠️ GUARDIAN: position re-check failed ({e}) - placing anyway")
+            if a.kind == 'PLACE_SL':
+                oid = await self._place_leg(exchange, sym, 'SL', pos, a.level)
+                if oid is None:
+                    await self._alarm(user, sym, 'SL_REPAIR_FAILED_CLOSED', 'critical', {'level': a.level})
+                    await self._close(exchange, user, sym, row, pos, 'SL_REPAIR_FAILED_CLOSED')
+                    return True
+                await self._set_row_leg(row, SQL_SET_SL, oid)
+                self._retired[(uid, sym)].update(
+                    o for o in (follower_guard.real_oid((row or {}).get('sl_order_id')), oid) if o)
+                churn.note_placed('SL', oid, now)
+                placed_sl_ok = True
+                done.add('PLACE_SL')
+                await self._alarm(user, sym, a.code or 'SL_REPAIRED', a.severity, {'level': a.level, 'oid': oid})
+            elif a.kind == 'PLACE_TP':
+                oid = await self._place_leg(exchange, sym, 'TP', pos, a.level)
+                if oid is None:
+                    churn.note_place_failed('TP', now)
+                    await self._alarm(user, sym, 'TP_PLACE_FAILED', 'warning', {'level': a.level})
+                    continue
+                await self._set_row_leg(row, SQL_SET_TP, oid)
+                self._retired[(uid, sym)].update(
+                    o for o in (follower_guard.real_oid((row or {}).get('tp_order_id')), oid) if o)
+                churn.note_placed('TP', oid, now)
+                done.add('PLACE_TP')
+                await self._alarm(user, sym, a.code or 'TP_REPAIRED', 'warning', {'level': a.level, 'oid': oid})
+            elif a.kind == 'CANCEL':
+                oid = follower_guard.real_oid(a.leg.oid if a.leg is not None else None)
+                if oid in protected and a.code != 'ORPHAN_LEG' and not placed_sl_ok:
+                    await self._alarm(user, sym, 'CLASSIFIER_SUSPECT', 'critical', {'leg': 'SL', 'oid': oid, 'dropped': a.code})
+                    continue
+                if a.code == 'SL_EXTRA_OR_INVALID' and plan_places_sl and not placed_sl_ok:
+                    continue                   # make-before-break: the old SL stays until a new one is live
+                await self._cancel_single(exchange, oid, sym)
+            elif a.kind == 'CLOSE':
+                await self._close(exchange, user, sym, row, pos, a.code, a.severity)
+                return True
+            elif a.kind == 'MARK_ROW_CLOSED_MANUAL':
+                await self._mark_position_status(row['id'], 'closed_manual')
+                await self._alarm(user, sym, 'ROW_CLOSED_MANUAL', 'warning', {'row': row['id']})
+        if (not dry and row is not None and row['status'] == 'needs_recovery' and pos is not None
+                and not any(a.kind == 'CLOSE' for a in raw)
+                and {a.kind for a in raw if a.kind in ('PLACE_SL', 'PLACE_TP')} <= done):
+            await self._restore_open(row, pos)
+            await self._alarm(user, sym, 'RECOVERY_RESTORED', 'warning', {'row': row['id']})
+        return True
+
     # ==================== Main Loop ====================
 
     async def run_cycle(self, cycle: int, mode: str):
-        """One guardian cycle (legacy cycle in every mode until the invariant is added)."""
-        await self.recover_db_positions()
-        if cycle % EXCHANGE_SCAN_EVERY_N_CYCLES == 0:
-            await self.scan_exchange_for_unprotected()
+        """One guardian cycle for the given mode (see the module docstring)."""
+        if mode == 'enforce':
+            await self.invariant_pass(full=(cycle % INVARIANT_SCAN_EVERY_N_CYCLES == 0), dry=False)
+            if cycle % EXCHANGE_SCAN_EVERY_N_CYCLES == 0:
+                await self.scan_exchange_for_unprotected(rowless_only=True)
+        else:
+            await self.recover_db_positions()
+            if mode == 'shadow' and cycle % INVARIANT_SCAN_EVERY_N_CYCLES == 0:
+                await self.invariant_pass(full=True, dry=True)
+            if cycle % EXCHANGE_SCAN_EVERY_N_CYCLES == 0:
+                await self.scan_exchange_for_unprotected()
         await self._report_expired_tokens()
 
     async def _report_expired_tokens(self):
@@ -770,19 +1035,29 @@ class PositionGuardian:
         logger.info("=" * 60)
         logger.info(f"🛡️ POSITION GUARDIAN v2.0 STARTED (GUARDIAN_MODE={mode})")
         logger.info("=" * 60)
-        logger.info(f"🔄 DB check interval: {GUARDIAN_INTERVAL_SECONDS}s")
-        logger.info(f"🔍 Exchange scan: every {EXCHANGE_SCAN_EVERY_N_CYCLES * GUARDIAN_INTERVAL_SECONDS}s")
+        logger.info(f"🔄 Cycle: {GUARDIAN_INTERVAL_SECONDS}s, invariant every {INVARIANT_SCAN_EVERY_N_CYCLES} cycle(s), "
+                    f"exchange scan every {EXCHANGE_SCAN_EVERY_N_CYCLES} cycles")
         logger.info("=" * 60)
 
-        # Run startup recovery once
-        await self.startup_recovery()
+        if mode == 'enforce':
+            try:
+                await self.invariant_pass(full=True, dry=False)
+                await self.scan_exchange_for_unprotected(rowless_only=True)
+            except Exception as e:
+                logger.error(f"❌ Enforce startup pass failed: {e}")
+        else:
+            await self.startup_recovery()
 
         cycle = 0
         while True:
             try:
                 cycle += 1
+                t0 = time.monotonic()
                 await self.run_cycle(cycle, mode)
-                await asyncio.sleep(GUARDIAN_INTERVAL_SECONDS)
+                if mode == 'enforce':
+                    await asyncio.sleep(max(5.0, self.cadence_s - (time.monotonic() - t0)))
+                else:
+                    await asyncio.sleep(GUARDIAN_INTERVAL_SECONDS)
 
             except asyncio.CancelledError:
                 logger.info("🛑 Position guardian cancelled")

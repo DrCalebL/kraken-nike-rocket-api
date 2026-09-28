@@ -291,3 +291,37 @@ async def test_legacy_recovery_flat_read_at_close_time_is_confirmed_before_anyth
     else:                                                                  # one false-empty read changes nothing
         assert env.db.row(row['id'])['status'] == 'needs_recovery' and SYM in ex.positions
         assert ex.calls('cancel_order') == [] and 'ord-sl' in ex.orders
+
+
+# ---------------- enforce: needs_recovery rows (restore to 'open', I17; a close that reads flat, I5) ----------------
+
+async def test_enforce_restores_a_needs_recovery_row_after_placing_its_tp(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id='ord-sl', tp_order_id=None, quantity=100.0,
+                        opened_at=env.clock.utcnow() - timedelta(minutes=2))
+    ex.open_position(SYM, 'long', 100, 0.502, ts_ms=env.clock.ms() - 125_000)
+    ex.add_order(SYM, 'stop', 'sell', 100, 0.49, oid='ord-sl')
+    await env.g.invariant_pass(full=False, dry=False)
+    (_, tp_info), = ex.calls('create_order')
+    assert tp_info['type'] == 'limit' and tp_info['price'] == 0.52 and tp_info['params'] == {'reduceOnly': True}
+    new_tp, = [oid for oid, o in ex.orders.items() if o['info']['orderType'] == 'lmt']
+    r = env.db.row(row['id'])
+    assert r['status'] == 'open' and r['tp_order_id'] == new_tp
+    assert r['quantity'] == 100.0 and r['entry_fill_price'] == 0.502
+
+
+async def test_enforce_close_that_reads_flat_cancels_nothing_and_keeps_the_row(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row = _recovery_row(env, user, sl_order_id=None, tp_order_id='ord-tp', quantity=100.0)
+    ex.open_position(SYM, 'long', 100, 0.5, ts_ms=env.clock.ms() - 700_000)
+    ex.add_order(SYM, 'lmt', 'sell', 100, 0.52, oid='ord-tp')              # the row's own TP rests
+    ex.prices[SYM] = 0.485                                                 # no SL and the price is beyond it: CLOSE
+    _empty_position_read(monkeypatch, ex, 2)                               # read 1 = book, read 2 = the close check
+    await env.g.invariant_pass(full=False, dry=False)
+    assert env.order_calls(ex) == [] and 'ord-tp' in ex.orders and SYM in ex.positions
+    assert env.db.row(row['id'])['status'] == 'needs_recovery' and env.pool.mutations() == []
+    assert 'GUARDIAN_CLOSE_SKIPPED_FLAT' in env.db.error_types() and 'GUARDIAN_CLOSE' not in env.db.error_types()
+    await env.g.invariant_pass(full=False, dry=False)                      # the next pass sees it: a real close
+    assert ex.positions == {} and 'ord-tp' not in ex.orders and env.db.row(row['id'])['status'] == 'closed'
