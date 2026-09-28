@@ -45,3 +45,17 @@ def test_signal_broadcast_risk_pct_is_a_required_float():
     field = next(s for s in cls.body if isinstance(s, ast.AnnAssign) and ast.unparse(s.target) == 'risk_pct')
     assert ast.unparse(field.annotation) == 'float'
     assert field.value is None
+
+
+# ---------------- SEC-2: no default master key, constant-time compare ----------------
+
+def test_sec2_master_key_has_no_default_and_is_compared_in_constant_time():
+    tree = _tree()
+    assign = next(n for n in tree.body if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == 'MASTER_API_KEY' for t in n.targets))
+    assert ast.unparse(assign.value) == "os.getenv('MASTER_API_KEY')"
+    fn = _function(tree, 'verify_master_key')
+    calls = [ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    assert 'hmac.compare_digest' in calls
+    assert not any(isinstance(n, ast.Compare) and any(isinstance(op, ast.NotEq) for op in n.ops)
+                   for n in ast.walk(fn))

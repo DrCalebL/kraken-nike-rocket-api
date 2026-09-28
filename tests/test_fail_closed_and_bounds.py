@@ -145,3 +145,19 @@ def test_every_master_fraction_is_accepted_and_stored_verbatim(monkeypatch, risk
     assert response.status_code == 200
     stored = session.writes[0][1]
     assert stored.risk_pct == risk
+
+
+# ---------------- SEC-2: no default master key, constant-time compare ----------------
+
+def test_sec2_unset_key_disables_broadcast_and_admin_stats_with_503(monkeypatch):
+    client, session = _client(monkeypatch, key=None)
+    assert client.post('/api/broadcast-signal', json=GOOD, headers={'X-Master-Key': 'anything'}).status_code == 503
+    assert client.get('/api/admin/stats', headers={'X-Master-Key': 'anything'}).status_code == 503
+    assert session.writes == []
+
+
+def test_sec2_wrong_or_missing_key_is_401_and_the_right_key_passes(monkeypatch):
+    client, session = _client(monkeypatch)
+    assert client.post('/api/broadcast-signal', json=GOOD, headers={'X-Master-Key': 'wrong'}).status_code == 401
+    assert client.post('/api/broadcast-signal', json=GOOD).status_code == 401
+    assert client.post('/api/broadcast-signal', json=GOOD, headers=HEADERS).status_code == 200
