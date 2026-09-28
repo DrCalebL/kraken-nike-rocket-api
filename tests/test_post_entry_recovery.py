@@ -97,3 +97,72 @@ async def test_cancel_order_verified_treats_not_found_as_done_and_gives_up_after
     stuck = ex.add_order(SYM, 'stop', 'sell', 50, 0.49)
     ex.fault('cancel_order', ccxt.NetworkError('cancel timeout'), times=3)
     assert await loop._cancel_order_verified(ex, stuck, 'PF_ADAUSD') is False and stuck in ex.orders
+
+
+# ---------------- execute_trade: exceptions after the entry was sent (C34 item 7, R3-H1) ----------------
+
+@pytest.mark.parametrize('exc', [ccxt.InsufficientFunds('margin'), ccxt.InvalidOrder('bad'),
+                                 ccxt.AuthenticationError('auth'), TypeError('log line')])
+async def test_post_entry_exception_in_each_branch_records_needs_recovery(monkeypatch, fast_sleep, notify_log, exc):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+    real = ex.amount_to_precision
+    calls = {'n': 0}
+
+    def amount_to_precision(symbol, amount):
+        calls['n'] += 1
+        if calls['n'] == 2:                               # the bracket_qty computation, after the entry
+            raise exc
+        return real(symbol, amount)
+
+    monkeypatch.setattr(ex, 'amount_to_precision', amount_to_precision)
+    assert await loop.execute_trade(user, signal) is False
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery'
+    assert (row['target_sl'], row['target_tp'], row['quantity']) == (0.49, 0.52, 12500.0)
+    assert row['sl_order_id'] is None and row['tp_order_id'] is None
+    assert 'POST_ENTRY_EXCEPTION' in db.error_types()
+    assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'POST_ENTRY_EXCEPTION:%s' % type(exc).__name__
+               for e in db.errors)
+    assert any(n['level'] == 'error' for n in notify_log)
+
+
+async def test_post_entry_exception_after_the_sl_records_the_sl_id(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+
+    async def tp_raises(**kwargs):
+        raise TypeError('boom after the SL')
+
+    monkeypatch.setattr(htl, 'place_tp_order_with_retry', tp_raises)
+    assert await loop.execute_trade(user, signal) is False
+    sl_oid, = list(ex.orders)
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
+
+
+async def test_post_entry_exception_verified_flat_cancels_the_placed_legs(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+
+    async def tp_raises(**kwargs):
+        ex.positions.clear()                              # the position is gone (e.g. closed by the user)
+        raise TypeError('boom after the SL')
+
+    monkeypatch.setattr(htl, 'place_tp_order_with_retry', tp_raises)
+    assert await loop.execute_trade(user, signal) is False
+    assert ex.orders == {}                                # the service SL was cancelled
+    assert [r for r in db.rows if r['user_id'] == user['id']] == []
+
+
+async def test_post_entry_exception_verified_flat_failed_cancel_records_leftover_ids(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+    ex.fault('cancel_order', ccxt.NetworkError('cancel timeout'), times=3)
+
+    async def tp_raises(**kwargs):
+        ex.positions.clear()
+        raise TypeError('boom after the SL')
+
+    monkeypatch.setattr(htl, 'place_tp_order_with_retry', tp_raises)
+    assert await loop.execute_trade(user, signal) is False
+    sl_oid, = list(ex.orders)
+    row, = [r for r in db.rows if r['user_id'] == user['id']]
+    assert row['status'] == 'needs_recovery' and row['sl_order_id'] == sl_oid
+    assert any(e[0] == 'NEEDS_RECOVERY_RECORDED' and e[1] == 'POST_ENTRY_EXCEPTION_LEFTOVER' for e in db.errors)

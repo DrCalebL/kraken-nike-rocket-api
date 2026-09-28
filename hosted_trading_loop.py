@@ -1044,6 +1044,9 @@ class HostedTradingLoop:
                 self.db_pool, user_api_key, "INSUFFICIENT_FUNDS",
                 str(e)[:200], {"symbol": kraken_symbol, "side": action, "function": "execute_trade"}
             )
+            if stage == 'entry_sent':
+                await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
+                                                 bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             return False
             
         except ccxt.InvalidOrder as e:
@@ -1052,6 +1055,9 @@ class HostedTradingLoop:
                 self.db_pool, user_api_key, "INVALID_ORDER",
                 str(e)[:200], {"symbol": kraken_symbol, "side": action, "function": "execute_trade"}
             )
+            if stage == 'entry_sent':
+                await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
+                                                 bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             return False
             
         except ccxt.AuthenticationError as e:
@@ -1061,6 +1067,9 @@ class HostedTradingLoop:
                 "Kraken API authentication failed - credentials may be invalid",
                 {"function": "execute_trade"}
             )
+            if stage == 'entry_sent':
+                await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
+                                                 bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             # Remove from cache so it re-authenticates next time
             if user_api_key in self.active_exchanges:
                 del self.active_exchanges[user_api_key]
@@ -1072,8 +1081,54 @@ class HostedTradingLoop:
                 self.db_pool, user_api_key, f"TRADE_EXECUTION_ERROR",
                 str(e)[:200], {"symbol": kraken_symbol, "side": action, "error_type": type(e).__name__, "function": "execute_trade"}
             )
+            if stage == 'entry_sent':
+                await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
+                                                 bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             return False
     
+    async def _post_entry_exception(self, exc, exchange, user, signal, kraken_symbol, entry_order, quantity,
+                                    leverage, signal_db_id, sl_order=None, tp_order=None):
+        """
+        R3-H1: an exception after the entry was sent. Position open or unknown ->
+        needs_recovery row carrying the signal levels, qty and every known leg id.
+        Verified flat -> cancel the known service legs; a failed cancel -> a
+        needs_recovery row with the leftover ids. Never raises.
+        """
+        try:
+            reason = f"POST_ENTRY_EXCEPTION:{type(exc).__name__}"
+            user_api_key = user.get('api_key', 'unknown')
+            sl_oid = str(sl_order['id']) if sl_order else None
+            tp_oid = str(tp_order['id']) if tp_order else None
+            await log_error_to_db(
+                self.db_pool, user_api_key, "POST_ENTRY_EXCEPTION", str(exc)[:200],
+                {"symbol": kraken_symbol, "entry_order_id": str(entry_order['id']) if entry_order else None,
+                 "sl_order_id": sl_oid, "tp_order_id": tp_oid, "error_type": type(exc).__name__}
+            )
+            record = dict(
+                user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
+                entry_order_id=str(entry_order['id']) if entry_order else 'unknown',
+                signal_symbol=signal.get('symbol'), kraken_symbol=kraken_symbol,
+                side=str(signal.get('action') or '').upper(), quantity=quantity, leverage=leverage,
+                entry_fill_price=float(signal['entry_price']), target_tp=float(signal['take_profit']),
+                target_sl=float(signal['stop_loss']),
+            )
+            if not await self._verified_flat(exchange, kraken_symbol):
+                self.logger.critical(f"   🚨 Post-entry exception with the position open or unknown - recording needs_recovery")
+                await self._record_unprotected_position(**record, reason=reason, sl_order_id=sl_oid, tp_order_id=tp_oid)
+                return
+            leftover_sl = sl_oid if (sl_oid and not await self._cancel_order_verified(exchange, sl_oid, kraken_symbol)) else None
+            leftover_tp = tp_oid if (tp_oid and not await self._cancel_order_verified(exchange, tp_oid, kraken_symbol)) else None
+            if leftover_sl or leftover_tp:
+                await self._record_unprotected_position(**record, reason='POST_ENTRY_EXCEPTION_LEFTOVER',
+                                                        sl_order_id=leftover_sl, tp_order_id=leftover_tp)
+        except Exception as e:
+            self.logger.critical(f"   ❌ Post-entry exception handling failed: {e}")
+            await notify_admin(
+                title="POST_ENTRY_EXCEPTION handling failed (Kraken follower)",
+                details={"User": user.get('email', 'unknown'), "Symbol": kraken_symbol, "Error": str(e)[:300]},
+                level="error"
+            )
+
     async def _verified_flat(self, exchange, symbol: str) -> bool:
         """Two symbol-matched position reads VERIFY_FLAT_GAP_S apart, both flat. Any read error -> False."""
         try:
