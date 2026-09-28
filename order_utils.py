@@ -30,7 +30,7 @@ Usage:
 import asyncio
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from datetime import datetime
 
 import aiohttp
@@ -160,7 +160,8 @@ async def place_order_with_retry(
     order_description: str = "Order",
     user_email: str = "unknown",
     user_api_key: str = "unknown",
-    notify_on_failure: bool = True
+    notify_on_failure: bool = True,
+    confirm_position_fn: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> Optional[Dict]:
     """
     Place an order with automatic retry and admin notification on failure.
@@ -177,6 +178,9 @@ async def place_order_with_retry(
         user_email: User email for notifications
         user_api_key: User API key for notifications
         notify_on_failure: Whether to send Discord notification on failure
+        confirm_position_fn: Market orders only. Awaited after an exception; True (a position
+            exists, or the read failed) means the order may have filled, so it is NOT re-sent and
+            {'id': 'unknown-after-exception', 'info': {}} is returned (double-entry guard).
         
     Returns:
         Order dict on success, None on failure (after all retries)
@@ -207,6 +211,18 @@ async def place_order_with_retry(
             attempts_log.append(f"Attempt {attempt}: {error_msg}")
             
             logger.warning(f"⚠️ {order_description} failed (attempt {attempt}/{MAX_RETRIES}): {error_msg}")
+
+            if order_type == "market" and confirm_position_fn is not None:
+                try:
+                    maybe_open = await confirm_position_fn()
+                except Exception as confirm_error:
+                    logger.warning(f"⚠️ Position check after {order_description} error failed: {confirm_error}")
+                    maybe_open = True
+                if maybe_open:
+                    logger.critical(
+                        f"🚨 {order_description} raised but a position may exist - NOT re-sending (double-entry guard)"
+                    )
+                    return {'id': 'unknown-after-exception', 'info': {}}
             
             if attempt < MAX_RETRIES:
                 logger.info(f"⏳ Retrying in {backoff:.1f}s...")
@@ -321,7 +337,8 @@ async def place_entry_order_with_retry(
     side: str,
     quantity: float,
     user_email: str = "unknown",
-    user_api_key: str = "unknown"
+    user_api_key: str = "unknown",
+    confirm_position_fn: Optional[Callable[[], Awaitable[bool]]] = None,
 ) -> Optional[Dict]:
     """
     Place Entry (market) order with retry.
@@ -338,7 +355,8 @@ async def place_entry_order_with_retry(
         params={},
         order_description="Entry",
         user_email=user_email,
-        user_api_key=user_api_key
+        user_api_key=user_api_key,
+        confirm_position_fn=confirm_position_fn,
     )
 
 
