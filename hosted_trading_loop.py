@@ -1387,7 +1387,8 @@ class HostedTradingLoop:
             entry_order_id=entry_order_id,
             tp_placed=tp_order_id is not None,
             sl_placed=sl_order_id is not None,
-            error=f"{reason} - Emergency close {'SUCCESSFUL' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts - GUARDIAN RECOVERY PENDING'}"
+            error=f"{reason} - Emergency close {'SUCCESSFUL' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts - GUARDIAN RECOVERY PENDING'}",
+            close_outcome='closed' if close_sent else ('flat' if close_success else 'failed'),
         )
 
         # Log to database

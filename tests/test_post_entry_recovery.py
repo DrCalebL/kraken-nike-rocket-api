@@ -515,3 +515,33 @@ async def test_legacy_recovery_flat_reads_under_240s_never_strip_the_sl_of_a_liv
     env.clock.advance(pg.bg.FLAT_PERSIST_S)
     await env.g._recover_single_position(_nr_view(env, row))              # the position is read live: closed
     assert ex.positions == {} and env.db.row(row['id'])['status'] == 'closed'
+
+
+# ---------------- QC voice-8: the bracket-incomplete email follows the close outcome ----------------
+
+def _bracket_email(notify_log):
+    mail, = [n for n in notify_log if 'Bracket Order Incomplete' in n['title']]
+    return mail['details']
+
+
+async def test_bracket_email_after_a_sent_close_never_asks_to_place_orders(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+    ex.open_position(SYM, 'long', 50, 0.5)
+    assert await loop._emergency_close_position(
+        ex, 'PF_ADAUSD', 'sell', 50, 'u@e.com', user['api_key'], 'E1', reason='SL order failed after all retries',
+        user_id=user['id'], target_tp=0.52, target_sl=0.49) is True
+    details = _bracket_email(notify_log)
+    assert 'UNPROTECTED' not in details['Severity'] and 'place missing orders' not in details['Action Required']
+    assert 'do NOT place' in details['Action Required']
+
+
+async def test_bracket_email_after_a_failed_close_points_to_the_guardian(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+    ex.open_position(SYM, 'long', 50, 0.5)
+    ex.fault('create_order', ccxt.NetworkError('close timeout'), times=5)
+    assert await loop._emergency_close_position(
+        ex, 'PF_ADAUSD', 'sell', 50, 'u@e.com', user['api_key'], 'E1', reason='TP order failed after all retries',
+        user_id=user['id'], target_tp=0.52, target_sl=0.49, sl_order_id='sl-1') is False
+    details = _bracket_email(notify_log)
+    assert details['Severity'].startswith('CRITICAL') and 'SL live' in details['Severity']
+    assert 'needs_recovery' in details['Action Required'] and 'place missing orders' not in details['Action Required']

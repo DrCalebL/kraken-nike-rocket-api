@@ -424,13 +424,36 @@ async def notify_bracket_incomplete(
     entry_order_id: str,
     tp_placed: bool,
     sl_placed: bool,
-    error: str
+    error: str,
+    close_outcome: Optional[str] = None,
 ):
-    """Notify admin when TP/SL fails - DANGEROUS, position unprotected."""
+    """
+    Notify admin when TP/SL placement fails and the emergency close ran.
+
+    QC voice-8: severity and action follow close_outcome, so a verified close never asks the owner to
+    place orders by hand (a manual reduce-only order on a flat account blocks dedup; a non-reduce-only one
+    opens a new position): 'closed' (a reduce-only close was sent), 'flat' (no close sent; the symbol read
+    flat), 'failed' (every close attempt failed; a needs_recovery row was written). None keeps the old text.
+    """
+    if close_outcome == 'closed':
+        severity = "HIGH - emergency close sent (position closed at market)"
+        action = ("Nothing to place - do NOT place orders. Check the fill/slippage; a needs_recovery row "
+                  "follows if flat was not verified (the guardian handles it).")
+    elif close_outcome == 'flat':
+        severity = "HIGH - no close sent: the symbol read flat"
+        action = ("Do NOT place orders. If the flat read was wrong a needs_recovery row follows and the "
+                  "guardian acts on it; check the account if in doubt.")
+    elif close_outcome == 'failed':
+        severity = "CRITICAL - emergency close FAILED; " + ("SL live" if sl_placed else "position UNPROTECTED")
+        action = ("needs_recovery row written - the guardian acts on it within ~2 min. Check the account; "
+                  "close it by hand (reduce-only) if the guardian cannot.")
+    else:
+        severity = "CRITICAL - Position UNPROTECTED"
+        action = "IMMEDIATELY place missing orders manually!"
     await notify_admin(
         title="🚨 DANGER: Bracket Order Incomplete",
         details={
-            "Severity": "CRITICAL - Position UNPROTECTED",
+            "Severity": severity,
             "User": user_email,
             "API Key": user_api_key[:20] + "...",
             "Symbol": symbol,
@@ -438,7 +461,7 @@ async def notify_bracket_incomplete(
             "TP Placed": "✅ Yes" if tp_placed else "❌ NO",
             "SL Placed": "✅ Yes" if sl_placed else "❌ NO",
             "Error": error[:500],
-            "Action Required": "IMMEDIATELY place missing orders manually!",
+            "Action Required": action,
         },
         level="error"
     )
