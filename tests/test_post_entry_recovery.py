@@ -545,3 +545,22 @@ async def test_bracket_email_after_a_failed_close_points_to_the_guardian(monkeyp
     details = _bracket_email(notify_log)
     assert details['Severity'].startswith('CRITICAL') and 'SL live' in details['Severity']
     assert 'needs_recovery' in details['Action Required'] and 'place missing orders' not in details['Action Required']
+
+
+# ---------------- QC voice-19: stored / emailed alarm names ----------------
+
+async def test_failed_emergency_close_writes_an_emergency_close_failed_row(monkeypatch, fast_sleep, notify_log):
+    loop, db, pool, ex, user, signal = _trading(monkeypatch)
+    ex.open_position(SYM, 'long', 50, 0.5)
+    ex.fault('create_order', ccxt.NetworkError('close timeout'), times=5)
+    await loop._emergency_close_position(
+        ex, 'PF_ADAUSD', 'sell', 50, 'u@e.com', user['api_key'], 'E1', reason='SL order failed after all retries',
+        user_id=user['id'], target_tp=0.52, target_sl=0.49)
+    assert 'EMERGENCY_CLOSE_FAILED' in db.error_types() and 'EMERGENCY_CLOSE' not in db.error_types()
+
+
+async def test_guardian_alarm_subject_does_not_repeat_guardian(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch)
+    user, ex = env.user()
+    await env.g._alarm(user, SYM, 'ROW_AMBIGUOUS', 'critical', {'row': 1})
+    assert [n['title'] for n in notify_log] == ['🛡️ GUARDIAN_ROW_AMBIGUOUS']

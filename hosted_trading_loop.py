@@ -1395,7 +1395,7 @@ class HostedTradingLoop:
         await log_error_to_db(
             self.db_pool,
             user_api_key,
-            "EMERGENCY_CLOSE",
+            "EMERGENCY_CLOSE" if close_success else "EMERGENCY_CLOSE_FAILED",   # QC voice-19: distinct failure row
             f"{reason}. Close: {'OK' if close_success else f'FAILED after {EMERGENCY_MAX_RETRIES} attempts'}",
             {
                 "symbol": symbol,

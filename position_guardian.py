@@ -284,7 +284,7 @@ class PositionGuardian:
                                dict(ctx, user_id=uid, symbol=symbol, severity=severity))
         if severity == 'critical':
             await notify_admin(
-                title=f"🛡️ Guardian: {error_type}",
+                title=f"🛡️ {error_type}",           # QC voice-19: the code already says GUARDIAN_
                 details={'User': (user or {}).get('email') or api_key[:15], 'Symbol': symbol,
                          **{k: str(v)[:200] for k, v in ctx.items()}},
                 level="error"
