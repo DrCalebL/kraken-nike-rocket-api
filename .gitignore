@@ -29,3 +29,4 @@ htmlcov/
 # Wave 1 local gates and owner-run chaos outputs
 gate_logs/
 chaos_out/
+logs/
