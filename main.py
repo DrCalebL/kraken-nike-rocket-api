@@ -272,6 +272,42 @@ if DATABASE_URL:
     except Exception as e:
         print(f"Note: Schema migration - {e}")
     
+    # T1-CLOSE MIGRATIONS:START
+    # Master CLOSE (wire contract v2): additive and idempotent. Each statement runs on its own (autocommit), so one
+    # failure never skips the rest. init_db() above already creates master_closes/close_jobs for a fresh database.
+    _CLOSE_MIGRATIONS = (
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS master_trade_id VARCHAR(32)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_signals_master_trade_id ON signals(master_trade_id) "
+        "WHERE master_trade_id IS NOT NULL",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS exit_hint VARCHAR(16)",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS close_fill_qty NUMERIC",
+        "CREATE TABLE IF NOT EXISTS master_closes ("
+        " master_trade_id VARCHAR(32) PRIMARY KEY, symbol VARCHAR(32) NOT NULL, side VARCHAR(4) NOT NULL,"
+        " reason VARCHAR(32) NOT NULL, master_closed_ms BIGINT NOT NULL,"
+        " received_at TIMESTAMP NOT NULL DEFAULT NOW(), matched INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE IF NOT EXISTS close_jobs ("
+        " position_id INTEGER PRIMARY KEY REFERENCES open_positions(id), user_id INTEGER NOT NULL,"
+        " master_trade_id VARCHAR(32) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'pending',"
+        " attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,"
+        " created_at TIMESTAMP NOT NULL DEFAULT NOW(), updated_at TIMESTAMP NOT NULL DEFAULT NOW())",
+        "CREATE INDEX IF NOT EXISTS ix_close_jobs_status ON close_jobs(status)",
+    )
+    try:
+        import psycopg2
+        _close_conn = psycopg2.connect(DATABASE_URL)
+        _close_conn.autocommit = True
+        _close_cur = _close_conn.cursor()
+        for _close_stmt in _CLOSE_MIGRATIONS:
+            try:
+                _close_cur.execute(_close_stmt)
+            except Exception as e:
+                print(f"⚠️ Close migration failed ({_close_stmt[:60]}...): {e}")
+        _close_cur.close()
+        _close_conn.close()
+        print("✅ Close schema up to date")
+    except Exception as e:
+        print(f"⚠️ Close schema migration - {e}")
+    # T1-CLOSE MIGRATIONS:END
     print("✅ Database initialized")
 else:
     print("⚠️ DATABASE_URL not set - database features disabled")
