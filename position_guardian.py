@@ -41,6 +41,7 @@ import ccxt
 from cryptography.fernet import Fernet
 
 import bracket_guard as bg
+import close_guard
 import follower_guard
 from order_utils import notify_admin
 
@@ -87,6 +88,13 @@ SQL_BUSY = (
     "SELECT EXISTS (SELECT 1 FROM signal_deliveries WHERE user_id = $1 "
     "AND acknowledged_at > NOW() - INTERVAL '180 seconds' "
     "AND ($2::timestamp IS NULL OR acknowledged_at > $2))"
+)
+# T08 master CLOSE (spec 19.6): a user with a pending close job, or one done within CLOSE_BUSY_WINDOW_S, is busy
+# like an in-flight token, so a full pass never re-places a leg execute_close cancelled. 'deferred' jobs (row in
+# needs_recovery) do NOT make the user busy: the recovery lane owns those rows and must keep running.
+SQL_CLOSE_BUSY = (
+    "SELECT EXISTS (SELECT 1 FROM close_jobs WHERE user_id = $1 AND (status = 'pending' "
+    "OR (status = 'done' AND updated_at > NOW() - INTERVAL '%d seconds')))" % close_guard.CLOSE_BUSY_WINDOW_S
 )
 SQL_ROWS_FOR_USER = """
     SELECT id, user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
@@ -252,12 +260,15 @@ class PositionGuardian:
         return await loop.run_in_executor(self._executor, functools.partial(fn, *args, **kwargs))
 
     async def _busy(self, user_id, since=None) -> bool:
-        """In-flight execute_trade (in-process token) or a delivery acknowledged within 180 s."""
+        """In-flight execute_trade / execute_close (in-process token), a delivery acknowledged within 180 s, or an
+        open master close job (SQL_CLOSE_BUSY). A failed read counts as busy."""
         if follower_guard.is_inflight(user_id):
             return True
         try:
             async with self.db_pool.acquire() as conn:
-                return bool(await conn.fetchval(SQL_BUSY, user_id, since))
+                if await conn.fetchval(SQL_BUSY, user_id, since):
+                    return True
+                return bool(await conn.fetchval(SQL_CLOSE_BUSY, user_id))
         except Exception as e:
             logger.warning(f"Busy check failed for user {user_id}: {e} - treating as busy")
             return True

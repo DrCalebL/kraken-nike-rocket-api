@@ -148,6 +148,17 @@ async def log_error_to_db(pool, api_key: str, error_type: str, error_message: st
         logger.error(f"Failed to log error to DB: {e}")
 
 
+def _time_exit_hint(position: dict) -> bool:
+    """T08: True only when execute_close marked the row (exit_hint 'TIME') AND recorded a close fill > 0. A hint
+    without a fill (the SL/TP filled first, the reduce-only close filled nothing) keeps the distance label."""
+    if position.get('exit_hint') != 'TIME':
+        return False
+    try:
+        return float(position.get('close_fill_qty') or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 class PositionMonitor:
     """
     Monitors positions and records actual P&L when they close.
@@ -742,6 +753,8 @@ class PositionMonitor:
                     op.opened_at,
                     op.first_fill_at,
                     op.last_fill_at,
+                    op.exit_hint,
+                    op.close_fill_qty,
                     u.api_key as user_api_key,
                     u.kraken_api_key_encrypted,
                     u.kraken_api_secret_encrypted,
@@ -1302,7 +1315,12 @@ class PositionMonitor:
             dist_to_tp = abs(exit_price - tp)
             dist_to_sl = abs(exit_price - sl)
             
-            if dist_to_tp < dist_to_sl:
+            if _time_exit_hint(position):
+                # T08 master CLOSE: execute_close wrote exit_hint='TIME' before its reduce-only close and recorded
+                # a non-zero close fill, so this exit was the 168 h time exit, not the SL/TP
+                exit_type = 'TIME'
+                self.logger.info(f"⏱️ {user_short}: TIME EXIT (master CLOSE) on {position['symbol']} @ ${exit_price:.4f}")
+            elif dist_to_tp < dist_to_sl:
                 exit_type = 'TP'
                 self.logger.info(f"🎯 {user_short}: TP HIT on {position['symbol']} @ ${exit_price:.4f}")
             else:
@@ -1328,13 +1346,23 @@ class PositionMonitor:
             # Record the trade closure
             await self.record_trade_close(position, exit_price, exit_type, datetime.utcnow(), kraken_pnl=kraken_pnl)
             
-            # Cancel remaining order
-            try:
-                remaining_order = position['sl_order_id'] if exit_type == 'TP' else position['tp_order_id']
-                exchange.cancel_order(remaining_order, kraken_symbol)
-                self.logger.info(f"   ✅ Cancelled remaining {('SL' if exit_type == 'TP' else 'TP')} order")
-            except Exception as e:
-                self.logger.debug(f"   Could not cancel order: {e}")
+            # Cancel remaining order(s): a TIME exit cancels both recorded legs; OrderNotFound counts as done
+            if exit_type == 'TIME':
+                remaining = [('SL', position.get('sl_order_id')), ('TP', position.get('tp_order_id'))]
+            elif exit_type == 'TP':
+                remaining = [('SL', position['sl_order_id'])]
+            else:
+                remaining = [('TP', position['tp_order_id'])]
+            for leg_name, remaining_order in remaining:
+                if not remaining_order:
+                    continue
+                try:
+                    exchange.cancel_order(remaining_order, kraken_symbol)
+                    self.logger.info(f"   ✅ Cancelled remaining {leg_name} order")
+                except ccxt.OrderNotFound:
+                    self.logger.info(f"   ✅ Remaining {leg_name} order already gone")
+                except Exception as e:
+                    self.logger.debug(f"   Could not cancel order: {e}")
             
             # NOW scan fills (after trade is recorded with correct entry price)
             # This ensures the exit fill is recorded for audit trail

@@ -12,7 +12,7 @@ Author: Nike Rocket Team
 Updated: November 24, 2025
 """
 
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text, Numeric, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime, timedelta
@@ -181,6 +181,10 @@ class Signal(Base):
     volatility = Column(Float, nullable=True)
     notes = Column(String, nullable=True)
     
+    # Master trade id (wire contract v2): the master's uuid4().hex for this entry; NULL for v1 entries.
+    # Partial UNIQUE index ux_signals_master_trade_id (main.py migration). A CLOSE matches only through it.
+    master_trade_id = Column(String(32), nullable=True)
+
     # Timing
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     expires_at = Column(DateTime, nullable=True)
@@ -253,8 +257,40 @@ class OpenPosition(Base):
     # Status
     status = Column(String, default='open')  # open, closed, error
     
+    # Master CLOSE (T08): execute_close writes exit_hint='TIME' before its reduce-only close and adds every close
+    # fill to close_fill_qty; position_monitor labels the exit TIME when both are set (> 0).
+    exit_hint = Column(String(16), nullable=True)
+    close_fill_qty = Column(Numeric, nullable=True)
+
     # Relationships
     user = relationship("User")
+
+
+class MasterClose(Base):
+    """One row per master CLOSE (the idempotency key): POST /api/broadcast-close inserts it once."""
+    __tablename__ = "master_closes"
+
+    master_trade_id = Column(String(32), primary_key=True)
+    symbol = Column(String(32), nullable=False)
+    side = Column(String(4), nullable=False)            # side of the ENTRY being closed: BUY | SELL
+    reason = Column(String(32), nullable=False)         # 'time_exit'
+    master_closed_ms = Column(BigInteger, nullable=False)
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    matched = Column(Integer, nullable=False, default=0)
+
+
+class CloseJob(Base):
+    """One close job per matched open_positions row; the trading loop runs pending/deferred jobs (execute_close)."""
+    __tablename__ = "close_jobs"
+
+    position_id = Column(Integer, ForeignKey('open_positions.id'), primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    master_trade_id = Column(String(32), nullable=False)
+    status = Column(String(16), nullable=False, default='pending')  # pending/deferred/done/failed/skipped/expired
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class Trade(Base):
@@ -377,6 +413,6 @@ def init_db(engine):
 
 # Export everything
 __all__ = [
-    'Base', 'User', 'Signal', 'SignalDelivery', 'OpenPosition', 'Trade', 
-    'Payment', 'SystemStats', 'get_db_session', 'init_db'
+    'Base', 'User', 'Signal', 'SignalDelivery', 'OpenPosition', 'Trade',
+    'Payment', 'SystemStats', 'MasterClose', 'CloseJob', 'get_db_session', 'init_db'
 ]

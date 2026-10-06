@@ -38,8 +38,10 @@ active follower's Kraken sub-account, tracking positions in Postgres.
   legacy = v1 plus safety edits; shadow = legacy plus log-only `GUARDIAN_WOULD_<KIND>`; enforce = acts.
   Rowless positions keep today's close rule. Roll back with `GUARDIAN_MODE=legacy`.
 - Shared Wave 1 modules: `bracket_guard.py` (byte-identical to `massive-rocket-algos`), `follower_guard.py`
-  (row policy, in-flight tokens, flat/fills evidence) and `signal_guard.py` (broadcast validation), both
-  byte-identical to `hyperliquid-nike-rocket-api`. Never edit one copy alone; gates compare sha256.
+  (row policy, in-flight tokens, flat/fills evidence), `signal_guard.py` (broadcast validation) and
+  `close_guard.py` (CLOSE contract + close planner; with `tests/test_close_common.py`,
+  `tests/fixtures/close_v2.json`), byte-identical to `hyperliquid-nike-rocket-api` (the fixture also to
+  `massive-rocket-algos`). Never edit one copy alone; gates compare sha256.
 - `follower_endpoints.py` — broadcast payload validated by `signal_guard` (422) before any DB write;
   `risk_pct` required, `0 < risk_pct <= 0.03`. `MASTER_API_KEY` and `ADMIN_PASSWORD` have **no default**:
   unset -> 503; compared with `hmac.compare_digest`.
@@ -47,6 +49,23 @@ active follower's Kraken sub-account, tracking positions in Postgres.
   `portfolio_api.py`.
 - DB (asyncpg/Postgres): `open_positions`, `follower_users`, `signals`, `error_logs`,
   `trades`, `position_fills`, `billing_*`.
+
+## Master CLOSE (T1 168 h time exit; spec `massive-rocket-algos` 2026-10-06-t1-live-design.md s19)
+- `POST /api/broadcast-close` (`verify_master_key`; raw JSON checked by shared `close_guard.validate_close_payload`,
+  422 before any write). One transaction: `master_closes` (PK `master_trade_id` = idempotency key; repeat ->
+  `200 duplicate:true`) + one `close_jobs` row (PK `position_id`) per `open_positions` row joined to
+  `signals.master_trade_id` with status open/needs_recovery. Never matched by symbol, user or time.
+- v2 entries carry `master_trade_id` (stored on `signals`, partial UNIQUE index; a repeat id -> duplicate, no
+  deliveries). Migrations are the marked `T1-CLOSE MIGRATIONS` block in `main.py` (additive, idempotent).
+- `hosted_trading_loop.process_close_jobs()` runs each cycle BEFORE new signals; `execute_close` under the user's
+  in-flight token: cancel TP by id -> `exit_hint='TIME'` -> ONE reduce-only market close of min(venue, row
+  remainder) via `_close_existing_position` (no row writes) -> `_verified_flat` -> `close_fill_qty` += fill ->
+  cancel SL by id. Not flat -> SL kept, `CLOSE_RESIDUAL`; `needs_recovery` rows defer to the recovery lane;
+  24 h -> `expired`. Every ccxt call in `asyncio.to_thread`. Only the monitor moves `'open'`; it labels `TIME` when
+  `exit_hint='TIME'` and `close_fill_qty > 0`.
+- Guardian: a `pending` job, or one `done` < 180 s ago, makes the user busy (`deferred` does not).
+- Env: `CLOSE_JOBS_ENABLED=0` kill switch (closes/jobs still recorded); `CLOSE_SKIP_INACTIVE_USERS=1` skips
+  stopped/unpaid/no-access users (default: close them). Events: `logs/close_events.jsonl` + `close_events` logger.
 
 ## ⚠️ Exchange gotchas (CCXT `krakenfutures`) — verified, high-impact
 1. **The client is SYNCHRONOUS.** In `async` code, wrap blocking calls:
