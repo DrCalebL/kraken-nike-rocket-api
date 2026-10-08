@@ -167,7 +167,8 @@ def convert_symbol_to_kraken(api_symbol: str) -> str:
 # POST /api/broadcast-close (follower_endpoints) records master_closes + one close_jobs row per matched
 # open_positions row. Each loop cycle runs the open jobs BEFORE new signals: execute_close() cancels the TP by id,
 # writes exit_hint='TIME', sends ONE reduce-only market close of min(venue, row remainder), verifies flat, then
-# cancels the SL by id. Kill switch: CLOSE_JOBS_ENABLED=0 (jobs wait). CLOSE_SKIP_INACTIVE_USERS=1 skips users that
+# cancels the SL by id. Kill switch: CLOSE_JOBS_ENABLED=0 (jobs wait, but a job older than 24 h from created_at
+# expires with an alarm when the switch is back on). CLOSE_SKIP_INACTIVE_USERS=1 skips users that
 # are stopped / unpaid / without access (default: close them too; a CLOSE only removes risk).
 
 CLOSE_SERVICE = 'kraken-nike-rocket-api'
