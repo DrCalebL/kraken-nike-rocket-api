@@ -1815,7 +1815,9 @@ class HostedTradingLoop:
         _verified_flat. Unlike _emergency_close_position it writes NO rows (a needs_recovery insert would duplicate
         the existing row) and never re-sends the order: the close job retries next cycle after a fresh read.
         Returns {'sent', 'order_id', 'filled', 'flat', 'error'}: filled = how much the position shrank (capped at
-        qty; = qty when a read fails, the conservative side for close_fill_qty)."""
+        qty). A failed read leaves the fill unknown: it counts only once the position is verified flat (QC review 2
+        #3: an over-count would mark the row share closed and the next attempt would cancel the SL of a position that
+        is still open)."""
         out = {'sent': False, 'order_id': None, 'filled': 0.0, 'flat': False, 'error': None}
         before = venue_qty
         if before is None:
@@ -1833,15 +1835,18 @@ class HostedTradingLoop:
         except Exception as e:
             out['error'] = close_guard.redact_text(f"{type(e).__name__}: {e}")[:300]
             self.logger.warning(f"   ⚠️ Close order for {symbol} failed: {out['error'][:160]}")
+        after = None
         if out['sent']:
             try:
                 p = await self._get_open_position(exchange, symbol)
                 after = abs(float(p.get('contracts') or 0)) if p is not None else 0.0
-                out['filled'] = (max(0.0, min(float(qty), float(before) - after)) if before is not None
-                                 else float(qty))
             except Exception:
-                out['filled'] = float(qty)
+                after = None
+            if after is not None and before is not None:
+                out['filled'] = max(0.0, min(float(qty), float(before) - after))
         out['flat'] = await self._verified_flat(exchange, symbol)
+        if out['sent'] and out['flat'] and (after is None or before is None):
+            out['filled'] = float(qty) if before is None else min(float(qty), float(before))
         return out
 
     def _close_step(self, job, name, **fields):

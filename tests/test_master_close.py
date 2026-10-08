@@ -291,6 +291,41 @@ def test_close_path_writes_only_exit_hint_close_fill_qty_and_close_jobs(monkeypa
     assert muts and all(sql in allowed for _m, sql, _a in muts), [sql for _m, sql, _a in muts]
 
 
+def test_an_unreadable_fill_after_the_close_records_no_fill(monkeypatch, tmp_path, fast_sleep, notify_log):
+    """QC (review 2 #3): when the re-read after the close fails, the fill is unknown: record nothing (an over-count
+    would mark the row share closed and the next attempt would cancel the SL of a position that is still open)."""
+    e = _env(monkeypatch, tmp_path)
+    e.ex.open_position(SYM, 'long', 100, 0.5)
+    e.ex.ignore_reduce_only_market = True                  # accepted, nothing filled
+    real = e.loop._get_open_position
+    n = {'calls': 0}
+
+    async def flaky(exchange, symbol):
+        n['calls'] += 1
+        if n['calls'] == 1:
+            raise ccxt.NetworkError('read timed out')
+        return await real(exchange, symbol)
+    monkeypatch.setattr(e.loop, '_get_open_position', flaky)
+    out = run(e.loop._close_existing_position(e.ex, SYM, 'sell', 100.0, venue_qty=100.0))
+    assert out['sent'] is True and out['flat'] is False and out['filled'] == 0.0
+
+
+def test_an_unreadable_fill_on_a_verified_flat_counts_the_close(monkeypatch, tmp_path, fast_sleep, notify_log):
+    e = _env(monkeypatch, tmp_path)
+    e.ex.open_position(SYM, 'long', 100, 0.5)
+    real = e.loop._get_open_position
+    n = {'calls': 0}
+
+    async def flaky(exchange, symbol):
+        n['calls'] += 1
+        if n['calls'] == 1:
+            raise ccxt.NetworkError('read timed out')
+        return await real(exchange, symbol)
+    monkeypatch.setattr(e.loop, '_get_open_position', flaky)
+    out = run(e.loop._close_existing_position(e.ex, SYM, 'sell', 100.0, venue_qty=100.0))
+    assert out['flat'] is True and out['filled'] == 100.0
+
+
 def test_close_existing_position_writes_no_rows_and_sends_one_reduce_only_order(monkeypatch, tmp_path, fast_sleep,
                                                                                 notify_log):
     e = _env(monkeypatch, tmp_path)
@@ -690,12 +725,23 @@ def test_guardian_busy_rules_for_close_jobs(monkeypatch, notify_log):
     run(main())
 
 
-def test_guardian_close_busy_read_error_counts_as_busy(monkeypatch, notify_log):
+def test_guardian_close_jobs_read_error_is_not_busy(monkeypatch, notify_log):
+    """QC (review 3 #4, as HL _close_busy): a failed close_jobs read (no table after a failed migration, a db blip)
+    is NOT busy; otherwise every user would be busy on every pass and the Wave 1 guardian would silently stop."""
     async def main():
         env = guardian_env(monkeypatch, mode='enforce')
         user, ex = env.user()
-        env.pool.fail_on('FROM close_jobs', RuntimeError('db down'))
-        assert await env.g._busy(user['id']) is True
+        env.pool.fail_on('FROM close_jobs', RuntimeError('relation "close_jobs" does not exist'))
+        assert await env.g._busy(user['id']) is False
+    run(main())
+
+
+def test_guardian_delivery_read_error_still_counts_as_busy(monkeypatch, notify_log):
+    async def main():
+        env = guardian_env(monkeypatch, mode='enforce')
+        user, ex = env.user()
+        env.pool.fail_on('signal_deliveries', RuntimeError('db down'))
+        assert await env.g._busy(user['id']) is True                  # Wave 1 rule, unchanged
     run(main())
 
 

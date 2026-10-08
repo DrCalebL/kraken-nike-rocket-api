@@ -261,17 +261,27 @@ class PositionGuardian:
 
     async def _busy(self, user_id, since=None) -> bool:
         """In-flight execute_trade / execute_close (in-process token), a delivery acknowledged within 180 s, or an
-        open master close job (SQL_CLOSE_BUSY). A failed read counts as busy."""
+        open master close job (SQL_CLOSE_BUSY). A failed delivery read counts as busy (Wave 1); a failed close_jobs
+        read does NOT (QC review 3 #4, as HL _close_busy: no close_jobs table means no close job, and a permanently
+        busy user would switch the guardian off for every user); it is logged."""
         if follower_guard.is_inflight(user_id):
             return True
         try:
             async with self.db_pool.acquire() as conn:
                 if await conn.fetchval(SQL_BUSY, user_id, since):
                     return True
-                return bool(await conn.fetchval(SQL_CLOSE_BUSY, user_id))
         except Exception as e:
             logger.warning(f"Busy check failed for user {user_id}: {e} - treating as busy")
             return True
+        return await self._close_busy(user_id)
+
+    async def _close_busy(self, user_id) -> bool:
+        try:
+            async with self.db_pool.acquire() as conn:
+                return bool(await conn.fetchval(SQL_CLOSE_BUSY, user_id))
+        except Exception as e:
+            logger.warning(f"close_jobs busy read failed for user {user_id}: {e!r} - not busy")
+            return False
 
     async def _yield(self, user):
         await self._alarm(user, '*', 'YIELD_INFLIGHT', 'info')
