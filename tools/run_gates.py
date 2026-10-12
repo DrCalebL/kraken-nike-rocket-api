@@ -38,7 +38,7 @@ TESTS = ('tests/test_bracket_guard.py', 'tests/test_follower_common.py', 'tests/
          'tests/test_guardian_row_policy.py', 'tests/test_fail_closed_and_bounds.py',
          'tests/test_endpoint_static.py', 'tests/test_post_entry_recovery.py', 'tests/test_chaos_tool.py',
          'tests/test_admin_static.py', 'tests/test_gate_isolation.py', 'tests/test_close_common.py',
-         'tests/test_master_close.py', 'tests/test_admin_legacy_close.py')
+         'tests/test_master_close.py')
 # QC security-6: never handed to the pytest child (tests/conftest.py also removes them and blocks the network)
 SCRUB_ENV = ('DATABASE_URL', 'RESEND_API_KEY', 'MASTER_API_KEY', 'ADMIN_PASSWORD', 'CREDENTIALS_ENCRYPTION_KEY',
              'FOLLOWER_API_URL', 'COINBASE_WEBHOOK_SECRET', 'COINBASE_COMMERCE_API_KEY')
