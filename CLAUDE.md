@@ -66,6 +66,8 @@ active follower's Kraken sub-account, tracking positions in Postgres.
 - Guardian: a `pending` job, or one `done` < 180 s ago, makes the user busy (`deferred` does not).
 - Env: `CLOSE_JOBS_ENABLED=0` kill switch (closes/jobs still recorded); `CLOSE_SKIP_INACTIVE_USERS=1` skips
   stopped/unpaid/no-access users (default: close them). Events: `logs/close_events.jsonl` + `close_events` logger.
+- Admin close of LEGACY positions (no `master_trade_id`, which broadcast-close can never match): NOT on main. Reusable
+  code on branch `claude/admin-close` @ `208b1a4`; how to re-enable: `docs/runbooks/ADMIN_LEGACY_CLOSE.md`.
 
 ## ⚠️ Exchange gotchas (CCXT `krakenfutures`) — verified, high-impact
 1. **The client is SYNCHRONOUS.** In `async` code, wrap blocking calls:
