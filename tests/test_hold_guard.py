@@ -38,7 +38,7 @@ def test_a_good_payload_passes_and_is_not_mutated():
     ('leader_trade_id', ''), ('leader_trade_id', 7), ('symbol', 'ADA/USDT'), ('symbol', 'BTC/USDT'),
     ('ref_entry', '0'), ('ref_entry', '-1'), ('ref_entry', 'nan'), ('ref_entry', 'inf'), ('ref_entry', None),
     ('ref_entry', True), ('stop_loss', '600'), ('stop_loss', '601'), ('stop_loss', '0'), ('stop_loss', 'x'),
-    ('r_b', '0'), ('r_b', '0.1500001'), ('r_b', '-0.01'), ('r_b', 'nan'), ('n2', '0'), ('n2', '1.01'),
+    ('r_b', '0'), ('r_b', '0.1500001'), ('r_b', '-0.01'), ('r_b', 'nan'), ('n2', '0'), ('n2', '10.01'),
     ('n2', None), ('leader_entry_ms', 0), ('leader_entry_ms', NOW + 600_000), ('leader_entry_ms', 1.5e12),
     ('leader_entry_ms', True), ('offer_ms', NOW - 15 * 60_000 - 1), ('offer_ms', NOW + 5 * 60_000 + 1),
     ('offer_ms', str(NOW)), ('offer_ms', None), ('offer_kind', 'ENTRY'), ('offer_kind', 'add'),

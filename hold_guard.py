@@ -92,7 +92,7 @@ def validate_hold_payload(d, known_symbols, now_ms, max_risk=None):
     """None when the broadcast-hold payload is acceptable, else the 422 reason (it starts with the failing field).
     protocol 'hold-1'; action 'BUY' only; master_trade_id 32 lowercase hex; leader_trade_id a non-empty str (<= 64);
     symbol 'BNB/USDT' and in known_symbols; 0 < stop_loss < ref_entry; 0 < r_b <= HOLD_MAX_RISK_PCT (default 0.15);
-    0 < n2 <= 1; leader_entry_ms an int > 0 not in the future; offer_ms an int not older than 15 min and not more
+    0 < n2 <= 10 (HOLD_LEVERAGE: n2 is the master's notional / equity multiple, routinely above 1 for BNB); leader_entry_ms an int > 0 not in the future; offer_ms an int not older than 15 min and not more
     than 5 min ahead; offer_kind entry|reoffer. Never raises, never mutates d."""
     if not isinstance(d, dict):
         return 'payload must be a JSON object'
@@ -125,8 +125,8 @@ def validate_hold_payload(d, known_symbols, now_ms, max_risk=None):
     cap = _pos(max_risk) if max_risk is not None else max_risk_pct()
     if r_b is None or cap is None or r_b > cap:
         return 'r_b must be in (0, %s]' % (cap if cap is not None else DEFAULT_MAX_RISK_PCT)
-    if n2 is None or n2 > 1:
-        return 'n2 must be in (0, 1]'
+    if n2 is None or n2 > HOLD_LEVERAGE:
+        return 'n2 must be in (0, %d]' % HOLD_LEVERAGE
     le = d.get('leader_entry_ms')
     if not _strict_int(le) or le <= 0 or le > now_ms + HOLD_MAX_FUTURE_MS:
         return 'leader_entry_ms must be a positive integer (epoch milliseconds) not in the future'
