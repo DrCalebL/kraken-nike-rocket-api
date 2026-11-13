@@ -55,6 +55,8 @@ class User(Base):
     
     # Agent status
     agent_active = Column(Boolean, default=False)
+    # T1LIVE-7: personal off switch for the BNB hold (default on; the service switch HOLD_ENABLED is separate)
+    hold_enabled = Column(Boolean, default=True)
     agent_started_at = Column(DateTime, nullable=True)
     agent_last_poll = Column(DateTime, nullable=True)
     
@@ -169,8 +171,16 @@ class Signal(Base):
     symbol = Column(String, nullable=False)
     entry_price = Column(Float, nullable=False)
     stop_loss = Column(Float, nullable=False)
-    take_profit = Column(Float, nullable=False)
+    take_profit = Column(Float, nullable=True)   # NULL only for strategy='hold' (a hold has no TP)
     leverage = Column(Float, default=1.0)
+
+    # T1LIVE-7: 't1' (ADA bracket, the default) or 'hold' (BNB hold copied from Binance: stop only, no TP).
+    # Holds never reach /api/latest-signal or the ADA delivery query.
+    strategy = Column(String(8), default='t1')
+    hold_r_b = Column(Float, nullable=True)
+    hold_n2 = Column(Float, nullable=True)
+    hold_leader_trade_id = Column(String(64), nullable=True)
+    hold_leader_entry_ms = Column(BigInteger, nullable=True)
     
     # Risk percentage (0.02 = 2% aggressive, 0.03 = 3% conservative)
     risk_pct = Column(Float, default=0.02)
@@ -201,6 +211,9 @@ class SignalDelivery(Base):
     signal_id = Column(Integer, ForeignKey("signals.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("follower_users.id"), nullable=False)
     
+    # T1LIVE-7: the hold offer (offer_ms in hold_offers) this delivery belongs to; NULL for ADA deliveries
+    offer_ms = Column(BigInteger, nullable=True)
+
     # Delivery tracking
     delivered_at = Column(DateTime, default=datetime.utcnow)
     acknowledged = Column(Boolean, default=False)
@@ -248,7 +261,8 @@ class OpenPosition(Base):
     entry_fill_price = Column(Float, nullable=True)
     
     # Target prices from signal
-    target_tp = Column(Float, nullable=False)
+    target_tp = Column(Float, nullable=True)   # NULL for kind='hold'
+    kind = Column(String(8), default='t1')      # 't1' (ADA bracket) | 'hold' (BNB stop-only hold)
     target_sl = Column(Float, nullable=False)
     
     # Timing
@@ -277,6 +291,27 @@ class MasterClose(Base):
     master_closed_ms = Column(BigInteger, nullable=False)
     received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     matched = Column(Integer, nullable=False, default=0)
+
+
+class HoldOffer(Base):
+    """One offer of a hold to followers (idempotency key: master_trade_id + offer_ms)."""
+    __tablename__ = "hold_offers"
+
+    master_trade_id = Column(String(32), primary_key=True)
+    offer_ms = Column(BigInteger, primary_key=True)
+    offer_kind = Column(String(8), nullable=False)
+    received_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    delivered = Column(Integer, nullable=False, default=0)
+
+
+class HoldSitout(Base):
+    """A follower who was stopped out of (or lost track of) a hold sits out that master_trade_id for good."""
+    __tablename__ = "hold_sitouts"
+
+    user_id = Column(Integer, primary_key=True)
+    master_trade_id = Column(String(32), primary_key=True)
+    reason = Column(String(32), nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class CloseJob(Base):
@@ -414,5 +449,5 @@ def init_db(engine):
 # Export everything
 __all__ = [
     'Base', 'User', 'Signal', 'SignalDelivery', 'OpenPosition', 'Trade',
-    'Payment', 'SystemStats', 'MasterClose', 'CloseJob', 'get_db_session', 'init_db'
+    'Payment', 'SystemStats', 'MasterClose', 'CloseJob', 'HoldOffer', 'HoldSitout', 'get_db_session', 'init_db'
 ]

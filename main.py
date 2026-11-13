@@ -307,6 +307,43 @@ if DATABASE_URL:
         print("✅ Close schema up to date")
     except Exception as e:
         print(f"⚠️ Close schema migration - {e}")
+    # T1LIVE7 HOLD MIGRATIONS:START
+    # BNB hold (strategy 'hold'): additive and idempotent, each statement on its own (autocommit).
+    _HOLD_MIGRATIONS = (
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(8) DEFAULT 't1'",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hold_r_b DOUBLE PRECISION",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hold_n2 DOUBLE PRECISION",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hold_leader_trade_id VARCHAR(64)",
+        "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hold_leader_entry_ms BIGINT",
+        "ALTER TABLE signals ALTER COLUMN take_profit DROP NOT NULL",
+        "ALTER TABLE signal_deliveries ADD COLUMN IF NOT EXISTS offer_ms BIGINT",
+        "ALTER TABLE open_positions ADD COLUMN IF NOT EXISTS kind VARCHAR(8) DEFAULT 't1'",
+        "ALTER TABLE open_positions ALTER COLUMN target_tp DROP NOT NULL",
+        "ALTER TABLE follower_users ADD COLUMN IF NOT EXISTS hold_enabled BOOLEAN DEFAULT TRUE",
+        "CREATE TABLE IF NOT EXISTS hold_offers ("
+        " master_trade_id VARCHAR(32) NOT NULL, offer_ms BIGINT NOT NULL, offer_kind VARCHAR(8) NOT NULL,"
+        " received_at TIMESTAMP NOT NULL DEFAULT NOW(), delivered INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (master_trade_id, offer_ms))",
+        "CREATE TABLE IF NOT EXISTS hold_sitouts ("
+        " user_id INTEGER NOT NULL, master_trade_id VARCHAR(32) NOT NULL, reason VARCHAR(32) NOT NULL,"
+        " created_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, master_trade_id))",
+    )
+    try:
+        import psycopg2
+        _hold_conn = psycopg2.connect(DATABASE_URL)
+        _hold_conn.autocommit = True
+        _hold_cur = _hold_conn.cursor()
+        for _hold_stmt in _HOLD_MIGRATIONS:
+            try:
+                _hold_cur.execute(_hold_stmt)
+            except Exception as e:
+                print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {e}")
+        _hold_cur.close()
+        _hold_conn.close()
+        print("✅ Hold schema up to date")
+    except Exception as e:
+        print(f"⚠️ Hold schema migration - {e}")
+    # T1LIVE7 HOLD MIGRATIONS:END
     # T1-CLOSE MIGRATIONS:END
     print("✅ Database initialized")
 else:

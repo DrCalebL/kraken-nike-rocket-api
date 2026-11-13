@@ -24,7 +24,7 @@ Updated: November 24, 2025
 
 from fastapi import APIRouter, HTTPException, Header, Depends, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, HTMLResponse
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
@@ -40,10 +40,11 @@ import ccxt
 from pydantic import BaseModel, EmailStr
 
 import close_guard
+import hold_guard
 import signal_guard
 
 from follower_models import (
-    User, Signal, SignalDelivery, Trade, Payment, SystemStats,
+    User, Signal, SignalDelivery, Trade, Payment, SystemStats, OpenPosition, HoldOffer, HoldSitout, MasterClose,
     get_db_session
 )
 
@@ -509,6 +510,10 @@ SQL_INSERT_CLOSE_JOBS = text(
     "WHERE s.master_trade_id = :mtid AND op.status IN ('open', 'needs_recovery') "
     "ON CONFLICT (position_id) DO NOTHING RETURNING position_id, user_id"
 )
+SQL_ACK_CLOSED_DELIVERIES = text(
+    "UPDATE signal_deliveries SET acknowledged = :ack, acknowledged_at = :now "
+    "WHERE acknowledged = :unack AND signal_id IN (SELECT id FROM signals WHERE master_trade_id = :mtid)"
+).bindparams(ack=True, unack=False)
 SQL_SET_MATCHED = text("UPDATE master_closes SET matched = :n WHERE master_trade_id = :mtid")
 
 
@@ -538,6 +543,9 @@ def _record_master_close(db: Session, close: CloseBroadcast, now: datetime):
         return True, int(prev or 0), []
     jobs = [(r[0], r[1]) for r in db.execute(SQL_INSERT_CLOSE_JOBS, {'mtid': close.master_trade_id, 'now': now})]
     db.execute(SQL_SET_MATCHED, {'n': len(jobs), 'mtid': close.master_trade_id})
+    # T1LIVE-7: the leader is out, so an entry delivery of this trade that no follower has executed yet must never
+    # open it afterwards (a hold offer is valid for 15 min; fail closed)
+    db.execute(SQL_ACK_CLOSED_DELIVERIES, {'mtid': close.master_trade_id, 'now': now})
     db.commit()
     return False, len(jobs), jobs
 
@@ -592,6 +600,107 @@ async def broadcast_close(
     return {"accepted": True, "duplicate": duplicate, "followers_matched": matched}
 
 
+# ==================== BNB HOLD (T1LIVE-7; protocol hold-1) ====================
+
+def hold_service_enabled() -> bool:
+    """HOLD_ENABLED (default OFF): the master relay may call /api/broadcast-hold before the owner switches it on."""
+    return (os.getenv('HOLD_ENABLED') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
+    """Followers to deliver an offer to: access, agent on, credentials set, hold_enabled, on the allowlist (if one
+    is set), with NO open_positions row of this trade (any status: also covers a follower who already holds or was
+    stopped out), no hold_sitouts record, and no still-open delivery of this trade. Fail closed: a read error
+    propagates (no deliveries)."""
+    users = db.query(User).filter(
+        User.access_granted == True,
+        User.agent_active == True,
+        User.credentials_set == True,
+        or_(User.hold_enabled.is_(None), User.hold_enabled == True),
+    ).all()
+    have_row = {r[0] for r in db.query(OpenPosition.user_id).join(Signal, OpenPosition.signal_id == Signal.id)
+                .filter(Signal.master_trade_id == mtid).all()}
+    sat_out = {r[0] for r in db.query(HoldSitout.user_id).filter(HoldSitout.master_trade_id == mtid).all()}
+    pending = {r[0] for r in db.query(SignalDelivery.user_id).filter(
+        SignalDelivery.signal_id == signal_db_id, SignalDelivery.acknowledged == False,
+        SignalDelivery.failed == False).all()}
+    allow = hold_guard.parse_allowlist(os.getenv('HOLD_USER_ALLOWLIST'))
+    return [u for u in users if u.id not in have_row and u.id not in sat_out and u.id not in pending
+            and hold_guard.user_allowed(allow, u.id, u.email)]
+
+
+@router.post("/api/broadcast-hold")
+async def broadcast_hold(
+    request: Request,
+    _: bool = Depends(verify_master_key),
+    db: Session = Depends(get_db)
+):
+    """
+    Offer the Binance BNB hold to followers (protocol hold-1). Auth: MASTER_API_KEY, same as broadcast-signal.
+
+    Raw JSON validated by hold_guard (422, nothing written). Idempotent per (master_trade_id, offer_ms). The first
+    offer of a master_trade_id creates the strategy='hold' signal; a re-offer reuses it (and must carry the same
+    stop and reference). Deliveries go only to hold_eligible users. HOLD_ENABLED unset/0 -> 200 skipped, nothing
+    written. A trade the master already closed (master_closes) is never offered again.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+    err = hold_guard.validate_hold_payload(payload, _close_known_symbols(), _now_ms())
+    if err:
+        logger.warning(f"🚫 HOLD rejected (422): {err}")
+        raise HTTPException(status_code=422, detail=err)
+    if not hold_service_enabled():
+        logger.info("⏭️ HOLD offer ignored: HOLD_ENABLED is off")
+        return {"accepted": True, "skipped": "HOLD_DISABLED", "duplicate": False, "delivered_to": 0}
+    mtid, offer_ms = payload['master_trade_id'], payload['offer_ms']
+    ref, stop = float(payload['ref_entry']), float(payload['stop_loss'])
+    r_b, n2 = float(payload['r_b']), float(payload['n2'])
+    try:
+        if db.query(HoldOffer).filter(HoldOffer.master_trade_id == mtid, HoldOffer.offer_ms == offer_ms).first():
+            return {"accepted": True, "duplicate": True, "delivered_to": 0}
+        if db.query(MasterClose).filter(MasterClose.master_trade_id == mtid).first():
+            logger.warning(f"🚫 HOLD {mtid}: the master already closed this trade - not offered")
+            return {"accepted": True, "skipped": "HOLD_ALREADY_CLOSED", "duplicate": False, "delivered_to": 0}
+        sig = db.query(Signal).filter(Signal.master_trade_id == mtid).first()
+        if sig is not None:
+            if sig.strategy != 'hold' or sig.symbol != payload['symbol']:
+                raise HTTPException(status_code=422, detail="master_trade_id belongs to a non-hold signal")
+            same = (abs((sig.entry_price or 0) - ref) <= 1e-9 * ref and abs((sig.stop_loss or 0) - stop) <= 1e-9 * ref
+                    and abs((sig.hold_r_b or 0) - r_b) <= 1e-9 and abs((sig.hold_n2 or 0) - n2) <= 1e-9)
+            if not same:
+                raise HTTPException(status_code=422, detail="hold parameters differ from the first offer")
+        else:
+            sig = Signal(signal_id=secrets.token_urlsafe(16), action='BUY', symbol=payload['symbol'],
+                         entry_price=ref, stop_loss=stop, take_profit=None, leverage=float(hold_guard.HOLD_LEVERAGE),
+                         risk_pct=r_b, strategy='hold', hold_r_b=r_b, hold_n2=n2,
+                         hold_leader_trade_id=payload['leader_trade_id'],
+                         hold_leader_entry_ms=payload['leader_entry_ms'], master_trade_id=mtid,
+                         notes='BNB hold copied from Binance')
+            db.add(sig)
+            db.flush()
+        users = _hold_eligible_users(db, sig.id, mtid)
+        for u in users:
+            db.add(SignalDelivery(signal_id=sig.id, user_id=u.id, offer_ms=offer_ms))
+        db.add(HoldOffer(master_trade_id=mtid, offer_ms=offer_ms, offer_kind=payload['offer_kind'],
+                         delivered=len(users)))
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError:
+        # a concurrent identical offer won the primary key / partial unique index: nothing further to do
+        db.rollback()
+        return {"accepted": True, "duplicate": True, "delivered_to": 0}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ HOLD {mtid} not recorded: {close_guard.redact_text(str(e))[:200]}")
+        raise HTTPException(status_code=500, detail="hold not recorded")
+    logger.info(f"📡 HOLD offer {payload['offer_kind']} {mtid} offer_ms={offer_ms}: delivered to {len(users)} follower(s)")
+    return {"accepted": True, "duplicate": False, "delivered_to": len(users), "signal_id": sig.signal_id}
+
+
 @router.get("/api/latest-signal")
 async def get_latest_signal(
     user: User = Depends(verify_user_key),
@@ -624,7 +733,10 @@ async def get_latest_signal(
         delivery = db.query(SignalDelivery).join(Signal).filter(
             SignalDelivery.user_id == user.id,
             SignalDelivery.acknowledged == False,
-            SignalDelivery.failed == False  # Don't return failed signals
+            SignalDelivery.failed == False,  # Don't return failed signals
+            # T1LIVE-7: a legacy / agent path must NEVER be handed a hold (it has no TP; only the hosted loop's
+            # execute_hold_entry may open one)
+            or_(Signal.strategy.is_(None), Signal.strategy != 'hold')
         ).order_by(Signal.created_at.desc()).first()
         
         if not delivery:
