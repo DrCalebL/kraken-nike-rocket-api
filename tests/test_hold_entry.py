@@ -745,3 +745,96 @@ def test_a_close_acknowledgement_leaves_acknowledged_at_null(monkeypatch, tmp_pa
     _post_hold(a, _hold_payload())
     _post_close(a, _close_payload(MTID, symbol='ADA/USDT', reason='leader_exit'))
     assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries WHERE acknowledged_at IS NOT NULL') == 0
+
+
+# ======================================================================================================
+# review M1/M3: a CLOSE that races the entry, atomic acknowledge; LOW-4 symbol; LOW-5 dedup
+# ======================================================================================================
+
+def _late_close_handler(e):
+    def handler(method, sql, args):
+        user_id, signal_id = args
+        mtid = e.hold.mtid_of_signal.get(signal_id)
+        if mtid not in e.hold.closed:
+            return 'INSERT 0 0'
+        rows = [r for r in e.db.rows if r['user_id'] == user_id and r.get('signal_id') == signal_id
+                and r['status'] in ('open', 'needs_recovery')]
+        for r in rows:
+            e.cdb.add_job(r, master_trade_id=mtid, side='BUY')
+        return 'INSERT 0 %d' % len(rows)
+    e.pool.on(htl.SQL_LATE_CLOSE_JOB, handler)
+
+
+def _close_during_entry(e, monkeypatch, mtid):
+    real = e.loop._wait_for_position
+
+    async def hooked(*a, **k):
+        e.hold.closed.add(mtid)                                     # the master's CLOSE lands after our checks
+        return await real(*a, **k)
+
+    monkeypatch.setattr(e.loop, '_wait_for_position', hooked)
+
+
+def test_a_hold_that_opened_after_the_close_gets_a_close_job_and_is_closed(monkeypatch, fast_sleep, notify_log,
+                                                                         tmp_path):
+    monkeypatch.setattr(htl, 'CLOSE_EVENTS', htl.make_close_event_log(str(tmp_path / 'c.jsonl')))
+    e = _env(monkeypatch)
+    _late_close_handler(e)
+    _close_during_entry(e, monkeypatch, MTID)
+    run(_enter(e))
+    row, = _hold_rows(e)
+    job = e.cdb.job(row['id'])
+    assert job['status'] == 'pending' and 'LATE_ENTRY_AFTER_CLOSE' in e.db.error_types()
+    e.cdb.closes[MTID].update(reason='leader_exit', symbol='BNB/USDT')
+    run(e.loop.process_close_jobs())
+    assert e.ex.positions == {} and e.cdb.job(row['id'])['status'] == 'done'
+
+
+def test_an_ada_entry_that_opened_after_the_close_gets_a_close_job(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    _late_close_handler(e)
+    e.hold.mtid_of_signal[77] = MTID
+    _close_during_entry(e, monkeypatch, MTID)
+    run(e.loop.execute_trade(e.user, _ada_item(e)))
+    row, = [r for r in e.db.rows if (r.get('kind') or 't1') == 't1']
+    assert e.cdb.job(row['id'])['status'] == 'pending'
+
+
+def test_a_normal_entry_queues_no_close_job(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    _late_close_handler(e)
+    run(_enter(e))
+    assert e.cdb.jobs == {} and 'LATE_ENTRY_AFTER_CLOSE' not in e.db.error_types()
+
+
+def test_a_delivery_acknowledged_by_the_close_is_never_entered_hold_or_ada(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    item = e.hold.add_delivery(e.user)
+    e.db.acked_deliveries.add(item['delivery_id'])                  # broadcast-close acknowledged it first
+    run(e.loop._execute_hold_for_user(item))
+    ada = _ada_item(e)
+    e.db.acked_deliveries.add(ada['delivery_id'])
+    assert run(e.loop.execute_trade(e.user, ada)) is False
+    assert e.ex.calls() == [] and e.db.rows == []
+
+
+def test_the_acknowledge_is_one_atomic_update_that_returns_the_id(monkeypatch):
+    assert 'acknowledged = false' in htl.SQL_ACK_DELIVERY and 'RETURNING id' in htl.SQL_ACK_DELIVERY
+    e = _env(monkeypatch)
+    assert run(e.loop.acknowledge_signal(5)) is True and run(e.loop.acknowledge_signal(5)) is False
+
+
+@pytest.mark.parametrize('symbol', ['BNB/USDT', 'BTC/USDT', 'XRP/USDT'])
+def test_the_t1_path_refuses_every_non_ada_symbol(monkeypatch, fast_sleep, notify_log, symbol):
+    e = _env(monkeypatch)
+    sig = dict(_ada_item(e), symbol=symbol)
+    assert run(e.loop.execute_trade(e.user, sig)) is False
+    assert e.ex.calls() == [] and e.pool.sql('UPDATE signal_deliveries') == []
+
+
+def test_an_existing_row_for_the_same_signal_blocks_the_entry(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.db.add_row(user_id=e.user['id'], signal_id=77, status='closed')      # CHECK 0: any row, any status
+    has_open, why = run(e.loop.check_any_open_positions_or_orders(e.ex, 'u', user_id=e.user['id'],
+                                                                  signal_id='sig-ada-1'))
+    assert has_open is True and why == 'Position already exists for this signal'

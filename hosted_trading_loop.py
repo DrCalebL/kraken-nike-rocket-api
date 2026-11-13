@@ -213,6 +213,7 @@ SQL_ADD_CLOSE_FILL = """
 # strategy: an ADA bracket and a BNB hold can stand together, nothing else. Switches: HOLD_ENABLED (default 0),
 # HOLD_USER_ALLOWLIST. A leader exit arrives as a CLOSE with reason 'leader_exit' (exit_hint 'LEADER').
 
+T1_API_SYMBOLS = ('ADA/USDT',)     # the T1 TP bracket trades ADA only; BNB is reachable through execute_hold_entry only
 HOLD_SERVICE = 'kraken-nike-rocket-api'
 HOLD_SYMBOL_API = hold_guard.HOLD_SYMBOL
 HOLD_MARKET_RECHECK_S = 600.0
@@ -235,6 +236,23 @@ SQL_PENDING_HOLDS = """
       AND COALESCE(sd.failed, false) = false
       AND sd.delivered_at > NOW() - INTERVAL '15 minutes'
     ORDER BY sd.delivered_at
+"""
+SQL_ACK_DELIVERY = """
+    UPDATE signal_deliveries
+    SET acknowledged = true, acknowledged_at = NOW(), executed = true, executed_at = NOW()
+    WHERE id = $1 AND acknowledged = false
+    RETURNING id
+"""
+# After ANY open_positions row of a trade is recorded: if the master already closed that master_trade_id (a CLOSE that
+# raced the entry), queue the close job now; the CLOSE endpoint matched no row when it arrived.
+SQL_LATE_CLOSE_JOB = """
+    INSERT INTO close_jobs (position_id, user_id, master_trade_id, status, attempts, created_at, updated_at)
+    SELECT op.id, op.user_id, mc.master_trade_id, 'pending', 0, NOW(), NOW()
+    FROM open_positions op
+    JOIN signals s ON op.signal_id = s.id
+    JOIN master_closes mc ON mc.master_trade_id = s.master_trade_id
+    WHERE op.user_id = $1 AND op.signal_id = $2 AND op.status IN ('open', 'needs_recovery')
+    ON CONFLICT (position_id) DO NOTHING
 """
 SQL_HOLD_CLOSED = "SELECT 1 FROM master_closes WHERE master_trade_id = $1"
 SQL_HOLD_SITOUT = "SELECT 1 FROM hold_sitouts WHERE user_id = $1 AND master_trade_id = $2"
@@ -613,17 +631,13 @@ class HostedTradingLoop:
             
             return dict(row)
     
-    async def acknowledge_signal(self, delivery_id: int):
-        """Mark signal as acknowledged after execution"""
+    async def acknowledge_signal(self, delivery_id: int) -> bool:
+        """Mark the delivery acknowledged. ATOMIC (T1LIVE-7 review M1): True only when THIS call moved it from
+        unacknowledged to acknowledged. False means someone else already did (e.g. broadcast-close acknowledged a
+        delivery of a trade the leader already left): the caller must not enter."""
         async with self.db_pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE signal_deliveries 
-                SET acknowledged = true, 
-                    acknowledged_at = NOW(),
-                    executed = true,
-                    executed_at = NOW()
-                WHERE id = $1
-            """, delivery_id)
+            got = await conn.fetchval(SQL_ACK_DELIVERY, delivery_id)
+        return got is not None
     
     async def get_user_equity(self, exchange: ccxt.krakenfutures) -> float:
         """Get user's Kraken Futures equity"""
@@ -853,6 +867,10 @@ class HostedTradingLoop:
         if str(signal.get('strategy') or 't1').lower() == 'hold':
             self.logger.critical("   🚨 a hold signal reached execute_trade (T1 bracket path) - refused")
             return False
+        if str(signal.get('symbol')) not in T1_API_SYMBOLS:
+            # the BNB mapping exists for the hold path only: a TP-bracket trade on anything but ADA is refused
+            self.logger.critical(f"   🚨 T1 path refused symbol {signal.get('symbol')!r} (ADA/USDT only)")
+            return False
         if follower_guard.is_inflight(user['id']):
             # T1LIVE-7: one entry per user at a time; the delivery stays unacknowledged and is retried next cycle
             self.logger.warning("   ⏭️ user has an execution in flight - entry deferred")
@@ -875,7 +893,9 @@ class HostedTradingLoop:
         # If trade fails, we do NOT unacknowledge - signal is considered "attempted".
         # This prevents the Jan 19 bug where fast TP fills caused double execution.
         if delivery_id:
-            await self.acknowledge_signal(delivery_id)
+            if not await self.acknowledge_signal(delivery_id):
+                self.logger.warning(f"   ⏭️ {user_short}: delivery already acknowledged (executed or closed) - not entering")
+                return False
             self.logger.info(f"   🔒 {user_short}: Signal acknowledged (preventing re-execution)")
         
         # Post-entry bookkeeping (R3-H1): 'pre_entry' -> 'entry_sent' -> 'done'.
@@ -1338,6 +1358,7 @@ class HostedTradingLoop:
                 )
 
             if position_recorded:
+                await self._late_close_check(user, signal_db_id, user_api_key)
                 # Start billing cycle if not started (first trade OPEN)
                 # Use position's opened_at to ensure the trade is included in the cycle
                 try:
@@ -1407,6 +1428,26 @@ class HostedTradingLoop:
                                                  bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             return False
     
+    async def _late_close_check(self, user: Dict, signal_db_id, api_key: str):
+        """Review M1/M3: the master may have CLOSEd this trade between our delivery check and the row insert, in which
+        case broadcast-close matched nothing. Queue the close job for the row we just wrote. Never raises."""
+        if not signal_db_id:
+            return
+        try:
+            async with self.db_pool.acquire() as conn:
+                res = await conn.execute(SQL_LATE_CLOSE_JOB, user['id'], signal_db_id)
+            if str(res).split()[-1].isdigit() and int(str(res).split()[-1]) > 0:
+                await log_error_to_db(self.db_pool, api_key, "LATE_ENTRY_AFTER_CLOSE",
+                                      "position opened after the master's CLOSE; close job queued",
+                                      {"signal_db_id": signal_db_id, "user_id": user['id']})
+                await notify_admin(title="LATE_ENTRY_AFTER_CLOSE (Kraken follower)",
+                                   details={"User ID": user['id'], "Signal": signal_db_id,
+                                            "Action": "close job queued"}, level="warning")
+        except Exception as e:
+            self.logger.error(f"   ⚠️ late-close check failed: {e}")
+            await log_error_to_db(self.db_pool, api_key, "LATE_CLOSE_CHECK_FAILED", str(e)[:200],
+                                  {"signal_db_id": signal_db_id})
+
     # ==================== BNB HOLD ENTRY (T1LIVE-7) ====================
 
     async def _execute_hold_for_user(self, item: Dict):
@@ -1488,7 +1529,9 @@ class HostedTradingLoop:
 
         # Early acknowledgment (as the ADA path): a hold entry is never re-sent after it was attempted
         if delivery_id:
-            await self.acknowledge_signal(delivery_id)
+            if not await self.acknowledge_signal(delivery_id):
+                self.logger.warning(f"   ⏭️ {user_short}: hold delivery already acknowledged (executed or closed) - not entering")
+                return False
             self.logger.info(f"   🔒 {user_short}: Hold delivery acknowledged (preventing re-execution)")
 
         stage = 'pre_entry'
@@ -1617,6 +1660,7 @@ class HostedTradingLoop:
                                             "Impact": "Hold keeps its SL but has no open_positions row"},
                                    level="error")
             if recorded:
+                await self._late_close_check(user, signal_db_id, user_api_key)
                 try:
                     async with self.db_pool.acquire() as conn:
                         await conn.execute("""

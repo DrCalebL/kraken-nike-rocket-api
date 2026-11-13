@@ -128,6 +128,7 @@ class FollowerDB:
         self.deliveries = {}            # signal_deliveries.id -> user_id (acknowledge_signal)
         self.errors = []                # (error_type, message, context json)
         self.trades = []
+        self.acked_deliveries = set()    # delivery ids moved to acknowledged by the atomic RETURNING update
         self.now = now or utcnow_naive
         self.signal_db_id = 77
         self._ids = itertools.count(1000)
@@ -268,6 +269,12 @@ class FollowerDB:
         return 'INSERT 0 1'
 
     def _ack(self, method, sql, args):
+        if 'RETURNING id' in sql:                       # the atomic acknowledge: only the first caller gets the id
+            if args[0] in self.acked_deliveries:
+                return None
+            self.acked_deliveries.add(args[0])
+            self.acks.append((self.deliveries.get(args[0]), self.now()))
+            return args[0]
         self.acks.append((self.deliveries.get(args[0]), self.now()))
         return 'UPDATE 1'
 
