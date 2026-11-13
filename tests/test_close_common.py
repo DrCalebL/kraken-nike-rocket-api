@@ -23,7 +23,7 @@ import follower_guard as fg  # noqa: E402
 FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fixtures', 'close_v2.json')
 # Newline-normalised sha256 of tests/fixtures/close_v2.json. The same constant in both follower copies of this file
 # plus the gates' sibling comparison pin the fixture byte-identical across the master and both followers.
-CLOSE_V2_SHA256 = 'cedf126d058c497105b30160ec0f38b47c0f8cbd89f15bb314b4642e31d76733'
+CLOSE_V2_SHA256 = 'efc02c6351ec8906cd36a7bc0899cffff944a617583b246be6a4f4a87839c0de'
 
 TID = '0123456789abcdef0123456789abcdef'
 LOT = 1.0
@@ -61,7 +61,7 @@ def test_fixture_shape():
     assert fx['responses']['repeat'] == {'accepted': True, 'duplicate': True, 'followers_matched': 3}
     names = [c['name'] for c in fx['cases']]
     assert len(names) == len(set(names))
-    assert sum(c['expect'] == 200 for c in fx['cases']) == 5
+    assert sum(c['expect'] == 200 for c in fx['cases']) == 6
     assert all(c['expect'] in (200, 422) for c in fx['cases'])
     fields = {c['field'] for c in fx['cases'] if c['expect'] == 422}
     assert fields == {'payload', 'protocol', 'action', 'master_trade_id', 'symbol', 'side', 'reason',
@@ -106,13 +106,20 @@ def test_validator_never_raises_and_does_not_mutate():
 
 def test_validator_window_constants():
     assert cg.CLOSE_PROTOCOL == 2
-    assert cg.CLOSE_REASONS == frozenset({'time_exit'})
+    assert cg.CLOSE_REASONS == frozenset({'time_exit', 'leader_exit'})
     assert cg.CLOSE_MAX_PAST_MS == 48 * 3_600_000
     assert cg.CLOSE_MAX_FUTURE_MS == 5 * 60_000
     assert cg.is_master_trade_id(TID)
     assert not cg.is_master_trade_id(TID + '\n')
     assert not cg.is_master_trade_id(TID.upper())
     assert not cg.is_master_trade_id(None)
+
+
+def test_exit_hint_per_reason():
+    assert cg.exit_hint_for('time_exit') == 'TIME'
+    assert cg.exit_hint_for('leader_exit') == 'LEADER'
+    assert cg.exit_hint_for('stop_loss') is None and cg.exit_hint_for(None) is None
+    assert set(cg.EXIT_HINTS) == set(cg.CLOSE_REASONS)
 
 
 def test_job_constants():

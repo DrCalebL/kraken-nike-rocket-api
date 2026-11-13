@@ -39,7 +39,10 @@ import follower_guard as fg
 CLOSE_PROTOCOL = 2
 CLOSE_ACTION = 'CLOSE'
 CLOSE_SIDES = ('BUY', 'SELL')
-CLOSE_REASONS = frozenset({'time_exit'})
+CLOSE_REASONS = frozenset({'time_exit', 'leader_exit'})
+# T1LIVE-7: the exit_hint execute_close writes on the row BEFORE its close order, per reason. position_monitor labels
+# the exit from it (TIME = the 168 h time exit; LEADER = the leader (Binance) exited: ADA T1 trades and holds).
+EXIT_HINTS = {'time_exit': 'TIME', 'leader_exit': 'LEADER'}
 CLOSE_MAX_PAST_MS = 48 * 3_600_000
 CLOSE_MAX_FUTURE_MS = 5 * 60_000
 _TRADE_ID_RE = re.compile(r'[0-9a-f]{32}')
@@ -69,6 +72,11 @@ DONE_DUST = 'DONE_DUST'
 CLOSE = 'CLOSE'
 STEP_CODES = (DONE_ROW_INACTIVE, DEFER_RECOVERY, RETRY_READ_UNKNOWN, DONE_ALREADY_FLAT, FAIL_SIDE_MISMATCH,
               FAIL_BAD_QTY, DONE_ROW_SHARE_CLOSED, DONE_DUST, CLOSE)
+
+
+def exit_hint_for(reason):
+    """The exit_hint for a validated CLOSE reason; None for anything else (the caller keeps today's 'TIME')."""
+    return EXIT_HINTS.get(reason) if isinstance(reason, str) else None
 
 
 def is_master_trade_id(v):
