@@ -31,17 +31,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GATE_MODULES = ('pytest', 'pytest_asyncio', 'pytest_mock', 'fastapi', 'pydantic', 'email_validator',
                 'sqlalchemy', 'httpx', 'cryptography', 'aiohttp', 'requests', 'ccxt')
 COMPILE = ('hosted_trading_loop.py', 'order_utils.py', 'position_guardian.py', 'follower_endpoints.py',
-           'bracket_guard.py', 'follower_guard.py', 'signal_guard.py', 'close_guard.py', 'position_monitor.py',
+           'bracket_guard.py', 'follower_guard.py', 'signal_guard.py', 'close_guard.py', 'hold_guard.py', 'position_monitor.py',
            'follower_models.py', 'main.py')
 TESTS = ('tests/test_bracket_guard.py', 'tests/test_follower_common.py', 'tests/test_wait_for_position.py',
          'tests/test_bracket_sl_first.py', 'tests/test_position_guardian_invariant.py',
          'tests/test_guardian_row_policy.py', 'tests/test_fail_closed_and_bounds.py',
          'tests/test_endpoint_static.py', 'tests/test_post_entry_recovery.py', 'tests/test_chaos_tool.py',
          'tests/test_admin_static.py', 'tests/test_gate_isolation.py', 'tests/test_close_common.py',
-         'tests/test_master_close.py')
+         'tests/test_master_close.py', 'tests/test_hold_guard.py', 'tests/test_strategy_slots.py',
+         'tests/test_hold_entry.py', 'tests/test_hold_rows.py')
 # QC security-6: never handed to the pytest child (tests/conftest.py also removes them and blocks the network)
 SCRUB_ENV = ('DATABASE_URL', 'RESEND_API_KEY', 'MASTER_API_KEY', 'ADMIN_PASSWORD', 'CREDENTIALS_ENCRYPTION_KEY',
-             'FOLLOWER_API_URL', 'COINBASE_WEBHOOK_SECRET', 'COINBASE_COMMERCE_API_KEY')
+             'FOLLOWER_API_URL', 'COINBASE_WEBHOOK_SECRET', 'COINBASE_COMMERCE_API_KEY',
+             'HOLD_ENABLED', 'HOLD_USER_ALLOWLIST', 'HOLD_MAX_RISK_PCT', 'HOLD_SIZE_SCALE', 'HOLD_SL_MATCH_PCT')
 SHARED = {
     'massive-rocket-algos': ('bracket_guard.py', 'tests/test_bracket_guard.py', 'tests/fixtures/close_v2.json'),
     'hyperliquid-nike-rocket-api': ('follower_guard.py', 'signal_guard.py', 'tests/test_follower_common.py',

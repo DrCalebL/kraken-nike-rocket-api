@@ -69,6 +69,18 @@ active follower's Kraken sub-account, tracking positions in Postgres.
 - Admin close of LEGACY positions (no `master_trade_id`, which broadcast-close can never match): NOT on main. Reusable
   code on branch `claude/admin-close` @ `208b1a4`; how to re-enable: `docs/runbooks/ADMIN_LEGACY_CLOSE.md`.
 
+## BNB hold (T1LIVE-7; Kraken followers copy Binance's hold; spec `massive-rocket-algos`-side `docs/superpowers/specs/2026-11-13-kraken-follows-binance-design.md` s3 + s9)
+- `POST /api/broadcast-hold` (master key; `hold_guard.validate_hold_payload`, protocol `hold-1`) -> `signals(strategy='hold', take_profit NULL)`
+  + `signal_deliveries(offer_ms)` + `hold_offers` (idempotent per master_trade_id + offer_ms). `HOLD_ENABLED` default **0**;
+  `HOLD_USER_ALLOWLIST` (ids/e-mails; unset = all); per-user `follower_users.hold_enabled` (default true). Holds never reach
+  `/api/latest-signal` or the ADA delivery queries (`COALESCE(strategy,'t1')='t1'`).
+- `execute_hold_entry`: market entry -> `_wait_for_position` -> stop-market SL, NO TP, row `kind='hold'`, `target_tp` NULL; size
+  `hold_guard.size_hold` at the follower's own mark, fixed 10x (never raised; shrink to free margin, `HOLD_MARGIN_SKIP`).
+  One slot per strategy (`check_any_open_positions_or_orders(strategy=)`), one entry delivery per user per cycle, startup
+  check `PF_BNBUSD`. A stopped-out/unclear hold exit writes `hold_sitouts`. `leader_exit` CLOSE reason -> `exit_hint 'LEADER'`.
+- Guardian/monitor are kind-aware: a hold row is never closed or TP-repaired (alarm `HOLD_SL_MISSING` only);
+  `check_position_closed` is symbol-scoped.
+
 ## ⚠️ Exchange gotchas (CCXT `krakenfutures`) — verified, high-impact
 1. **The client is SYNCHRONOUS.** In `async` code, wrap blocking calls:
    `await asyncio.to_thread(exchange.fetch_*)`. Pattern used in `balance_checker.py`,
@@ -84,8 +96,8 @@ active follower's Kraken sub-account, tracking positions in Postgres.
    reduce-only order sent before the entry fill registers is rejected
    ("would not reduce position"). Confirm via `_wait_for_position` (polls the
    position) — never a blind `sleep`. This was the 2026-06-16 incident.
-5. `open_positions.target_tp` / `target_sl` are **NOT NULL** — the recovery insert
-   must populate them (fixed in `fd723fa`).
+5. `open_positions.target_sl` is **NOT NULL**; `target_tp` is NULL only for `kind='hold'` rows (T1LIVE-7). The ADA recovery
+   insert still populates both (fixed in `fd723fa`).
 6. Open-order rows carry the SL level in `info['stopPrice']`, not unified `triggerPrice`. One empty positions
    read is never proof of flat: a flat counts only after a confirming re-read.
 
