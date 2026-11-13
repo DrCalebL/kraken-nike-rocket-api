@@ -112,10 +112,11 @@ def test_refused_when_the_mark_is_within_one_percent_of_the_stop(mark):
     assert not s.ok and s.reason == hg.HOLD_MARK_NEAR_STOP and s.qty is None
 
 
-def test_refused_when_the_mark_is_over_three_percent_from_ref():
-    assert size(mark=619.0).reason == hg.HOLD_MARK_DEVIATION
-    assert size(mark=581.0).reason == hg.HOLD_MARK_DEVIATION
-    assert size(mark=617.9).ok and size(mark=582.1).ok
+def test_a_late_join_far_from_the_leaders_ref_is_sized_not_refused():
+    s = size(mark=648.0)                        # 8% above ref: sized at its own price (owner: same as HL G1c)
+    assert s.ok and s.qty == 2.56               # risk leg 200 / (648 - 570); cap 5000 / 648 = 7.71
+    assert size(mark=585.0, ref_entry=600.0).ok # below ref too: only the near-stop refusal stays
+    assert not hasattr(hg, 'HOLD_MARK_DEVIATION')
 
 
 def test_size_scale_halves_and_caps_at_one(monkeypatch):
@@ -164,7 +165,10 @@ def test_a_tiny_account_floors_to_zero():
 
 def test_allowlist_parsing_and_membership():
     assert hg.parse_allowlist(None) is None and hg.parse_allowlist('  ') is None
-    assert hg.user_allowed(None, 5, 'a@b.c')
+    assert not hg.user_allowed(None, 5, 'a@b.c')                       # unset / blank = NOBODY
+    assert not hg.user_allowed(hg.parse_allowlist(''), 5, 'a@b.c')
+    assert hg.user_allowed(hg.parse_allowlist('*'), 5, 'a@b.c')        # '*' = everyone
+    assert hg.user_allowed(hg.parse_allowlist('7, *'), 99, 'x')
     al = hg.parse_allowlist('7, A@B.com ,,12')
     assert hg.user_allowed(al, 7, 'x') and hg.user_allowed(al, 99, 'a@b.COM') and not hg.user_allowed(al, 8, 'q@q.q')
     assert not hg.user_allowed(hg.parse_allowlist(','), 1, 'a@b.c')       # a list that parsed to nothing allows nobody

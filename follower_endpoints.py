@@ -511,7 +511,7 @@ SQL_INSERT_CLOSE_JOBS = text(
     "ON CONFLICT (position_id) DO NOTHING RETURNING position_id, user_id"
 )
 SQL_ACK_CLOSED_DELIVERIES = text(
-    "UPDATE signal_deliveries SET acknowledged = :ack, acknowledged_at = :now "
+    "UPDATE signal_deliveries SET acknowledged = :ack "
     "WHERE acknowledged = :unack AND signal_id IN (SELECT id FROM signals WHERE master_trade_id = :mtid)"
 ).bindparams(ack=True, unack=False)
 SQL_SET_MATCHED = text("UPDATE master_closes SET matched = :n WHERE master_trade_id = :mtid")
@@ -544,8 +544,9 @@ def _record_master_close(db: Session, close: CloseBroadcast, now: datetime):
     jobs = [(r[0], r[1]) for r in db.execute(SQL_INSERT_CLOSE_JOBS, {'mtid': close.master_trade_id, 'now': now})]
     db.execute(SQL_SET_MATCHED, {'n': len(jobs), 'mtid': close.master_trade_id})
     # T1LIVE-7: the leader is out, so an entry delivery of this trade that no follower has executed yet must never
-    # open it afterwards (a hold offer is valid for 15 min; fail closed)
-    db.execute(SQL_ACK_CLOSED_DELIVERIES, {'mtid': close.master_trade_id, 'now': now})
+    # open it afterwards (a hold offer is valid for 15 min; fail closed). acknowledged_at stays NULL on purpose: it
+    # would start the guardian's 180 s busy window for users who never executed anything.
+    db.execute(SQL_ACK_CLOSED_DELIVERIES, {'mtid': close.master_trade_id})
     db.commit()
     return False, len(jobs), jobs
 
@@ -609,7 +610,7 @@ def hold_service_enabled() -> bool:
 
 def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
     """Followers to deliver an offer to: access, agent on, credentials set, hold_enabled, on the allowlist (if one
-    is set), with NO open_positions row of this trade (any status: also covers a follower who already holds or was
+    is set; unset = nobody, '*' = everyone), with NO open_positions row of this trade (any status: also covers a follower who already holds or was
     stopped out), no hold_sitouts record, and no still-open delivery of this trade. Fail closed: a read error
     propagates (no deliveries)."""
     users = db.query(User).filter(
@@ -623,7 +624,9 @@ def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
     sat_out = {r[0] for r in db.query(HoldSitout.user_id).filter(HoldSitout.master_trade_id == mtid).all()}
     pending = {r[0] for r in db.query(SignalDelivery.user_id).filter(
         SignalDelivery.signal_id == signal_db_id, SignalDelivery.acknowledged == False,
-        SignalDelivery.failed == False).all()}
+        SignalDelivery.failed == False,
+        # an unexecuted delivery older than the 15 min offer window is expired and must not block a daily re-offer
+        SignalDelivery.delivered_at > datetime.utcnow() - timedelta(minutes=15)).all()}
     allow = hold_guard.parse_allowlist(os.getenv('HOLD_USER_ALLOWLIST'))
     return [u for u in users if u.id not in have_row and u.id not in sat_out and u.id not in pending
             and hold_guard.user_allowed(allow, u.id, u.email)]

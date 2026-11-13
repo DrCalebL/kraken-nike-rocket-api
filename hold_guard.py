@@ -11,7 +11,8 @@ while Binance's hold is open; one offer is identified by (master_trade_id, offer
 Sizing (the HL vault ruling "Binance R", ported from rocket_twin/leader.py g1c_size at the FOLLOWER's own mark P):
     q = min(eq * r_b / (P - stop), eq * n2 / P) * HOLD_SIZE_SCALE, floored to the lot.
 The follower risks r_b of ITS equity if the shared stop is hit, and never more than the normal n2 notional (never
-sizes up on a better price). Refused when P <= stop * 1.01 or |P - ref| / ref > 3%. Leverage is fixed at 10x and
+sizes up on a better price). A late join sizes at its own price (owner: same as the HL vault G1c); the only price
+refusal is P <= stop * 1.01. Leverage is fixed at 10x and
 is NEVER raised: when the margin does not fit the free margin the size shrinks to fit, and below one lot the entry is
 skipped (HOLD_MARGIN_SKIP). Every unreadable or non-finite input refuses (fail closed).
 """
@@ -28,7 +29,6 @@ OFFER_KINDS = ('entry', 'reoffer')
 HOLD_LEVERAGE = 10                      # fixed; never raised
 HOLD_MAX_AGE_MS = 15 * 60_000           # an offer older than this is refused (endpoint) / not executed (loop)
 HOLD_MAX_FUTURE_MS = 5 * 60_000
-MAX_MARK_DEVIATION = Decimal('0.03')    # |P - ref| / ref
 MIN_STOP_DISTANCE = Decimal('1.01')     # P must be above stop * 1.01
 DEFAULT_MAX_RISK_PCT = Decimal('0.15')
 MARGIN_FACTOR = Decimal('1.5')          # Kraken: (position value / leverage) x 1.5 must fit the available margin
@@ -39,7 +39,6 @@ HOLD_OK = 'HOLD_OK'
 HOLD_BAD_INPUT = 'HOLD_BAD_INPUT'
 HOLD_STOP_NOT_BELOW_REF = 'HOLD_STOP_NOT_BELOW_REF'
 HOLD_MARK_NEAR_STOP = 'HOLD_MARK_NEAR_STOP'
-HOLD_MARK_DEVIATION = 'HOLD_MARK_DEVIATION'
 HOLD_SIZE_ZERO = 'HOLD_SIZE_ZERO'
 HOLD_MARGIN_SKIP = 'HOLD_MARGIN_SKIP'
 HOLD_MARGIN_UNKNOWN = 'HOLD_MARGIN_UNKNOWN'
@@ -186,8 +185,6 @@ def size_hold(equity, mark, ref_entry, stop, r_b, n2, lot, free_margin, scale=No
         return HoldSize(reason=HOLD_STOP_NOT_BELOW_REF)
     if p <= st * MIN_STOP_DISTANCE:
         return HoldSize(reason=HOLD_MARK_NEAR_STOP, detail='mark %s <= stop %s x 1.01' % (p, st))
-    if abs(p - ref) / ref > MAX_MARK_DEVIATION:
-        return HoldSize(reason=HOLD_MARK_DEVIATION, detail='mark %s vs ref %s' % (p, ref))
     q_risk = eq * rb / (p - st)
     q_cap = eq * nn / p
     q = _floor_lot(min(q_risk, q_cap) * sc, lt)
@@ -207,9 +204,12 @@ def size_hold(equity, mark, ref_entry, stop, r_b, n2, lot, free_margin, scale=No
                     margin_needed=float(q * p / lev * MARGIN_FACTOR))
 
 
+ALLOW_ALL = 'ALL'
+
+
 def parse_allowlist(raw):
-    """HOLD_USER_ALLOWLIST: a comma separated list of follower ids (digits) and/or e-mails; None/blank = no list
-    (every active follower). Returns (ids:set[int], emails:set[str]) or None."""
+    """HOLD_USER_ALLOWLIST: a comma separated list of follower ids (digits) and/or e-mails; '*' = every follower.
+    Unset or blank = NOBODY (None). Returns (ids:set[int], emails:set[str]), ALLOW_ALL or None."""
     if raw is None or not str(raw).strip():
         return None
     ids, emails = set(), set()
@@ -217,6 +217,8 @@ def parse_allowlist(raw):
         tok = tok.strip().lower()
         if not tok:
             continue
+        if tok == '*':
+            return ALLOW_ALL
         if tok.isdigit():
             ids.add(int(tok))
         else:
@@ -225,8 +227,10 @@ def parse_allowlist(raw):
 
 
 def user_allowed(allowlist, user_id, email):
-    """True when there is no allowlist, or the follower is on it. A list that parsed to nothing allows nobody."""
+    """True only for '*' or a follower on the list. No list (unset/blank) and a list that parsed to nothing allow nobody."""
     if allowlist is None:
+        return False
+    if allowlist == ALLOW_ALL:
         return True
     ids, emails = allowlist
     return user_id in ids or str(email or '').strip().lower() in emails

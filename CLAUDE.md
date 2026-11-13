@@ -72,7 +72,7 @@ active follower's Kraken sub-account, tracking positions in Postgres.
 ## BNB hold (T1LIVE-7; Kraken followers copy Binance's hold; spec `massive-rocket-algos`-side `docs/superpowers/specs/2026-11-13-kraken-follows-binance-design.md` s3 + s9)
 - `POST /api/broadcast-hold` (master key; `hold_guard.validate_hold_payload`, protocol `hold-1`) -> `signals(strategy='hold', take_profit NULL)`
   + `signal_deliveries(offer_ms)` + `hold_offers` (idempotent per master_trade_id + offer_ms). `HOLD_ENABLED` default **0**;
-  `HOLD_USER_ALLOWLIST` (ids/e-mails; unset = all); per-user `follower_users.hold_enabled` (default true). Holds never reach
+  `HOLD_USER_ALLOWLIST` (ids/e-mails, `*` = everyone; unset = NOBODY); per-user `follower_users.hold_enabled` (default true). Holds never reach
   `/api/latest-signal` or the ADA delivery queries (`COALESCE(strategy,'t1')='t1'`).
 - `execute_hold_entry`: market entry -> `_wait_for_position` -> stop-market SL, NO TP, row `kind='hold'`, `target_tp` NULL; size
   `hold_guard.size_hold` at the follower's own mark, fixed 10x (never raised; shrink to free margin, `HOLD_MARGIN_SKIP`).

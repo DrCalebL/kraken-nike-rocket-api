@@ -35,8 +35,9 @@ class Env:
 
 def _env(monkeypatch, equity=10000.0, enabled=True, **user_fields):
     monkeypatch.delenv('GUARDIAN_MODE', raising=False)
-    for k in ('HOLD_USER_ALLOWLIST', 'HOLD_SIZE_SCALE', 'HOLD_MAX_RISK_PCT', 'HOLD_SL_MATCH_PCT'):
+    for k in ('HOLD_SIZE_SCALE', 'HOLD_MAX_RISK_PCT', 'HOLD_SL_MATCH_PCT'):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
     if enabled:
         monkeypatch.setenv('HOLD_ENABLED', '1')
     else:
@@ -149,13 +150,30 @@ def test_a_failed_leverage_set_means_no_entry(monkeypatch, fast_sleep, notify_lo
 # sizing refusals
 # ======================================================================================================
 
-@pytest.mark.parametrize('price,code', [(574.0, 'HOLD_MARK_NEAR_STOP'), (700.0, 'HOLD_MARK_DEVIATION'),
-                                        (580.0, 'HOLD_MARK_DEVIATION')])
+@pytest.mark.parametrize('price,code', [(574.0, 'HOLD_MARK_NEAR_STOP'), (575.0, 'HOLD_MARK_NEAR_STOP')])
 def test_a_mark_that_makes_the_entry_unsafe_is_refused(monkeypatch, fast_sleep, notify_log, price, code):
     e = _env(monkeypatch)
     e.ex.prices[BNB] = price
     run(_enter(e))
     assert _entries(e.ex) == [] and e.ex.positions == {} and code in e.db.error_types()
+
+
+def test_a_late_join_at_a_far_price_is_sized_not_refused(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.prices[BNB] = 648.0
+    run(_enter(e))
+    assert e.ex.positions[BNB]['contracts'] == 2.56
+
+
+def test_no_allowlist_means_nobody_and_star_means_everybody(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    monkeypatch.delenv('HOLD_USER_ALLOWLIST')
+    item = e.hold.add_delivery(e.user)
+    assert run(e.loop.get_pending_holds_batched()) == []
+    run(e.loop._execute_hold_for_user(item))
+    assert e.ex.calls() == []
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
+    assert len(run(e.loop.get_pending_holds_batched())) == 1
 
 
 def test_the_follower_is_sized_at_its_own_mark(monkeypatch, fast_sleep, notify_log):
@@ -214,6 +232,7 @@ def test_hold_disabled_by_default_never_trades_or_even_reads(monkeypatch, fast_s
     run(_enter(e))
     assert e.ex.calls() == [] and _hold_rows(e) == [] and e.pool.sql('UPDATE signal_deliveries') == []
     assert run(e.loop.get_pending_holds_batched()) == []
+    monkeypatch.delenv('HOLD_USER_ALLOWLIST')
     assert htl.hold_flags() == {'HOLD_ENABLED': False, 'HOLD_USER_ALLOWLIST': False}
 
 
@@ -522,7 +541,7 @@ def _post_hold(a, payload, key=None):
 def _api(monkeypatch, tmp_path):
     from tests.test_master_close import _api as base
     monkeypatch.setenv('HOLD_ENABLED', '1')
-    monkeypatch.delenv('HOLD_USER_ALLOWLIST', raising=False)
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
     a = base(monkeypatch, tmp_path)
     fm = a.fm
     s = a.Session()
@@ -701,3 +720,28 @@ def test_hold_migrations_are_additive_and_idempotent():
         if s.startswith('ALTER TABLE ') and 'ADD COLUMN' in s:
             assert 'IF NOT EXISTS' in s, s
         assert 'DROP TABLE' not in s and 'DROP COLUMN' not in s and 'DELETE' not in s
+
+
+def test_endpoint_unset_allowlist_delivers_to_nobody_and_an_expired_delivery_does_not_block_a_reoffer(monkeypatch,
+                                                                                                     tmp_path):
+    from datetime import datetime, timedelta
+    a = _api(monkeypatch, tmp_path)
+    monkeypatch.delenv('HOLD_USER_ALLOWLIST')
+    assert _post_hold(a, _hold_payload()).json()['delivered_to'] == 0
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
+    assert _post_hold(a, _hold_payload(offer_ms=_hold_payload()['offer_ms'] + 100)).json()['delivered_to'] == 4
+    s = a.Session()
+    for d in s.query(a.fm.SignalDelivery).all():                      # the first offer expired unexecuted
+        d.delivered_at = datetime.utcnow() - timedelta(minutes=20)
+    s.commit()
+    s.close()
+    r = _post_hold(a, _hold_payload(offer_kind='reoffer', offer_ms=_hold_payload()['offer_ms'] + 500))
+    assert r.json()['delivered_to'] == 4
+
+
+def test_a_close_acknowledgement_leaves_acknowledged_at_null(monkeypatch, tmp_path):
+    from tests.test_master_close import _post_close, _close_payload
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    _post_close(a, _close_payload(MTID, symbol='ADA/USDT', reason='leader_exit'))
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries WHERE acknowledged_at IS NOT NULL') == 0
