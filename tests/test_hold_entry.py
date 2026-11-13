@@ -857,7 +857,7 @@ def test_the_exit_type_widen_is_guarded_and_the_hold_migration_fails_loud_and_cl
         assert needle in sql, needle
     assert "SET lock_timeout = '5s'" in src
     assert 'HOLD_MIGRATION_INCOMPLETE' in src and "os.environ['HOLD_ENABLED'] = '0'" in src
-    assert 'notify_admin as _hold_notify' in src and 'INSERT INTO error_logs' in src
+    assert 'notify_admin as _mig_notify' in src and 'INSERT INTO error_logs' in src
 
 
 def test_every_close_cycle_sweeps_rows_of_already_closed_trades_into_jobs(monkeypatch, fast_sleep, notify_log, tmp_path):
@@ -905,8 +905,8 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None, migrated=Fa
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
         src = f.read()
-    a = src.index('    # T1LIVE7 HOLD MIGRATIONS:START')
-    b = src.index('    # T1LIVE7 HOLD MIGRATIONS:END')
+    a = src.index('    # Run schema migrations BEFORE any ORM queries')          # fee_tier + CLOSE + HOLD, all of them
+    b = src.index('    # T1-CLOSE MIGRATIONS:END')
     block = textwrap.dedent(src[a:b])
     executed = []
 
@@ -932,6 +932,12 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None, migrated=Fa
 
         def cursor(self):
             return Cur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
 
         def close(self):
             pass
@@ -967,7 +973,7 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None, migrated=Fa
 
 
 def _ddl(executed):
-    return [s for s in executed if s.startswith(('ALTER', 'CREATE', 'DO'))]
+    return [s.strip() for s in executed if s.strip().startswith(('ALTER', 'CREATE', 'DO'))]
 
 
 def test_hold_migrations_apply_cleanly(monkeypatch):
@@ -992,7 +998,7 @@ def test_a_failing_essential_column_aborts_startup(monkeypatch, col):
 
 
 def test_a_connection_failure_aborts_startup(monkeypatch):
-    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+    with pytest.raises(RuntimeError, match='MIGRATION_(ESSENTIAL_)?FAILED'):
         _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_error=OSError('refused'))
 
 
@@ -1009,9 +1015,9 @@ def test_no_asyncio_run_runs_at_import_time_in_the_hold_block():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
         src = f.read()
-    a = src.index('    # T1LIVE7 HOLD MIGRATIONS:START')
-    block = src[a:src.index('    # T1LIVE7 HOLD MIGRATIONS:END')]
-    assert block.count('asyncio.run') == 1 and block.index('def _hold_alert') < block.index('asyncio.run')
+    a = src.index('    # T1-CLOSE MIGRATIONS:START')
+    block = src[a:src.index('    # T1-CLOSE MIGRATIONS:END')]
+    assert block.count('asyncio.run') == 1 and block.index('def _alert') < block.index('asyncio.run')
     assert 'ADA path DOES' in block or 'the ADA path itself reads' in block
 
 
@@ -1025,7 +1031,7 @@ def test_a_migrated_database_issues_no_ddl_at_all_so_a_redeploy_takes_no_table_l
 def test_a_fresh_database_still_gets_every_statement(monkeypatch):
     executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=False)
     ddl = _ddl(executed)
-    assert sum(s.startswith('ALTER TABLE') for s in ddl) >= 10 and sum(s.startswith('CREATE TABLE') for s in ddl) == 2
+    assert sum(s.startswith('ALTER TABLE') for s in ddl) >= 10 and sum(s.startswith('CREATE TABLE') for s in ddl) == 4
 
 
 def test_only_the_missing_column_is_added(monkeypatch):
@@ -1045,11 +1051,11 @@ def test_the_orm_mapped_hold_columns_are_essential(monkeypatch, col):
 
 
 def test_the_connection_is_retried_seven_times_without_a_sleep_after_the_last(monkeypatch):
-    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+    with pytest.raises(RuntimeError, match='MIGRATION_(ESSENTIAL_)?FAILED'):
         _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_failures=99)
     assert _run_hold_migration_block.connects == 7 and len(_run_hold_migration_block.sleeps) == 6
     executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_failures=3)
-    assert _run_hold_migration_block.connects == 4 and any('hold_offers' in s for s in executed)
+    assert _run_hold_migration_block.connects == 6 and any('hold_offers' in s for s in executed)   # fee 4 + close + hold
 
 
 def test_a_statement_is_tried_three_times_with_two_sleeps_only(monkeypatch):
@@ -1087,3 +1093,43 @@ def test_the_masters_n2_above_one_is_accepted_and_sized():
 def test_a_big_n2_is_still_bounded_by_the_ten_x_margin_fit():
     s = hg.size_hold(10000, 600.0, 600.0, 570.0, 0.15, 10, 0.01, 1000)
     assert s.ok and s.shrunk and s.margin_needed <= 1000 * 0.95 + 1e-9
+
+
+# ---------------- QC: the fee_tier and CLOSE migrations get the same treatment ----------------
+
+def test_a_fully_migrated_database_issues_zero_ddl_across_all_migration_blocks(monkeypatch):
+    executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=True)
+    ddl = [s for s in _ddl(executed) if not s.startswith('DO $$')]
+    assert ddl == [], ddl                          # fee_tier, every CLOSE statement incl. the unique index, every HOLD one
+    assert any('pg_indexes' in s for s in executed) and any("column_name = 'fee_tier'" in s for s in executed)
+    assert threads == []
+
+
+def test_a_fresh_database_runs_fee_tier_and_the_close_statements_under_lock_timeout(monkeypatch):
+    executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=False)
+    ddl = _ddl(executed)
+    assert any('fee_tier' in s for s in ddl) and any('ux_signals_master_trade_id' in s for s in ddl)
+    assert any('ix_close_jobs_status' in s for s in ddl) and any('close_fill_qty' in s for s in ddl)
+    assert sum("SET lock_timeout = '5s'" in s for s in executed) == 3      # fee_tier, CLOSE, HOLD sessions
+
+
+def test_the_fee_tier_alter_is_retried_then_aborts_startup(monkeypatch):
+    with pytest.raises(RuntimeError, match='FEE_TIER_MIGRATION_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: 'fee_tier VARCHAR' in s)
+    assert _run_hold_migration_block.sleeps == [1, 2][:2] or _run_hold_migration_block.sleeps[:2] == [1, 2]
+
+
+@pytest.mark.parametrize('needle', ['signals ADD COLUMN IF NOT EXISTS master_trade_id', 'ux_signals_master_trade_id',
+                                    'open_positions ADD COLUMN IF NOT EXISTS exit_hint',
+                                    'open_positions ADD COLUMN IF NOT EXISTS close_fill_qty',
+                                    'CREATE TABLE IF NOT EXISTS master_closes', 'CREATE TABLE IF NOT EXISTS close_jobs'])
+def test_an_essential_close_statement_failing_aborts_startup(monkeypatch, needle):
+    with pytest.raises(RuntimeError, match='CLOSE_MIGRATION_ESSENTIAL_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: needle in s)
+
+
+def test_a_failing_close_index_degrades_and_alerts_but_keeps_hold_on(monkeypatch):
+    import os
+    executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: 'ix_close_jobs_status' in s)
+    assert len(threads) == 1 and os.environ['HOLD_ENABLED'] == '1'
+    assert sum('ix_close_jobs_status' in s and s.startswith('CREATE') for s in executed) == 3

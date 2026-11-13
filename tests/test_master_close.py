@@ -778,7 +778,7 @@ def test_wave1_shared_files_are_byte_identical_to_ddb1e38(rel, sha):
     assert _sha_lf(os.path.join(ROOT, rel)) == sha
 
 
-MAIN_SHA_DDB1E38 = '646f1888c2b3baba3355eff76a9e86b41b6a0af1dc9cf04020c2b8f407b1ebaa'
+MAIN_SHA_DDB1E38 = '3b2792d4537955cd6bb266faad33eb4af1a5388d9c49e4e7098644ba838e667c'   # re-pinned for the guarded fee_tier migration (T1LIVE-7 QC)
 MIG_START, MIG_END = '# T1-CLOSE MIGRATIONS:START', '# T1-CLOSE MIGRATIONS:END'
 
 

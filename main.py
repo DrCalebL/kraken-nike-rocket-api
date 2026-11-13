@@ -256,25 +256,151 @@ if DATABASE_URL:
             )
             time.sleep(_backoff)
 
-    # Run schema migrations BEFORE any ORM queries
-    try:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        cur = conn.cursor()
-        cur.execute("""
-            ALTER TABLE follower_users 
-            ADD COLUMN IF NOT EXISTS fee_tier VARCHAR(20) DEFAULT 'standard'
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("✅ Database schema up to date")
-    except Exception as e:
-        print(f"Note: Schema migration - {e}")
+    # Run schema migrations BEFORE any ORM queries. Skipped when already applied (no table lock on a redeploy), else
+    # under lock_timeout with 3 tries; User.fee_tier is read by the ORM, so a final failure aborts startup.
+    import psycopg2
+    import time as _fee_time
+    _fee_conn = None
+    for _fee_attempt in range(1, 8):                  # like init_db: 7 tries, no sleep after the last
+        try:
+            _fee_conn = psycopg2.connect(DATABASE_URL)
+            break
+        except Exception as e:
+            if _fee_attempt == 7:
+                raise RuntimeError(f"FEE_TIER_MIGRATION_FAILED: no database connection ({e})") from e
+            _fee_time.sleep(min(2 ** _fee_attempt, 30))
+    _fee_cur = _fee_conn.cursor()
+    _fee_cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                     "AND table_name = 'follower_users' AND column_name = 'fee_tier'")
+    if _fee_cur.fetchone() is None:
+        for _fee_try in range(3):
+            try:
+                _fee_cur.execute("SET lock_timeout = '5s'")
+                _fee_cur.execute("""
+                    ALTER TABLE follower_users 
+                    ADD COLUMN IF NOT EXISTS fee_tier VARCHAR(20) DEFAULT 'standard'
+                """)
+                _fee_conn.commit()
+                break
+            except Exception as e:
+                _fee_conn.rollback()
+                if _fee_try == 2:
+                    raise RuntimeError(f"FEE_TIER_MIGRATION_FAILED: {e}") from e
+                _fee_time.sleep(1 + _fee_try)
+    _fee_cur.close()
+    _fee_conn.close()
+    print("✅ Database schema up to date")
     
     # T1-CLOSE MIGRATIONS:START
-    # Master CLOSE (wire contract v2): additive and idempotent. Each statement runs on its own (autocommit), so one
-    # failure never skips the rest. init_db() above already creates master_closes/close_jobs for a fresh database.
+    # Boot-time migrations (master CLOSE wire contract v2 and the BNB hold). Additive and idempotent. With the Railway
+    # healthcheck the OLD container keeps trading while this one boots, so nothing here may queue behind its
+    # transactions: every statement is looked up in information_schema / pg_indexes first and SKIPPED when already
+    # applied (ADD COLUMN IF NOT EXISTS, DROP NOT NULL and CREATE ... IF NOT EXISTS still request table locks), the
+    # rest run under lock_timeout = 5s with 3 tries. A failure of an ESSENTIAL statement (anything the ORM or the
+    # ADA path reads) aborts the import so Railway keeps the old container; a non-essential one degrades + alerts.
+    import re as _mig_re
+    import time as _mig_time
+    import threading as _mig_threading
+
+    def _mig_already_applied(cur, stmt):
+        """True when the statement is a no-op on this database. Any doubt (no match, a failed check) is False: the
+        statement then runs. A DO $$ block guards itself (it only ALTERs when its own condition holds)."""
+        try:
+            m = _mig_re.match(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", stmt)
+            if m:
+                cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
+                return cur.fetchone() is not None
+            m = _mig_re.match(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", stmt)
+            if m:
+                cur.execute("SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() "
+                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
+                row = cur.fetchone()
+                return row is not None and str(row[0]).upper() == 'YES'
+            m = _mig_re.match(r"CREATE TABLE IF NOT EXISTS (\w+)", stmt)
+            if m:
+                cur.execute("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() "
+                            "AND table_name = %s", (m.group(1),))
+                return cur.fetchone() is not None
+            m = _mig_re.match(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", stmt)
+            if m:
+                cur.execute("SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+                            (m.group(1),))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+        return False
+
+    def _mig_run(label, stmts, essential):
+        """Apply stmts on a fresh autocommit connection (7 connect tries like init_db, no sleep after the last).
+        Returns (essential_failed, degraded) lists of 'statement: error'. No connection at all raises."""
+        conn, err = None, None
+        for attempt in range(1, 8):
+            try:
+                import psycopg2
+                conn = psycopg2.connect(DATABASE_URL)
+                break
+            except Exception as e:
+                err = e
+                if attempt < 7:
+                    _mig_time.sleep(min(2 ** attempt, 30))
+        if conn is None:
+            raise RuntimeError(f"{label}_MIGRATION_ESSENTIAL_FAILED: schema could not be applied "
+                               f"(no database connection: {err})") from err
+        essential_failed, degraded = [], []
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("SET lock_timeout = '5s'")        # never queue behind (or block) the live trading tables
+            for stmt in stmts:
+                if _mig_already_applied(cur, stmt):
+                    continue
+                last = None
+                for attempt in range(3):                  # a lock timeout is transient: retry with a short backoff
+                    try:
+                        cur.execute(stmt)
+                        last = None
+                        break
+                    except Exception as e:
+                        last = e
+                        if attempt < 2:                   # never sleep after the last attempt
+                            _mig_time.sleep(1 + attempt)
+                if last is not None:
+                    print(f"⚠️ {label} migration failed ({stmt[:60]}...): {last}")
+                    (essential_failed if any(k in stmt for k in essential) else degraded).append(
+                        f"{stmt[:70]}: {last}")
+            cur.close()
+            conn.close()
+        except Exception as e:
+            raise RuntimeError(f"{label}_MIGRATION_ESSENTIAL_FAILED: schema could not be applied ({e})") from e
+        return essential_failed, degraded
+
+    def _mig_alert_thread(code, failed, action):
+        """error_logs row + admin e-mail from a background thread (no event loop is running at import time)."""
+        def _alert():
+            try:
+                import psycopg2 as _pg
+                _c = _pg.connect(DATABASE_URL)
+                _c.autocommit = True
+                _cur = _c.cursor()
+                _cur.execute(
+                    "INSERT INTO error_logs (api_key, error_type, error_message, context) VALUES (%s, %s, %s, %s)",
+                    ('system', code, '; '.join(failed)[:500], None))
+                _cur.close()
+                _c.close()
+            except Exception as e:
+                print(f"⚠️ Could not write the {code} error_logs row: {e}")
+            try:
+                import asyncio as _mig_asyncio
+                from order_utils import notify_admin as _mig_notify
+                _mig_asyncio.run(_mig_notify(title=f"{code} (Kraken follower)",
+                                             details={"Failed": '; '.join(failed)[:800], "Action": action},
+                                             level="error"))
+            except Exception as e:
+                print(f"⚠️ Could not notify admin about {code}: {e}")
+        _mig_threading.Thread(target=_alert, name='migration-alert', daemon=True).start()
+
+    # Master CLOSE (wire contract v2). init_db() above already creates master_closes/close_jobs for a fresh database.
     _CLOSE_MIGRATIONS = (
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS master_trade_id VARCHAR(32)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_signals_master_trade_id ON signals(master_trade_id) "
@@ -292,23 +418,20 @@ if DATABASE_URL:
         " created_at TIMESTAMP NOT NULL DEFAULT NOW(), updated_at TIMESTAMP NOT NULL DEFAULT NOW())",
         "CREATE INDEX IF NOT EXISTS ix_close_jobs_status ON close_jobs(status)",
     )
-    try:
-        import psycopg2
-        _close_conn = psycopg2.connect(DATABASE_URL)
-        _close_conn.autocommit = True
-        _close_cur = _close_conn.cursor()
-        for _close_stmt in _CLOSE_MIGRATIONS:
-            try:
-                _close_cur.execute(_close_stmt)
-            except Exception as e:
-                print(f"⚠️ Close migration failed ({_close_stmt[:60]}...): {e}")
-        _close_cur.close()
-        _close_conn.close()
+    _close_essential_failed, _close_degraded = _mig_run("CLOSE", _CLOSE_MIGRATIONS, (
+        "signals ADD COLUMN IF NOT EXISTS master_trade_id", "ux_signals_master_trade_id",
+        "open_positions ADD COLUMN IF NOT EXISTS exit_hint", "open_positions ADD COLUMN IF NOT EXISTS close_fill_qty",
+        "CREATE TABLE IF NOT EXISTS master_closes", "CREATE TABLE IF NOT EXISTS close_jobs"))
+    if _close_essential_failed:
+        print(f"🚨 CLOSE_MIGRATION_ESSENTIAL_FAILED: {_close_essential_failed}")
+        raise RuntimeError("CLOSE_MIGRATION_ESSENTIAL_FAILED: " + '; '.join(_close_essential_failed))
+    if _close_degraded:
+        print(f"🚨 CLOSE_MIGRATION_INCOMPLETE: {_close_degraded}")
+        _mig_alert_thread('CLOSE_MIGRATION_INCOMPLETE', _close_degraded, "non-essential close index missing")
+    else:
         print("✅ Close schema up to date")
-    except Exception as e:
-        print(f"⚠️ Close schema migration - {e}")
     # T1LIVE7 HOLD MIGRATIONS:START
-    # BNB hold (strategy 'hold'): additive and idempotent, each statement on its own (autocommit).
+    # BNB hold (strategy 'hold'). Same runner as above.
     _HOLD_MIGRATIONS = (
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(8) DEFAULT 't1'",
         "ALTER TABLE signals ADD COLUMN IF NOT EXISTS hold_r_b DOUBLE PRECISION",
@@ -334,85 +457,15 @@ if DATABASE_URL:
     )
     # Columns the ADA path itself reads or maps: signals.strategy / hold_* and signal_deliveries.offer_ms (ORM models used
     # by the ADA endpoints), open_positions.kind (monitor and guardian SELECTs), follower_users.hold_enabled (pending
-    # query). If one of these cannot be added the code that is about to start would fail on every ADA cycle: ABORT the
-    # import (railway.json has a healthcheck, so Railway then keeps the old container).
+    # query). The ADA path DOES depend on them: if one cannot be added the import aborts (railway.json has a
+    # healthcheck, so Railway then keeps the old container).
     _HOLD_ESSENTIAL = ("signals ADD COLUMN IF NOT EXISTS strategy", "signals ADD COLUMN IF NOT EXISTS hold_r_b",
                        "signals ADD COLUMN IF NOT EXISTS hold_n2", "signals ADD COLUMN IF NOT EXISTS hold_leader_trade_id",
                        "signals ADD COLUMN IF NOT EXISTS hold_leader_entry_ms",
                        "signal_deliveries ADD COLUMN IF NOT EXISTS offer_ms",
                        "open_positions ADD COLUMN IF NOT EXISTS kind",
                        "follower_users ADD COLUMN IF NOT EXISTS hold_enabled")
-    _HOLD_DEGRADED = []      # non-essential failures: HOLD_ENABLED is forced to 0 and an alarm is raised
-    import re as _hold_re
-    import time as _hold_time
-
-    def _hold_already_applied(cur, stmt):
-        """True when the statement is a no-op on this database. A redeploy on a migrated DB must take NO table lock
-        (ADD COLUMN IF NOT EXISTS and DROP NOT NULL still request ACCESS EXCLUSIVE), so look in information_schema
-        first. Any doubt (no match, a failed check) returns False: the statement then runs as before."""
-        try:
-            m = _hold_re.match(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", stmt)
-            if m:
-                cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
-                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
-                return cur.fetchone() is not None
-            m = _hold_re.match(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", stmt)
-            if m:
-                cur.execute("SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() "
-                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
-                row = cur.fetchone()
-                return row is not None and str(row[0]).upper() == 'YES'
-            m = _hold_re.match(r"CREATE TABLE IF NOT EXISTS (\w+)", stmt)
-            if m:
-                cur.execute("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() "
-                            "AND table_name = %s", (m.group(1),))
-                return cur.fetchone() is not None
-        except Exception:
-            return False
-        return False                      # the DO $$ statement guards itself (it only ALTERs when the column is short)
-
-    _hold_conn = None
-    _hold_connect_err = None
-    for _hold_attempt in range(1, 8):                 # like init_db: 7 tries with a capped exponential backoff
-        try:
-            import psycopg2
-            _hold_conn = psycopg2.connect(DATABASE_URL)
-            break
-        except Exception as e:
-            _hold_connect_err = e
-            if _hold_attempt < 7:                     # never sleep after the last attempt
-                _hold_time.sleep(min(2 ** _hold_attempt, 30))
-    if _hold_conn is None:
-        raise RuntimeError(f"HOLD_MIGRATION_ESSENTIAL_FAILED: hold schema could not be applied "
-                           f"(no database connection: {_hold_connect_err})") from _hold_connect_err
-    _hold_essential_failed = []
-    try:
-        _hold_conn.autocommit = True
-        _hold_cur = _hold_conn.cursor()
-        _hold_cur.execute("SET lock_timeout = '5s'")      # never queue behind (or block) the live trading tables
-        for _hold_stmt in _HOLD_MIGRATIONS:
-            if _hold_already_applied(_hold_cur, _hold_stmt):
-                continue
-            _hold_err = None
-            for _hold_try in range(3):                    # a lock timeout is transient: retry with a short backoff
-                try:
-                    _hold_cur.execute(_hold_stmt)
-                    _hold_err = None
-                    break
-                except Exception as e:
-                    _hold_err = e
-                    if _hold_try < 2:                     # never sleep after the last attempt
-                        _hold_time.sleep(1 + _hold_try)
-            if _hold_err is not None:
-                print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {_hold_err}")
-                if any(k in _hold_stmt for k in _HOLD_ESSENTIAL):
-                    _hold_essential_failed.append(f"{_hold_stmt[:70]}: {_hold_err}")
-                else:
-                    _HOLD_DEGRADED.append(f"{_hold_stmt[:70]}: {_hold_err}")
-        _hold_cur.close()
-        _hold_conn.close()
-    except Exception as e:
-        raise RuntimeError(f"HOLD_MIGRATION_ESSENTIAL_FAILED: hold schema could not be applied ({e})") from e
+    _hold_essential_failed, _HOLD_DEGRADED = _mig_run("HOLD", _HOLD_MIGRATIONS, _HOLD_ESSENTIAL)
     if _hold_essential_failed:
         print(f"🚨 HOLD_MIGRATION_ESSENTIAL_FAILED: {_hold_essential_failed}")
         raise RuntimeError("HOLD_MIGRATION_ESSENTIAL_FAILED: " + '; '.join(_hold_essential_failed))
@@ -420,33 +473,7 @@ if DATABASE_URL:
         # FAIL CLOSED and LOUD: hold stays off until a redeploy completes the schema; the ADA path is unaffected.
         os.environ['HOLD_ENABLED'] = '0'
         print(f"🚨 HOLD_MIGRATION_INCOMPLETE: {len(_HOLD_DEGRADED)} statement(s) failed - HOLD_ENABLED forced to 0")
-
-        def _hold_alert(failed=tuple(_HOLD_DEGRADED)):
-            # a background thread (no event loop is running at import time): error_logs row + admin e-mail
-            try:
-                import psycopg2 as _pg
-                _c = _pg.connect(DATABASE_URL)
-                _c.autocommit = True
-                _cur = _c.cursor()
-                _cur.execute(
-                    "INSERT INTO error_logs (api_key, error_type, error_message, context) VALUES (%s, %s, %s, %s)",
-                    ('system', 'HOLD_MIGRATION_INCOMPLETE', '; '.join(failed)[:500], None))
-                _cur.close()
-                _c.close()
-            except Exception as e:
-                print(f"⚠️ Could not write the HOLD_MIGRATION_INCOMPLETE error_logs row: {e}")
-            try:
-                import asyncio as _hold_asyncio
-                from order_utils import notify_admin as _hold_notify
-                _hold_asyncio.run(_hold_notify(title="HOLD_MIGRATION_INCOMPLETE (Kraken follower)",
-                                               details={"Failed": '; '.join(failed)[:800],
-                                                        "Action": "HOLD_ENABLED forced to 0 until a redeploy"},
-                                               level="error"))
-            except Exception as e:
-                print(f"⚠️ Could not notify admin about HOLD_MIGRATION_INCOMPLETE: {e}")
-
-        import threading as _hold_threading
-        _hold_threading.Thread(target=_hold_alert, name='hold-migration-alert', daemon=True).start()
+        _mig_alert_thread('HOLD_MIGRATION_INCOMPLETE', _HOLD_DEGRADED, "HOLD_ENABLED forced to 0 until a redeploy")
     else:
         print("✅ Hold schema up to date")
     # T1LIVE7 HOLD MIGRATIONS:END
