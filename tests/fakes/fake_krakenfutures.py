@@ -25,6 +25,8 @@ import ccxt
 MARKETS = {
     'ADA/USD:USD': {'id': 'PF_ADAUSD', 'symbol': 'ADA/USD:USD', 'precision': {'price': 1e-05, 'amount': 1.0}},
     'BTC/USD:USD': {'id': 'PF_XBTUSD', 'symbol': 'BTC/USD:USD', 'precision': {'price': 0.5, 'amount': 0.0001}},
+    # T1LIVE-7: lot/tick of PF_BNBUSD are ASSUMED (0.01 / 0.1), not verified against Kraken
+    'BNB/USD:USD': {'id': 'PF_BNBUSD', 'symbol': 'BNB/USD:USD', 'precision': {'price': 0.1, 'amount': 0.01}},
 }
 
 
@@ -53,8 +55,9 @@ class FakeKrakenFutures:
         self.venue = venue or FakeVenue()
         self.name = name
         self.markets = dict(MARKETS)
-        self.prices = dict(prices or {'ADA/USD:USD': 0.5, 'BTC/USD:USD': 60000.0})
+        self.prices = dict(prices or {'ADA/USD:USD': 0.5, 'BTC/USD:USD': 60000.0, 'BNB/USD:USD': 600.0})
         self.equity = equity
+        self.free_margin = None          # None = all of the equity is free
         self.positions = {}              # unified -> {'side', 'contracts', 'entryPrice', 'timestamp'}
         self.orders = {}                 # oid -> ccxt-shaped open order
         self.trades = []                 # ccxt-shaped fills
@@ -162,7 +165,8 @@ class FakeKrakenFutures:
 
     def fetch_balance(self, params=None):
         with self._call('fetch_balance'):
-            return {'USD': {'total': self.equity}, 'info': {}}
+            free = self.equity if self.free_margin is None else self.free_margin
+            return {'USD': {'total': self.equity, 'free': free}, 'info': {}}
 
     def set_leverage(self, leverage, symbol=None, params=None):
         with self._call('set_leverage', leverage=leverage, symbol=symbol):

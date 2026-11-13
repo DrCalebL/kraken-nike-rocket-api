@@ -52,6 +52,7 @@ import math
 import json
 import random
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Optional, Dict, List
@@ -60,6 +61,7 @@ import os
 import bracket_guard as bg
 import close_guard
 import follower_guard
+import hold_guard
 
 # Import order utilities with retry logic
 from order_utils import (
@@ -143,6 +145,7 @@ SYMBOL_MAP = {
     'XRP/USDT': 'PF_XRPUSD',
     'DOGE/USDT': 'PF_DOGEUSD',
     'LTC/USDT': 'PF_LTCUSD',
+    'BNB/USDT': 'PF_BNBUSD',      # T1LIVE-7 hold only; startup check: hold disabled + alarm if the market is missing
 }
 
 
@@ -178,7 +181,7 @@ _FALSE = ('0', 'false', 'no', 'off')
 
 SQL_CLOSE_JOBS_DUE = """
     SELECT cj.position_id, cj.user_id, cj.master_trade_id, cj.status, cj.attempts, cj.created_at,
-           mc.side AS payload_side, mc.symbol AS payload_symbol,
+           mc.side AS payload_side, mc.symbol AS payload_symbol, mc.reason AS payload_reason,
            u.api_key, u.email, u.kraken_api_key_encrypted, u.kraken_api_secret_encrypted,
            u.agent_active, u.credentials_set, u.access_granted, u.pending_invoice_id, u.invoice_due_date
     FROM close_jobs cj
@@ -189,7 +192,7 @@ SQL_CLOSE_JOBS_DUE = """
 """
 SQL_CLOSE_ROW = """
     SELECT id, user_id, signal_id, tp_order_id, sl_order_id, symbol, kraken_symbol, side, quantity, status,
-           exit_hint, close_fill_qty
+           exit_hint, close_fill_qty, kind
     FROM open_positions WHERE id = $1
 """
 SQL_CLOSE_JOB_SET = """
@@ -197,11 +200,101 @@ SQL_CLOSE_JOB_SET = """
     WHERE position_id = $1 AND status IN ('pending', 'deferred')
 """
 SQL_SET_EXIT_HINT = """
-    UPDATE open_positions SET exit_hint = 'TIME' WHERE id = $1 AND status IN ('open', 'needs_recovery')
+    UPDATE open_positions SET exit_hint = $2 WHERE id = $1 AND status IN ('open', 'needs_recovery')
 """
 SQL_ADD_CLOSE_FILL = """
     UPDATE open_positions SET close_fill_qty = COALESCE(close_fill_qty, 0) + $2 WHERE id = $1
 """
+
+
+# ==================== BNB HOLD (T1LIVE-7; Kraken followers copy Binance's hold) ====================
+# Pipeline: POST /api/broadcast-hold -> signals(strategy='hold') + signal_deliveries(offer_ms) -> get_pending_holds_batched
+# -> execute_hold_entry: market entry -> _wait_for_position -> stop-market SL sized to the fill, NO TP. One slot per
+# strategy: an ADA bracket and a BNB hold can stand together, nothing else. Switches: HOLD_ENABLED (default 0),
+# HOLD_USER_ALLOWLIST. A leader exit arrives as a CLOSE with reason 'leader_exit' (exit_hint 'LEADER').
+
+HOLD_SERVICE = 'kraken-nike-rocket-api'
+HOLD_SYMBOL_API = hold_guard.HOLD_SYMBOL
+HOLD_MARKET_RECHECK_S = 600.0
+SQL_PENDING_HOLDS = """
+    SELECT
+        u.id as user_id, u.api_key, u.email, u.kraken_api_key_encrypted, u.kraken_api_secret_encrypted,
+        sd.id as delivery_id, sd.offer_ms, sd.delivered_at,
+        s.id as signal_db_id, s.signal_id, s.master_trade_id, s.symbol, s.entry_price, s.stop_loss,
+        s.hold_r_b, s.hold_n2, s.hold_leader_trade_id
+    FROM follower_users u
+    JOIN signal_deliveries sd ON sd.user_id = u.id
+    JOIN signals s ON sd.signal_id = s.id
+    WHERE s.strategy = 'hold'
+      AND COALESCE(u.hold_enabled, true) = true
+      AND u.agent_active = true
+      AND u.credentials_set = true
+      AND u.access_granted = true
+      AND (u.pending_invoice_id IS NULL OR u.invoice_due_date IS NULL OR u.invoice_due_date > CURRENT_TIMESTAMP)
+      AND sd.acknowledged = false
+      AND COALESCE(sd.failed, false) = false
+      AND sd.delivered_at > NOW() - INTERVAL '15 minutes'
+    ORDER BY sd.delivered_at
+"""
+SQL_HOLD_CLOSED = "SELECT 1 FROM master_closes WHERE master_trade_id = $1"
+SQL_HOLD_SITOUT = "SELECT 1 FROM hold_sitouts WHERE user_id = $1 AND master_trade_id = $2"
+SQL_OTHER_KIND_ROWS = """
+    SELECT id, kraken_symbol, side, tp_order_id, sl_order_id, COALESCE(kind, 't1') AS kind
+    FROM open_positions
+    WHERE user_id = $1 AND status = 'open' AND COALESCE(kind, 't1') <> $2
+"""
+SQL_INSERT_HOLD_ROW = """
+    INSERT INTO open_positions
+    (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id, symbol, kraken_symbol, side, quantity, leverage,
+     entry_fill_price, target_tp, target_sl, opened_at, status, kind)
+    VALUES ($1, $2, $3, NULL, $4, $5, $6, 'BUY', $7, $8, $9, NULL, $10, $11, 'open', 'hold')
+"""
+SQL_INSERT_HOLD_RECOVERY = """
+    INSERT INTO open_positions
+    (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id, symbol, kraken_symbol, side, quantity, leverage,
+     entry_fill_price, target_tp, target_sl, opened_at, status, kind)
+    VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, NULL, $11, NOW(), 'needs_recovery', 'hold')
+"""
+
+
+def hold_flags() -> Dict:
+    """HOLD_ENABLED (default OFF) and the optional HOLD_USER_ALLOWLIST (blank = every active follower)."""
+    return {'HOLD_ENABLED': _env_flag('HOLD_ENABLED', False),
+            'HOLD_USER_ALLOWLIST': bool((os.getenv('HOLD_USER_ALLOWLIST') or '').strip())}
+
+
+def _hold_user_allowed(user_id, email) -> bool:
+    return hold_guard.user_allowed(hold_guard.parse_allowlist(os.getenv('HOLD_USER_ALLOWLIST')), user_id, email)
+
+
+def _free_margin(balance) -> Optional[float]:
+    """Free (available) margin from a ccxt krakenfutures balance, or None when unreadable (the hold then skips)."""
+    try:
+        flex = ((balance.get('info') or {}).get('accounts') or {}).get('flex') or {}
+        for key in ('availableMargin', 'available_margin'):
+            if flex.get(key) is not None:
+                return float(flex[key])
+        usd = balance.get('USD')
+        if isinstance(usd, dict) and usd.get('free') is not None:
+            return float(usd['free'])
+        free = balance.get('free')
+        if isinstance(free, dict) and free.get('USD') is not None:
+            return float(free['USD'])
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
+
+
+def _mark_price(ticker) -> Optional[float]:
+    """The follower's own live mark: ticker info markPrice, else last. None when unreadable or not positive."""
+    try:
+        info = ticker.get('info') or {}
+        for v in (info.get('markPrice'), ticker.get('mark'), ticker.get('last')):
+            if v is not None and float(v) > 0 and math.isfinite(float(v)):
+                return float(v)
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -229,6 +322,10 @@ CLOSE_EVENTS = make_close_event_log()
 def close_events():
     """The process-wide section-21 close event log (logs/close_events.jsonl + the 'close_events' logger)."""
     return CLOSE_EVENTS
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _utcnow() -> datetime:
@@ -297,6 +394,8 @@ class HostedTradingLoop:
         self.db_pool = db_pool
         self.active_exchanges = {}  # Cache of user exchanges: {api_key: exchange}
         self.logger = logging.getLogger('HOSTED_TRADING')
+        self.hold_available = None   # None = unchecked; True/False after check_hold_market
+        self._hold_checked = 0.0
     
     async def get_active_users(self) -> List[Dict]:
         """Get all users with active agents and valid credentials"""
@@ -347,7 +446,8 @@ class HostedTradingLoop:
                     s.take_profit,
                     s.leverage,
                     COALESCE(s.risk_pct, 0.02) as risk_pct,
-                    s.created_at as signal_created_at
+                    s.created_at as signal_created_at,
+                    COALESCE(u.hold_enabled, true) as hold_enabled
                 FROM follower_users u
                 JOIN signal_deliveries sd ON sd.user_id = u.id
                 JOIN signals s ON sd.signal_id = s.id
@@ -360,12 +460,50 @@ class HostedTradingLoop:
                       OR u.invoice_due_date > CURRENT_TIMESTAMP
                   )
                   AND sd.acknowledged = false
+                  AND COALESCE(s.strategy, 't1') = 't1'
                   AND s.created_at > NOW() - INTERVAL '15 minutes'
                 ORDER BY s.created_at DESC
             """)
             
             return [dict(row) for row in rows]
     
+    async def get_pending_holds_batched(self) -> List[Dict]:
+        """Unacknowledged, fresh (< 15 min) hold deliveries. Empty unless HOLD_ENABLED is on AND PF_BNBUSD was found
+        at startup. Allowlisted users only. A read error raises (the cycle's hold leg is skipped, never guessed)."""
+        if not hold_flags()['HOLD_ENABLED'] or self.hold_available is not True:
+            return []
+        async with self.db_pool.acquire() as conn:
+            rows = [dict(r) for r in await conn.fetch(SQL_PENDING_HOLDS)]
+        return [r for r in rows if _hold_user_allowed(r.get('user_id'), r.get('email'))]
+
+    async def check_hold_market(self, force: bool = False) -> bool:
+        """Startup (and every HOLD_MARKET_RECHECK_S while unavailable) check that PF_BNBUSD is in load_markets via a
+        public, key-less client. Missing or unreadable -> hold disabled + alarm HOLD_MARKET_MISSING."""
+        now = _monotonic()
+        if not force and self.hold_available is not None and (
+                self.hold_available or now - self._hold_checked < HOLD_MARKET_RECHECK_S):
+            return bool(self.hold_available)
+        self._hold_checked = now
+        err = None
+        try:
+            markets = await asyncio.to_thread(self._load_public_markets)
+            ok = any(str((m or {}).get('id')) == SYMBOL_MAP[HOLD_SYMBOL_API] for m in (markets or {}).values())
+        except Exception as e:
+            ok, err = False, f"{type(e).__name__}: {str(e)[:150]}"
+        if not ok and self.hold_available is not False:
+            await log_error_to_db(self.db_pool, 'system', 'HOLD_MARKET_MISSING',
+                                  err or f"{SYMBOL_MAP[HOLD_SYMBOL_API]} not in load_markets; BNB hold disabled",
+                                  {"symbol": SYMBOL_MAP[HOLD_SYMBOL_API]})
+            await notify_admin(title="HOLD_MARKET_MISSING (Kraken follower)",
+                               details={"Symbol": SYMBOL_MAP[HOLD_SYMBOL_API], "Error": err or "market not listed",
+                                        "Action": "BNB hold disabled until the market is found"}, level="error")
+        self.hold_available = bool(ok)
+        return self.hold_available
+
+    @staticmethod
+    def _load_public_markets():
+        return ccxt.krakenfutures({'enableRateLimit': True}).load_markets()
+
     def decrypt_credentials(self, encrypted_key: str, encrypted_secret: str) -> tuple:
         """Decrypt Kraken credentials"""
         from cryptography.fernet import Fernet
@@ -454,6 +592,7 @@ class HostedTradingLoop:
                 JOIN signals s ON sd.signal_id = s.id
                 WHERE sd.user_id = $1
                 AND sd.acknowledged = false
+                AND COALESCE(s.strategy, 't1') = 't1'
                 ORDER BY s.created_at DESC
                 LIMIT 1
             """, user_id)
@@ -535,7 +674,7 @@ class HostedTradingLoop:
             self.logger.warning(f"Error checking positions: {e}")
             return False
     
-    async def check_any_open_positions_or_orders(self, exchange: ccxt.krakenfutures, user_short: str, user_id: int = None, signal_id: str = None) -> tuple:
+    async def check_any_open_positions_or_orders(self, exchange: ccxt.krakenfutures, user_short: str, user_id: int = None, signal_id: str = None, strategy: str = 't1') -> tuple:
         """
         SAFETY CHECK: Verify user has NO open positions or orders on ANY symbol
         
@@ -549,6 +688,11 @@ class HostedTradingLoop:
         2. Multiple symbols open (risk management assumes single position)
         3. Orphaned TP/SL orders affecting new trades
         4. v2.1: Race condition where same signal executes twice (DB check)
+
+        T1LIVE-7 ONE SLOT PER STRATEGY: `strategy` ('t1' ADA bracket | 'hold' BNB hold) is the entry being
+        considered. The position and the orders of the user's OWN active service row of the OTHER strategy
+        (exactly one 'open' row; matched by unified symbol + side + recorded order ids) are ignored; everything
+        unowned still blocks, and any read error fails closed.
         """
         try:
             # ===== CHECK 0: Database check for existing position on same signal =====
@@ -592,6 +736,11 @@ class HostedTradingLoop:
                             )
                             return (True, f"Trade recently closed for this signal")
             
+            # ===== SLOT: the other strategy's own row (T1LIVE-7) =====
+            owned = await self._other_slot(exchange, user_id, strategy, user_short)
+            if owned is False:
+                return (True, "Other-strategy slot check failed - skipping to avoid stacking")
+
             # ===== CHECK 1: Any open positions (any symbol) =====
             try:
                 positions = exchange.fetch_positions()
@@ -599,6 +748,8 @@ class HostedTradingLoop:
                 for pos in positions:
                     size = pos.get('contracts') or pos.get('contractSize') or 0
                     if abs(float(size)) > 0:
+                        if owned and pos.get('symbol') == owned['symbol'] and str(pos.get('side') or '').lower() == owned['side']:
+                            continue   # the user's own other-strategy position
                         symbol = pos.get('symbol', 'Unknown')
                         side = pos.get('side', 'Unknown')
                         self.logger.warning(
@@ -618,6 +769,9 @@ class HostedTradingLoop:
             try:
                 open_orders = exchange.fetch_open_orders()
                 
+                if owned:
+                    open_orders = [o for o in open_orders or []
+                                   if not (str(o.get('id')) in owned['order_ids'] and o.get('symbol') == owned['symbol'])]
                 if open_orders and len(open_orders) > 0:
                     # Group by symbol for cleaner logging
                     symbols_with_orders = set()
@@ -650,6 +804,33 @@ class HostedTradingLoop:
             # Fail CLOSED: skip this signal rather than risk stacking a second position
             return (True, "Safety check error - skipping")
     
+    async def _other_slot(self, exchange, user_id, strategy, user_short):
+        """The user's own active row of the OTHER strategy as {'symbol','side','order_ids'}; None when there is none
+        (or it is ambiguous / unreadable-as-owned: nothing is then ignored); False when the DB read FAILED."""
+        if not user_id:
+            return None
+        try:
+            async with self.db_pool.acquire() as conn:
+                rows = [dict(r) for r in await conn.fetch(SQL_OTHER_KIND_ROWS, user_id, strategy)]
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ {user_short}: slot read failed: {e} - skipping trade")
+            await log_error_to_db(self.db_pool, user_short, "DEDUP_SKIPPED_READ_ERROR", str(e)[:200],
+                                  {"function": "_other_slot"})
+            return False
+        if len(rows) != 1:
+            if len(rows) > 1:
+                self.logger.warning(f"   ⚠️ {user_short}: {len(rows)} active rows of the other strategy - not ignored")
+            return None
+        r = rows[0]
+        try:
+            symbol = exchange.market(r['kraken_symbol'])['symbol']
+        except Exception:
+            return None
+        ids = {follower_guard.real_oid(r.get('tp_order_id')), follower_guard.real_oid(r.get('sl_order_id'))}
+        ids.discard(None)
+        side = 'long' if str(r.get('side') or '').upper() in ('BUY', 'LONG') else 'short'
+        return {'symbol': symbol, 'side': side, 'order_ids': {str(i) for i in ids}}
+
     async def execute_trade(self, user: Dict, signal: Dict) -> bool:
         """
         Execute trade for a user
@@ -669,6 +850,13 @@ class HostedTradingLoop:
         Wave 1: an in-flight token (follower_guard) is held for the whole
         execution; the guardian never acts on a user while one is held.
         """
+        if str(signal.get('strategy') or 't1').lower() == 'hold':
+            self.logger.critical("   🚨 a hold signal reached execute_trade (T1 bracket path) - refused")
+            return False
+        if follower_guard.is_inflight(user['id']):
+            # T1LIVE-7: one entry per user at a time; the delivery stays unacknowledged and is retried next cycle
+            self.logger.warning("   ⏭️ user has an execution in flight - entry deferred")
+            return False
         tok = follower_guard.mark(user['id'])
         try:
             return await self._execute_trade_locked(user, signal)
@@ -853,8 +1041,12 @@ class HostedTradingLoop:
             original_leverage = leverage
             if min_leverage_for_margin > leverage:
                 leverage = int(math.ceil(min_leverage_for_margin))
-                # Cap at reasonable max (50x)
-                leverage = min(leverage, 50)
+                # Cap at reasonable max (50x); T1LIVE-7: 10x for followers who can also hold BNB (one account
+                # margin), never below the signal's own leverage
+                raise_cap = 50
+                if hold_flags()['HOLD_ENABLED'] and user.get('hold_enabled', True) and                         _hold_user_allowed(user.get('id'), user.get('email')):
+                    raise_cap = max(hold_guard.HOLD_LEVERAGE, int(math.ceil(original_leverage)))
+                leverage = min(leverage, raise_cap)
                 
                 if leverage > original_leverage:
                     self.logger.warning(
@@ -1215,8 +1407,242 @@ class HostedTradingLoop:
                                                  bracket_qty or quantity, leverage, signal_db_id, sl_order, tp_order)
             return False
     
+    # ==================== BNB HOLD ENTRY (T1LIVE-7) ====================
+
+    async def _execute_hold_for_user(self, item: Dict):
+        """One hold delivery for one user (the hold twin of _execute_signal_for_user). Never raises."""
+        user_short = str(item.get('api_key') or '')[:15] + "..."
+        try:
+            user = {'id': item['user_id'], 'api_key': item['api_key'], 'email': item.get('email'),
+                    'kraken_api_key_encrypted': item['kraken_api_key_encrypted'],
+                    'kraken_api_secret_encrypted': item['kraken_api_secret_encrypted'], 'hold_enabled': True}
+            hold = {'delivery_id': item['delivery_id'], 'offer_ms': item.get('offer_ms'),
+                    'signal_db_id': item.get('signal_db_id'), 'signal_id': item.get('signal_id'),
+                    'master_trade_id': item.get('master_trade_id'), 'symbol': item.get('symbol'),
+                    'ref_entry': item.get('entry_price'), 'stop_loss': item.get('stop_loss'),
+                    'r_b': item.get('hold_r_b'), 'n2': item.get('hold_n2')}
+            self.logger.info(f"✨ {user_short}: Hold offer found - BUY {hold['symbol']}")
+            ok = await self.execute_hold_entry(user, hold)
+            self.logger.info(f"{'✅' if ok else '⚠️'} {user_short}: hold entry {'executed' if ok else 'not executed'}")
+        except Exception as e:
+            self.logger.error(f"❌ {user_short}: Hold error - {e}")
+            await log_error_to_db(self.db_pool, item.get('api_key', 'unknown'), "SIGNAL_PROCESSING_ERROR",
+                                  str(e)[:200], {"signal_id": item.get('signal_id'),
+                                                 "function": "_execute_hold_for_user"})
+
+    async def execute_hold_entry(self, user: Dict, hold: Dict) -> bool:
+        """Open the BNB hold for one follower: market entry -> _wait_for_position -> stop-market SL sized to the
+        fill, NO TP, row kind='hold'. Refused (False, nothing sent) when the service switch is off, PF_BNBUSD was not
+        found, the user is off the allowlist or has an execution in flight (the delivery then stays open and retries
+        next cycle). Runs under the user's in-flight token."""
+        if not hold_flags()['HOLD_ENABLED'] or self.hold_available is not True:
+            return False
+        if not _hold_user_allowed(user.get('id'), user.get('email')) or not user.get('hold_enabled', True):
+            return False
+        if follower_guard.is_inflight(user['id']):
+            self.logger.warning("   ⏭️ user has an execution in flight - hold entry deferred")
+            return False
+        tok = follower_guard.mark(user['id'])
+        try:
+            return await self._execute_hold_locked(user, hold)
+        finally:
+            follower_guard.clear(user['id'], tok)
+
+    async def _hold_refuse(self, user, hold, code, detail=''):
+        self.logger.warning(f"   ⏭️ {user['api_key'][:15]}...: hold refused - {code} {detail}")
+        await log_error_to_db(self.db_pool, user['api_key'], code, f"{code} {detail}"[:200],
+                              {"master_trade_id": hold.get('master_trade_id'), "function": "execute_hold_entry"})
+        return False
+
+    async def _execute_hold_locked(self, user: Dict, hold: Dict) -> bool:
+        user_api_key = user['api_key']
+        user_short = user_api_key[:15] + "..."
+        user_email = user.get('email', 'unknown')
+        delivery_id, mtid = hold.get('delivery_id'), hold.get('master_trade_id')
+        api_symbol = hold.get('symbol') or HOLD_SYMBOL_API
+        kraken_symbol = SYMBOL_MAP.get(HOLD_SYMBOL_API)
+        if api_symbol != HOLD_SYMBOL_API or not kraken_symbol or not hold_guard.is_master_trade_id(mtid):
+            return await self._hold_refuse(user, hold, 'HOLD_BAD_DELIVERY')
+
+        # Reads that decide whether the entry may happen AT ALL. A read error leaves the delivery open (retried next
+        # cycle, still inside its 15 min window); a definitive "no" acknowledges it.
+        now_ms = int(time.time() * 1000)
+        try:
+            async with self.db_pool.acquire() as conn:
+                closed = await conn.fetchval(SQL_HOLD_CLOSED, mtid)
+                sat_out = await conn.fetchval(SQL_HOLD_SITOUT, user['id'], mtid)
+        except Exception as e:
+            await self._hold_refuse(user, hold, 'HOLD_SKIPPED_READ_ERROR', str(e)[:100])
+            return False
+        refusal = None
+        if closed:
+            refusal = 'HOLD_ALREADY_CLOSED'
+        elif sat_out:
+            refusal = 'HOLD_SAT_OUT'
+        elif not hold_guard.offer_is_fresh(hold.get('offer_ms'), now_ms):
+            refusal = 'HOLD_OFFER_STALE'
+        if refusal:
+            if delivery_id:
+                await self.acknowledge_signal(delivery_id)
+            return await self._hold_refuse(user, hold, refusal)
+
+        # Early acknowledgment (as the ADA path): a hold entry is never re-sent after it was attempted
+        if delivery_id:
+            await self.acknowledge_signal(delivery_id)
+            self.logger.info(f"   🔒 {user_short}: Hold delivery acknowledged (preventing re-execution)")
+
+        stage = 'pre_entry'
+        exchange = None
+        entry_order = sl_order = None
+        bracket_qty = quantity = None
+        signal_db_id = hold.get('signal_db_id')
+        signal = {'symbol': api_symbol, 'action': 'BUY', 'entry_price': hold.get('ref_entry'),
+                  'stop_loss': hold.get('stop_loss'), 'take_profit': None}
+        try:
+            try:
+                exchange = self.get_or_create_exchange(user)
+            except ValueError as cred_error:
+                await log_error_to_db(self.db_pool, user_api_key, "CREDENTIALS_NOT_FOUND", str(cred_error),
+                                      {"function": "execute_hold_entry", "master_trade_id": mtid})
+                return False
+            try:
+                market = exchange.market(kraken_symbol)
+                lot = float(market['precision']['amount'])
+            except Exception as e:
+                return await self._hold_refuse(user, hold, 'HOLD_MARKET_UNKNOWN', str(e)[:100])
+
+            has_open, reason = await self.check_any_open_positions_or_orders(
+                exchange, user_short, user_id=user['id'], signal_id=hold.get('signal_id'), strategy='hold')
+            if has_open:
+                self.logger.warning(f"   ⏭️ {user_short}: SKIPPING HOLD - {reason}")
+                return False
+
+            equity = await self.get_user_equity(exchange)
+            if equity <= 0:
+                return await self._hold_refuse(user, hold, 'HOLD_NO_EQUITY')
+            try:
+                balance = await asyncio.to_thread(exchange.fetch_balance)
+                free = _free_margin(balance)
+                ticker = await asyncio.to_thread(exchange.fetch_ticker, kraken_symbol)
+            except Exception as e:
+                return await self._hold_refuse(user, hold, 'HOLD_READ_ERROR', f"{type(e).__name__}: {str(e)[:100]}")
+            mark = _mark_price(ticker)
+            if mark is None:
+                return await self._hold_refuse(user, hold, 'HOLD_MARK_UNKNOWN')
+            size = hold_guard.size_hold(equity, mark, hold.get('ref_entry'), hold.get('stop_loss'), hold.get('r_b'),
+                                        hold.get('n2'), lot, free)
+            if not size.ok:
+                if size.reason == hold_guard.HOLD_MARGIN_SKIP:
+                    await notify_admin(title="HOLD_MARGIN_SKIP (Kraken follower)",
+                                       details={"User": user_email, "Detail": size.detail}, level="warning")
+                return await self._hold_refuse(user, hold, size.reason, size.detail)
+            quantity = float(exchange.amount_to_precision(kraken_symbol, size.qty))
+            if quantity <= 0:
+                return await self._hold_refuse(user, hold, hold_guard.HOLD_SIZE_ZERO)
+            stop_loss = float(hold['stop_loss'])
+            self.logger.info(f"   💰 Equity: ${equity:,.2f}  hold {quantity} @ mark {mark} stop {stop_loss} "
+                             f"({hold_guard.HOLD_LEVERAGE}x{', shrunk to margin' if size.shrunk else ''})")
+
+            # Leverage is fixed at 10x and NEVER raised: if it cannot be set, no entry (the account's preference
+            # for this symbol could be higher)
+            try:
+                await asyncio.to_thread(exchange.set_leverage, hold_guard.HOLD_LEVERAGE, kraken_symbol)
+            except Exception as e:
+                return await self._hold_refuse(user, hold, 'HOLD_LEVERAGE_SET_FAILED', str(e)[:100])
+
+            entry_order = await place_entry_order_with_retry(
+                exchange=exchange, symbol=kraken_symbol, side='buy', quantity=quantity, user_email=user_email,
+                user_api_key=user_api_key, confirm_position_fn=lambda: self._position_is_open(exchange, kraken_symbol))
+            if not entry_order:
+                await notify_entry_failed(user_email=user_email, user_api_key=user_api_key, symbol=kraken_symbol,
+                                          side='buy', quantity=quantity, error="All retry attempts exhausted (hold)")
+                await log_error_to_db(self.db_pool, user_api_key, "ENTRY_ORDER_FAILED",
+                                      "Hold entry order failed after all retries",
+                                      {"symbol": kraken_symbol, "side": 'buy', "quantity": quantity})
+                return False
+            stage = 'entry_sent'
+            self.logger.info(f"   ✅ Hold entry: {entry_order['id']}")
+
+            confirmed, contracts, fill_price = await self._wait_for_position(
+                exchange=exchange, symbol=kraken_symbol, entry_side='buy')
+            if confirmed and contracts and contracts > 0:
+                bracket_qty = float(exchange.amount_to_precision(kraken_symbol, contracts))
+            else:
+                bracket_qty = quantity
+                self.logger.critical("   🚨 Hold entry fill not confirmed within timeout - proceeding; SL failure "
+                                     "triggers the emergency close")
+
+            sl_price = float(exchange.price_to_precision(kraken_symbol, stop_loss))
+            sl_order = await place_sl_order_with_retry(
+                exchange=exchange, symbol=kraken_symbol, exit_side='sell', quantity=bracket_qty, sl_price=sl_price,
+                user_email=user_email, user_api_key=user_api_key)
+            if sl_order is None:
+                self.logger.error("   ❌ Hold SL order FAILED - ABORTING (emergency close)")
+                outcome = {}
+                closed = await self._emergency_close_position(
+                    exchange, kraken_symbol, 'sell', bracket_qty, user_email, user_api_key, entry_order['id'],
+                    reason="Hold SL order failed after all retries", user_id=user['id'], signal_db_id=signal_db_id,
+                    signal_symbol=api_symbol, side='BUY', leverage=hold_guard.HOLD_LEVERAGE,
+                    entry_fill_price=fill_price or mark, target_tp=None, target_sl=stop_loss, outcome=outcome,
+                    kind='hold')
+                if closed and not (outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol)):
+                    await self._record_unprotected_position(
+                        user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
+                        entry_order_id=entry_order['id'], signal_symbol=api_symbol, kraken_symbol=kraken_symbol,
+                        side='BUY', quantity=bracket_qty, leverage=hold_guard.HOLD_LEVERAGE,
+                        entry_fill_price=fill_price or mark, target_tp=None, target_sl=stop_loss,
+                        reason='SL_FAILED_CLOSE_UNVERIFIED', kind='hold')
+                stage = 'done'
+                return False
+            self.logger.info(f"   ✅ Hold SL @ ${sl_price}: {sl_order['id']}")
+
+            entry_fill_price = fill_price if (confirmed and fill_price) else mark
+            opened_at = datetime.utcnow()
+            recorded = False
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute(SQL_INSERT_HOLD_ROW, user['id'], signal_db_id, entry_order['id'],
+                                       sl_order['id'], api_symbol, kraken_symbol, bracket_qty,
+                                       float(hold_guard.HOLD_LEVERAGE), entry_fill_price, sl_price, opened_at)
+                recorded = True
+            except Exception as e:
+                self.logger.error(f"   ⚠️ Failed to record hold (trade still placed): {e}")
+                await log_error_to_db(self.db_pool, user_api_key, "POSITION_RECORD_FAILED", str(e)[:200],
+                                      {"symbol": kraken_symbol, "entry_order_id": str(entry_order['id']),
+                                       "sl_order_id": str(sl_order['id']), "kind": "hold"})
+                await notify_admin(title="POSITION_RECORD_FAILED (Kraken follower hold)",
+                                   details={"User": user_email, "Symbol": kraken_symbol,
+                                            "Entry Order": str(entry_order['id']), "SL Order": str(sl_order['id']),
+                                            "Error": str(e)[:300],
+                                            "Impact": "Hold keeps its SL but has no open_positions row"},
+                                   level="error")
+            if recorded:
+                try:
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute("""
+                            UPDATE follower_users SET
+                                billing_cycle_start = $2
+                            WHERE id = $1 AND billing_cycle_start IS NULL
+                        """, user['id'], opened_at)
+                except Exception as e:
+                    await log_error_to_db(self.db_pool, user_api_key, "BILLING_CYCLE_START_FAILED", str(e)[:200],
+                                          {"function": "execute_hold_entry", "user_id": user['id']})
+            stage = 'done'
+            self.logger.info(f"   🎉 {user_short}: Hold entered")
+            return True
+        except Exception as e:
+            self.logger.error(f"   ❌ {user_short}: Hold error - {type(e).__name__}: {str(e)[:100]}")
+            await log_error_to_db(self.db_pool, user_api_key, "TRADE_EXECUTION_ERROR", str(e)[:200],
+                                  {"symbol": kraken_symbol, "side": 'BUY', "error_type": type(e).__name__,
+                                   "function": "execute_hold_entry"})
+            if stage == 'entry_sent':
+                await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
+                                                 bracket_qty or quantity, hold_guard.HOLD_LEVERAGE, signal_db_id,
+                                                 sl_order, None, kind='hold')
+            return False
+
     async def _post_entry_exception(self, exc, exchange, user, signal, kraken_symbol, entry_order, quantity,
-                                    leverage, signal_db_id, sl_order=None, tp_order=None):
+                                    leverage, signal_db_id, sl_order=None, tp_order=None, kind='t1'):
         """
         R3-H1: an exception after the entry was sent. Position open or unknown ->
         needs_recovery row carrying the signal levels, qty and every known leg id.
@@ -1238,8 +1664,9 @@ class HostedTradingLoop:
                 entry_order_id=str(entry_order['id']) if entry_order else 'unknown',
                 signal_symbol=signal.get('symbol'), kraken_symbol=kraken_symbol,
                 side=str(signal.get('action') or '').upper(), quantity=quantity, leverage=leverage,
-                entry_fill_price=float(signal['entry_price']), target_tp=float(signal['take_profit']),
-                target_sl=float(signal['stop_loss']),
+                entry_fill_price=float(signal['entry_price']),
+                target_tp=float(signal['take_profit']) if kind != 'hold' else None,
+                target_sl=float(signal['stop_loss']), kind=kind,
             )
             if not await self._verified_flat(exchange, kraken_symbol):
                 self.logger.critical(f"   🚨 Post-entry exception with the position open or unknown - recording needs_recovery")
@@ -1398,6 +1825,7 @@ class HostedTradingLoop:
         sl_order_id: str = None,
         tp_order_id: str = None,
         outcome: Optional[Dict] = None,
+        kind: str = 't1',
     ):
         """
         Emergency market close when TP/SL placement fails.
@@ -1479,6 +1907,7 @@ class HostedTradingLoop:
                 reason=reason,
                 sl_order_id=sl_order_id,
                 tp_order_id=tp_order_id,
+                kind=kind,
             )
 
         if outcome is not None:
@@ -1530,6 +1959,7 @@ class HostedTradingLoop:
         reason: str = None,
         sl_order_id: str = None,
         tp_order_id: str = None,
+        kind: str = 't1',
     ):
         """
         Record an unprotected position in the DB with status='needs_recovery'.
@@ -1560,6 +1990,14 @@ class HostedTradingLoop:
             tp_value = target_tp if target_tp is not None else fallback_price
             sl_value = target_sl if target_sl is not None else fallback_price
             async with self.db_pool.acquire() as conn:
+              if kind == 'hold':
+                # a hold has no TP: target_tp stays NULL (never the entry-price fallback), kind='hold'
+                await conn.execute(SQL_INSERT_HOLD_RECOVERY, user_id, signal_db_id, entry_order_id, sl_order_id,
+                                   signal_symbol or kraken_symbol, kraken_symbol,
+                                   side.upper() if side else 'UNKNOWN', quantity, leverage or 1.0,
+                                   entry_fill_price or 0.0, sl_value)
+                self.logger.critical(f"   📝 Unprotected hold recorded (status='needs_recovery') for guardian")
+              else:
                 await conn.execute("""
                     INSERT INTO open_positions
                     (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
@@ -1727,7 +2165,7 @@ class HostedTradingLoop:
 
         # 6. the hint goes on the row BEFORE the order (the monitor labels the exit TIME once a fill is recorded)
         async with self.db_pool.acquire() as conn:
-            res = await conn.execute(SQL_SET_EXIT_HINT, pid)
+            res = await conn.execute(SQL_SET_EXIT_HINT, pid, close_guard.exit_hint_for(job.get('payload_reason')) or 'TIME')
         self._close_step(job, 'set_exit_hint', result=str(res))
         if str(res) == 'UPDATE 0':
             await self._close_job_retry(job, 'row left open/needs_recovery before the close')
@@ -1907,14 +2345,36 @@ class HostedTradingLoop:
 
         # OPTIMIZED: Single query gets all pending signals with user info
         pending = await self.get_pending_signals_batched()
-        
-        if not pending:
+
+        # T1LIVE-7: BNB hold deliveries (empty unless HOLD_ENABLED and PF_BNBUSD found); a failure here never
+        # blocks the ADA signals
+        holds = []
+        try:
+            if hold_flags()['HOLD_ENABLED']:
+                await self.check_hold_market()
+                holds = await self.get_pending_holds_batched()
+        except Exception as e:
+            self.logger.error(f"❌ Hold deliveries cycle failed: {close_guard.redact_text(str(e))[:200]}")
+
+        if not pending and not holds:
             return  # No pending signals, skip silently
         
         # FAIRNESS: Randomize execution order so no user is always first/last
         random.shuffle(pending)
+        random.shuffle(holds)
+
+        # SERIALISE per user: at most ONE entry delivery per user per cycle (ADA first); the other stays
+        # unacknowledged and runs next cycle (close jobs always run first, above)
+        seen, entries = set(), []
+        for kind, items in (('t1', pending), ('hold', holds)):
+            for it in items:
+                if it['user_id'] in seen:
+                    continue
+                seen.add(it['user_id'])
+                entries.append((kind, it))
+        pending = entries
         
-        self.logger.info(f"📡 Found {len(pending)} pending signal(s) to execute")
+        self.logger.info(f"📡 Found {len(pending)} pending entry delivery(ies) to execute")
         
         # PARALLEL BATCH EXECUTION
         # Batch size 25 = ~100 tokens per batch (safe under 500 limit)
@@ -1926,7 +2386,8 @@ class HostedTradingLoop:
             
             # Execute batch in parallel
             await asyncio.gather(*[
-                self._execute_signal_for_user(item) for item in batch
+                (self._execute_hold_for_user(item) if kind == 'hold' else self._execute_signal_for_user(item))
+                for kind, item in batch
             ], return_exceptions=True)
             
             # Rate limit delay between batches
@@ -1951,6 +2412,7 @@ class HostedTradingLoop:
                 'email': item['email'],
                 'kraken_api_key_encrypted': item['kraken_api_key_encrypted'],
                 'kraken_api_secret_encrypted': item['kraken_api_secret_encrypted'],
+                'hold_enabled': item.get('hold_enabled', True),
             }
             
             # Build signal dict for execute_trade
@@ -2000,6 +2462,13 @@ class HostedTradingLoop:
         self.logger.info(f"🧾 Master CLOSE flags: {close_flags()}")
         self.logger.info("=" * 60)
         close_events().emit('CLOSE_CONFIG', 'info', flags=close_flags())
+        self.logger.info(f"🐗 BNB hold flags: {hold_flags()}")
+        if hold_flags()['HOLD_ENABLED']:
+            try:
+                ok = await self.check_hold_market(force=True)
+                self.logger.info(f"🐗 PF_BNBUSD market {'found' if ok else 'MISSING - hold disabled'}")
+            except Exception as e:
+                self.logger.error(f"❌ Hold market check failed: {e}")
         
         poll_count = 0
         last_status_log = datetime.now()

@@ -249,25 +249,25 @@ async def test_token_cleared_on_failure_and_on_exception(monkeypatch, fast_sleep
     assert follower_guard.is_inflight(user['id']) is False
 
 
-async def test_a_second_concurrent_execution_keeps_the_user_in_flight(monkeypatch, fast_sleep, notify_log):
+async def test_a_second_concurrent_execution_is_refused_while_the_user_is_in_flight(monkeypatch, fast_sleep,
+                                                                                    notify_log):
+    """T1LIVE-7: execute_trade refuses (False, no ack, no order) while the user has an execution in flight."""
     loop, db, pool, ex, user, signal = _setup(monkeypatch)
-    gate = asyncio.Event()
     real_ack = loop.acknowledge_signal
     calls = {'n': 0}
 
     async def ack(delivery_id):
         calls['n'] += 1
-        if calls['n'] == 2:
-            await gate.wait()                                       # the second execution stalls here
         return await real_ack(delivery_id)
 
     monkeypatch.setattr(loop, 'acknowledge_signal', ack)
     first = asyncio.create_task(loop.execute_trade(user, signal))
-    second = asyncio.create_task(loop.execute_trade(user, dict(signal, delivery_id=signal['delivery_id'])))
+    await asyncio.sleep(0)                                          # the first execution has marked the user
+    assert follower_guard.is_inflight(user['id']) is True
+    assert await loop.execute_trade(user, dict(signal, delivery_id=signal['delivery_id'])) is False
+    assert calls['n'] <= 1                                          # the refused one never acknowledged
     assert await first is True
-    assert follower_guard.is_inflight(user['id']) is True           # the second token still holds
-    gate.set()
-    assert await second is False                                    # dedup: the first position exists
+    assert len(ex.calls('create_market_order')) == 1
     assert follower_guard.is_inflight(user['id']) is False
 
 

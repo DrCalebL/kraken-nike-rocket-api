@@ -58,7 +58,8 @@ class CloseDB:
                 continue
             mc = self.closes[j['master_trade_id']]
             u = next(u for u in self.db.users if u['id'] == j['user_id'])
-            out.append(dict(j, payload_side=mc['side'], payload_symbol=mc['symbol'], api_key=u['api_key'],
+            out.append(dict(j, payload_side=mc['side'], payload_symbol=mc['symbol'], payload_reason=mc['reason'],
+                            api_key=u['api_key'],
                             email=u['email'], kraken_api_key_encrypted=u.get('kraken_api_key_encrypted'),
                             kraken_api_secret_encrypted=u.get('kraken_api_secret_encrypted'),
                             agent_active=u.get('agent_active'), credentials_set=u.get('credentials_set'),
@@ -88,7 +89,7 @@ class CloseDB:
         r = next((r for r in self.db.rows if r['id'] == args[0]), None)
         if r is None or r['status'] not in ACTIVE:
             return 'UPDATE 0'
-        r['exit_hint'] = 'TIME'
+        r['exit_hint'] = args[1] if len(args) > 1 else 'TIME'
         return 'UPDATE 1'
 
     def _add_fill(self, method, sql, args):

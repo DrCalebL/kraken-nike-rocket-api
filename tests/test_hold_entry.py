@@ -1,0 +1,703 @@
+"""
+T1LIVE-7 BNB hold entry on the Kraken follower: execute_hold_entry (market entry -> confirmed position -> stop-market
+SL sized to the fill, NO TP), its refusals, the ADA + BNB same-user race, the delivery filters (a legacy path never gets
+a hold), POST /api/broadcast-hold and the leader_exit close path.
+"""
+import asyncio
+import time
+
+import ccxt
+import pytest
+
+import close_guard as cg
+import follower_guard
+import hold_guard as hg
+import hosted_trading_loop as htl
+from hosted_trading_loop import HostedTradingLoop
+from tests.fakes import fast_sleep, new_user_id, notify_log  # noqa: F401  (pytest fixtures)
+from tests.fakes.fake_close import CloseDB
+from tests.fakes.fake_hold import HoldDB
+from tests.fakes.fake_krakenfutures import FakeKrakenFutures
+from tests.fakes.fake_pool import FakePool, FollowerDB
+
+BNB = 'BNB/USD:USD'
+ADA = 'ADA/USD:USD'
+MTID = '0123456789abcdef0123456789abcdef'
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+class Env:
+    pass
+
+
+def _env(monkeypatch, equity=10000.0, enabled=True, **user_fields):
+    monkeypatch.delenv('GUARDIAN_MODE', raising=False)
+    for k in ('HOLD_USER_ALLOWLIST', 'HOLD_SIZE_SCALE', 'HOLD_MAX_RISK_PCT', 'HOLD_SL_MATCH_PCT'):
+        monkeypatch.delenv(k, raising=False)
+    if enabled:
+        monkeypatch.setenv('HOLD_ENABLED', '1')
+    else:
+        monkeypatch.delenv('HOLD_ENABLED', raising=False)
+    e = Env()
+    e.pool = FakePool()
+    e.db = FollowerDB(e.pool)
+    e.hold = HoldDB(e.db)
+    e.cdb = CloseDB(e.db)
+    e.user = e.db.add_user(new_user_id(), **user_fields)
+    e.ex = FakeKrakenFutures(name=e.user['api_key'], equity=equity)
+    e.loop = HostedTradingLoop(e.pool)
+    e.loop.active_exchanges[e.user['api_key']] = e.ex
+    e.loop.hold_available = True
+    return e
+
+
+def _orders(ex, method='create_order'):
+    return ex.calls(method)
+
+
+def _entries(ex):
+    return [c for c in ex.calls('create_market_order')]
+
+
+def _is_sl(info):
+    return info.get('type') in ('stop_market', 'stop')
+
+
+async def _enter(e, **kw):
+    item = e.hold.add_delivery(e.user, **kw)
+    await e.loop._execute_hold_for_user(item)
+    return item
+
+
+def _hold_rows(e):
+    return [r for r in e.db.rows if r.get('kind') == 'hold']
+
+
+# ======================================================================================================
+# the entry
+# ======================================================================================================
+
+def test_hold_entry_places_a_confirmed_stop_only_position(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e))
+    pos = e.ex.positions[BNB]
+    assert pos['side'] == 'long' and pos['contracts'] == 6.66            # min(10000*.02/30, 10000*.5/600) at mark 600
+    (_, lev), = e.ex.calls('set_leverage')
+    assert lev['leverage'] == 10
+    sls = [i for _m, i in _orders(e.ex) if _is_sl(i)]
+    assert len(sls) == 1 and float(sls[0]['amount']) == 6.66 and sls[0]['params']['stopPrice'] == 570.0
+    assert e.ex.calls('create_limit_order') == [] and not any(i['type'] == 'limit' for _m, i in _orders(e.ex))
+    row, = _hold_rows(e)
+    assert row['status'] == 'open' and row['target_tp'] is None and row['tp_order_id'] is None
+    assert row['sl_order_id'] and row['target_sl'] == 570.0 and row['quantity'] == 6.66
+    assert row['kraken_symbol'] == 'PF_BNBUSD' and row['symbol'] == 'BNB/USDT'
+    assert list(e.ex.orders) == [row['sl_order_id']]
+
+
+def test_sl_follows_the_confirmed_partial_fill(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.fill_ratio = 0.5
+    run(_enter(e))
+    row, = _hold_rows(e)
+    assert row['quantity'] == 3.33
+    (_, sl), = [(m, i) for m, i in _orders(e.ex) if _is_sl(i)]
+    assert float(sl['amount']) == 3.33
+
+
+def test_the_delivery_is_acknowledged_before_any_order(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    item = e.hold.add_delivery(e.user)
+    order = []
+    real = e.loop.acknowledge_signal
+
+    async def ack(d):
+        order.append(('ack', len(e.ex.calls('create_market_order'))))
+        return await real(d)
+
+    monkeypatch.setattr(e.loop, 'acknowledge_signal', ack)
+    run(e.loop._execute_hold_for_user(item))
+    assert order == [('ack', 0)]
+
+
+def test_a_second_hold_offer_for_a_user_who_holds_is_not_entered(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e))
+    run(_enter(e, delivery_id=8001))
+    assert len(_entries(e.ex)) == 1 and len(_hold_rows(e)) == 1
+
+
+def test_leverage_is_set_before_the_entry_and_never_above_ten(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e))
+    names = [m for m, _i in e.ex.calls()]
+    assert names.index('set_leverage') < names.index('create_market_order')
+    assert all(i['leverage'] == 10 for _m, i in e.ex.calls('set_leverage'))
+
+
+def test_a_failed_leverage_set_means_no_entry(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.fault('set_leverage', ccxt.ExchangeError('nope'))
+    run(_enter(e))
+    assert _entries(e.ex) == [] and _hold_rows(e) == []
+    assert 'HOLD_LEVERAGE_SET_FAILED' in e.db.error_types()
+
+
+# ======================================================================================================
+# sizing refusals
+# ======================================================================================================
+
+@pytest.mark.parametrize('price,code', [(574.0, 'HOLD_MARK_NEAR_STOP'), (700.0, 'HOLD_MARK_DEVIATION'),
+                                        (580.0, 'HOLD_MARK_DEVIATION')])
+def test_a_mark_that_makes_the_entry_unsafe_is_refused(monkeypatch, fast_sleep, notify_log, price, code):
+    e = _env(monkeypatch)
+    e.ex.prices[BNB] = price
+    run(_enter(e))
+    assert _entries(e.ex) == [] and e.ex.positions == {} and code in e.db.error_types()
+
+
+def test_the_follower_is_sized_at_its_own_mark(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.prices[BNB] = 610.0
+    run(_enter(e))
+    assert e.ex.positions[BNB]['contracts'] == 5.0                        # 200 / (610 - 570)
+
+
+def test_margin_shrinks_the_size_and_leverage_stays_ten(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.free_margin = 300.0
+    run(_enter(e))
+    assert e.ex.positions[BNB]['contracts'] == 3.16
+    assert all(i['leverage'] == 10 for _m, i in e.ex.calls('set_leverage'))
+
+
+def test_no_margin_skips_with_hold_margin_skip(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.free_margin = 0.5
+    run(_enter(e))
+    assert _entries(e.ex) == [] and 'HOLD_MARGIN_SKIP' in e.db.error_types()
+    assert any('HOLD_MARGIN_SKIP' in n['title'] for n in notify_log)
+
+
+def test_an_unreadable_free_margin_skips(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    monkeypatch.setattr(e.ex, 'fetch_balance', lambda params=None: {'USD': {'total': 10000.0}, 'info': {}})
+    run(_enter(e))
+    assert _entries(e.ex) == [] and 'HOLD_MARGIN_UNKNOWN' in e.db.error_types()
+
+
+def test_zero_equity_and_unreadable_mark_are_refused(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch, equity=0.0)
+    run(_enter(e))
+    assert _entries(e.ex) == [] and 'HOLD_NO_EQUITY' in e.db.error_types()
+    e2 = _env(monkeypatch)
+    e2.ex.fault('fetch_ticker', ccxt.NetworkError('down'))
+    run(_enter(e2))
+    assert _entries(e2.ex) == [] and 'HOLD_READ_ERROR' in e2.db.error_types()
+
+
+def test_a_scaled_size(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    monkeypatch.setenv('HOLD_SIZE_SCALE', '0.5')
+    run(_enter(e))
+    assert e.ex.positions[BNB]['contracts'] == 3.33
+
+
+# ======================================================================================================
+# switches and gates
+# ======================================================================================================
+
+def test_hold_disabled_by_default_never_trades_or_even_reads(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch, enabled=False)
+    run(_enter(e))
+    assert e.ex.calls() == [] and _hold_rows(e) == [] and e.pool.sql('UPDATE signal_deliveries') == []
+    assert run(e.loop.get_pending_holds_batched()) == []
+    assert htl.hold_flags() == {'HOLD_ENABLED': False, 'HOLD_USER_ALLOWLIST': False}
+
+
+def test_unavailable_market_disables_the_hold(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.loop.hold_available = False
+    run(_enter(e))
+    assert e.ex.calls() == [] and run(e.loop.get_pending_holds_batched()) == []
+
+
+def test_startup_check_finds_or_misses_pf_bnbusd(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.loop.hold_available = None
+    monkeypatch.setattr(HostedTradingLoop, '_load_public_markets', staticmethod(lambda: {'x': {'id': 'PF_BNBUSD'}}))
+    assert run(e.loop.check_hold_market(force=True)) is True
+    monkeypatch.setattr(HostedTradingLoop, '_load_public_markets', staticmethod(lambda: {'x': {'id': 'PF_ADAUSD'}}))
+    assert run(e.loop.check_hold_market(force=True)) is False
+    assert 'HOLD_MARKET_MISSING' in e.db.error_types() and any('HOLD_MARKET_MISSING' in n['title'] for n in notify_log)
+
+    def boom():
+        raise ccxt.NetworkError('down')
+
+    e.loop.hold_available = None
+    monkeypatch.setattr(HostedTradingLoop, '_load_public_markets', staticmethod(boom))
+    assert run(e.loop.check_hold_market(force=True)) is False
+
+
+def test_the_allowlist_gates_entry_and_the_pending_list(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', '999999')
+    item = e.hold.add_delivery(e.user)
+    assert run(e.loop.get_pending_holds_batched()) == []
+    run(e.loop._execute_hold_for_user(item))
+    assert _entries(e.ex) == []
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', str(e.user['id']))
+    assert len(run(e.loop.get_pending_holds_batched())) == 1
+    run(e.loop._execute_hold_for_user(item))
+    assert len(_entries(e.ex)) == 1
+
+
+def test_the_personal_off_switch_blocks(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    item = e.hold.add_delivery(e.user)
+    user = dict(e.user, hold_enabled=False)
+    assert run(e.loop.execute_hold_entry(user, {'delivery_id': item['delivery_id']})) is False
+    assert e.ex.calls() == []
+
+
+def test_refused_while_in_flight_and_the_delivery_stays_open(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    tok = follower_guard.mark(e.user['id'])
+    try:
+        run(_enter(e))
+    finally:
+        follower_guard.clear(e.user['id'], tok)
+    assert e.ex.calls() == [] and e.pool.sql('UPDATE signal_deliveries') == []
+
+
+def test_stale_closed_and_sat_out_offers_are_acknowledged_and_never_traded(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e, offer_ms=int(time.time() * 1000) - 16 * 60_000))
+    assert 'HOLD_OFFER_STALE' in e.db.error_types()
+    e.hold.closed.add(MTID)
+    run(_enter(e, delivery_id=8002))
+    assert 'HOLD_ALREADY_CLOSED' in e.db.error_types()
+    e.hold.closed.clear()
+    e.hold.sitouts.add((e.user['id'], MTID))
+    run(_enter(e, delivery_id=8003))
+    assert 'HOLD_SAT_OUT' in e.db.error_types()
+    assert e.ex.calls() == [] and len(e.pool.sql('UPDATE signal_deliveries')) == 3
+
+
+def test_a_failed_closed_or_sitout_read_fails_closed_and_keeps_the_delivery(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.pool.fail_on(htl.SQL_HOLD_SITOUT, RuntimeError('db down'))
+    run(_enter(e))
+    assert e.ex.calls() == [] and e.pool.sql('UPDATE signal_deliveries') == []
+    assert 'HOLD_SKIPPED_READ_ERROR' in e.db.error_types()
+
+
+def test_a_manual_bnb_position_blocks_the_hold(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.open_position(BNB, 'long', 1.0, 590.0)
+    run(_enter(e))
+    assert _entries(e.ex) == [] and _hold_rows(e) == []
+
+
+# ======================================================================================================
+# failure paths: SL failure -> emergency close
+# ======================================================================================================
+
+def test_sl_failure_closes_the_hold_immediately(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.fault('create_order', ccxt.ExchangeError('rejected'), times=50, when=_is_sl)
+    run(_enter(e))
+    assert e.ex.positions == {} and _hold_rows(e) == []
+    closes = [i for _m, i in _orders(e.ex) if i.get('params', {}).get('reduceOnly') and i['type'] == 'market']
+    assert len(closes) == 1 and closes[0]['side'] == 'sell'
+
+
+def test_sl_and_close_failure_records_a_needs_recovery_hold_row_without_tp(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.fault('create_order', ccxt.ExchangeError('rejected'), times=100,
+               when=lambda info: info.get('type') != 'x')
+    run(_enter(e))
+    row, = _hold_rows(e)
+    assert row['status'] == 'needs_recovery' and row['target_tp'] is None and row['tp_order_id'] is None
+    assert row['target_sl'] == 570.0 and 'EMERGENCY_CLOSE_FAILED' in e.db.error_types()
+
+
+def test_an_exception_after_the_entry_records_a_hold_recovery_row(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+
+    async def boom(*a, **k):
+        raise RuntimeError('bracket blew up')
+
+    monkeypatch.setattr(htl, 'place_sl_order_with_retry', boom)
+    run(_enter(e))
+    row, = _hold_rows(e)
+    assert row['status'] == 'needs_recovery' and row['target_tp'] is None and 'POST_ENTRY_EXCEPTION' in e.db.error_types()
+
+
+# ======================================================================================================
+# ADA + BNB for the same user
+# ======================================================================================================
+
+def _ada_item(e, delivery_id=9101):
+    e.db.deliveries[delivery_id] = e.user['id']
+    return {'user_id': e.user['id'], 'api_key': e.user['api_key'], 'email': e.user['email'],
+            'kraken_api_key_encrypted': 'enc-k', 'kraken_api_secret_encrypted': 'enc-s',
+            'delivery_id': delivery_id, 'signal_id': 'sig-ada-1', 'action': 'BUY', 'symbol': 'ADA/USDT',
+            'entry_price': 0.5, 'stop_loss': 0.49, 'take_profit': 0.52, 'leverage': 5, 'risk_pct': 0.0125,
+            'signal_created_at': e.db.now(), 'hold_enabled': True}
+
+
+def _wire_polls(e, ada):
+    acked = set()
+    real = e.loop.acknowledge_signal
+
+    async def ack(d):
+        acked.add(d)
+        return await real(d)
+
+    e.loop.acknowledge_signal = ack
+    e.pool.on("AND COALESCE(s.strategy, 't1') = 't1' AND s.created_at",
+              lambda m, s, a: [r for r in [ada] if r['delivery_id'] not in acked])
+    e.hold.pending[:] = []
+    e.pool.on(htl.SQL_PENDING_HOLDS, lambda m, s, a: [r for r in e.hold.pending if r['delivery_id'] not in acked])
+    return acked
+
+
+def test_ada_and_bnb_for_one_user_run_one_entry_per_cycle_and_both_end_up_open(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.loop.hold_available = None
+    monkeypatch.setattr(HostedTradingLoop, '_load_public_markets', staticmethod(lambda: {'x': {'id': 'PF_BNBUSD'}}))
+    ada = _ada_item(e)
+    _wire_polls(e, ada)
+    e.hold.add_delivery(e.user)
+    run(e.loop.poll_and_execute())                                   # cycle 1: ADA only (one entry per user)
+    assert list(e.ex.positions) == [ADA] and _hold_rows(e) == []
+    run(e.loop.poll_and_execute())                                   # cycle 2: the hold; the ADA bracket is the other slot
+    assert set(e.ex.positions) == {ADA, BNB}
+    ada_row, = [r for r in e.db.rows if (r.get('kind') or 't1') == 't1']
+    hold_row, = _hold_rows(e)
+    assert ada_row['tp_order_id'] and ada_row['sl_order_id'] and ada_row['target_tp'] == 0.52
+    assert hold_row['tp_order_id'] is None and hold_row['target_tp'] is None
+    assert len(e.ex.orders) == 3                                     # ADA SL + TP, BNB SL
+    run(e.loop.poll_and_execute())                                   # nothing left to do
+    assert len(_entries(e.ex)) == 2
+
+
+def test_hold_first_then_ada_also_works(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e))
+    ada = _ada_item(e)
+    acked = _wire_polls(e, ada)
+    e.hold.pending[:] = []
+    run(e.loop.poll_and_execute())
+    assert set(e.ex.positions) == {ADA, BNB} and ada['delivery_id'] in acked
+
+
+def test_two_entry_deliveries_for_one_user_are_serialised_within_a_cycle(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.loop.hold_available = None
+    monkeypatch.setattr(HostedTradingLoop, '_load_public_markets', staticmethod(lambda: {'x': {'id': 'PF_BNBUSD'}}))
+    ada = _ada_item(e)
+    _wire_polls(e, ada)
+    e.hold.add_delivery(e.user)
+    seen = []
+    real_t1, real_hold = e.loop._execute_signal_for_user, e.loop._execute_hold_for_user
+
+    async def t1(item):
+        seen.append('t1')
+        return await real_t1(item)
+
+    async def hold(item):
+        seen.append('hold')
+        return await real_hold(item)
+
+    e.loop._execute_signal_for_user, e.loop._execute_hold_for_user = t1, hold
+    run(e.loop.poll_and_execute())
+    assert seen == ['t1']
+
+
+def test_a_hold_that_slipped_into_the_t1_path_is_refused(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    sig = dict(_ada_item(e), strategy='hold', take_profit=None, delivery_id=9102)
+    assert run(e.loop.execute_trade(dict(e.user, id=e.user['id']), sig)) is False
+    assert e.ex.calls() == []
+
+
+def _ada_signal_for_leverage():
+    return dict(entry_price=0.5, stop_loss=0.499, take_profit=0.52, leverage=5, risk_pct=0.02)
+
+
+@pytest.mark.parametrize('hold_on,expected', [(True, 10), (False, 16)])
+def test_ada_auto_raised_leverage_is_capped_at_ten_for_hold_users(monkeypatch, fast_sleep, notify_log, hold_on,
+                                                                  expected):
+    e = _env(monkeypatch, enabled=hold_on)
+    sig = dict(_ada_item(e), **_ada_signal_for_leverage())
+    user = dict(e.user, hold_enabled=True)
+    run(e.loop.execute_trade(user, sig))
+    assert e.ex.leverage == expected
+
+
+def test_ada_leverage_cap_does_not_apply_to_a_user_with_hold_off(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    sig = dict(_ada_item(e), **_ada_signal_for_leverage())
+    user = dict(e.user, hold_enabled=False)
+    run(e.loop.execute_trade(user, sig))
+    assert e.ex.leverage == 16
+
+
+# ======================================================================================================
+# a legacy / agent path never gets a hold
+# ======================================================================================================
+
+def test_every_ada_and_legacy_delivery_query_excludes_holds(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.pool.on('SELECT id FROM follower_users WHERE api_key', lambda m, s, a: {'id': e.user['id']})
+    run(e.loop.get_pending_signals_batched())
+    run(e.loop.get_latest_signal(e.user['api_key']))
+    sqls = [s for _m, s, _a in e.pool.calls if 'signal_deliveries' in s and 'FROM' in s]
+    assert len(sqls) >= 1
+    for s in sqls:
+        assert "COALESCE(s.strategy, 't1') = 't1'" in s, s
+
+
+def test_the_pending_hold_query_only_selects_hold_signals_for_hold_enabled_users(monkeypatch):
+    assert "s.strategy = 'hold'" in htl.SQL_PENDING_HOLDS
+    assert "COALESCE(u.hold_enabled, true) = true" in htl.SQL_PENDING_HOLDS
+    assert "INTERVAL '15 minutes'" in htl.SQL_PENDING_HOLDS
+
+
+# ======================================================================================================
+# leader_exit through the close jobs
+# ======================================================================================================
+
+def _hold_row_with_position(e):
+    run(_enter(e))
+    row, = _hold_rows(e)
+    return row
+
+
+def test_a_leader_exit_closes_the_hold_labels_leader_and_cancels_the_sl(monkeypatch, fast_sleep, notify_log, tmp_path):
+    monkeypatch.setattr(htl, 'CLOSE_EVENTS', htl.make_close_event_log(str(tmp_path / 'c.jsonl')))
+    e = _env(monkeypatch)
+    row = _hold_row_with_position(e)
+    e.cdb.add_job(row, master_trade_id=MTID, side='BUY')
+    e.cdb.closes[MTID].update(reason='leader_exit', symbol='BNB/USDT')
+    run(e.loop.process_close_jobs())
+    assert e.cdb.job(row['id'])['status'] == 'done'
+    assert e.db.row(row['id'])['exit_hint'] == 'LEADER' and e.db.row(row['id'])['close_fill_qty'] == 6.66
+    assert e.ex.positions == {} and e.ex.orders == {}
+
+
+def test_a_time_exit_still_writes_time(monkeypatch, fast_sleep, notify_log, tmp_path):
+    monkeypatch.setattr(htl, 'CLOSE_EVENTS', htl.make_close_event_log(str(tmp_path / 'c.jsonl')))
+    e = _env(monkeypatch)
+    row = _hold_row_with_position(e)
+    e.cdb.add_job(row, master_trade_id=MTID, side='BUY')
+    run(e.loop.process_close_jobs())
+    assert e.db.row(row['id'])['exit_hint'] == 'TIME'
+
+
+# ======================================================================================================
+# POST /api/broadcast-hold and the endpoint filters (SQLite)
+# ======================================================================================================
+
+def _hold_payload(**over):
+    from tests.test_master_close import _fixture
+    now = _fixture()['now_ms']
+    d = {'master_trade_id': MTID, 'leader_trade_id': 'L-1', 'action': 'BUY', 'symbol': 'BNB/USDT',
+         'ref_entry': '600.0', 'stop_loss': '570.0', 'r_b': '0.02', 'n2': '0.5', 'leader_entry_ms': now - 3_600_000,
+         'offer_ms': now - 1000, 'offer_kind': 'entry', 'protocol': 'hold-1'}
+    d.update(over)
+    return d
+
+
+def _post_hold(a, payload, key=None):
+    from tests.test_master_close import KEY
+    key = KEY if key is None else key
+    return a.client.post('/api/broadcast-hold', json=payload, headers={'X-Master-Key': key} if key else {})
+
+
+def _api(monkeypatch, tmp_path):
+    from tests.test_master_close import _api as base
+    monkeypatch.setenv('HOLD_ENABLED', '1')
+    monkeypatch.delenv('HOLD_USER_ALLOWLIST', raising=False)
+    a = base(monkeypatch, tmp_path)
+    fm = a.fm
+    s = a.Session()
+    for i in range(1, 5):
+        s.add(fm.User(api_key='nk_hold_user_%d' % i, email='h%d@example.com' % i, access_granted=True,
+                      agent_active=True, credentials_set=True))
+    s.commit()
+    s.close()
+    return a
+
+
+def _count(a, sql, **p):
+    return _q(a, sql, **p)[0][0]
+
+
+from tests.test_master_close import _q  # noqa: E402
+
+
+def test_broadcast_hold_needs_the_master_key(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    assert _post_hold(a, _hold_payload(), key='wrong').status_code == 401
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 0
+
+
+def test_broadcast_hold_rejects_bad_payloads_with_422_and_writes_nothing(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    for over in ({'action': 'SELL'}, {'r_b': '0.2'}, {'stop_loss': '601'}, {'symbol': 'ADA/USDT'},
+                 {'protocol': 'hold-2'}, {'offer_ms': 1}):
+        r = _post_hold(a, _hold_payload(**over))
+        assert r.status_code == 422, (over, r.text)
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 0 and _count(a, 'SELECT COUNT(*) FROM hold_offers') == 0
+
+
+def test_broadcast_hold_is_a_noop_while_the_service_switch_is_off(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    monkeypatch.delenv('HOLD_ENABLED')
+    r = _post_hold(a, _hold_payload())
+    assert r.status_code == 200 and r.json()['skipped'] == 'HOLD_DISABLED'
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 0
+
+
+def test_broadcast_hold_creates_a_tp_less_hold_signal_and_deliveries_and_is_idempotent(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    r = _post_hold(a, _hold_payload())
+    assert r.status_code == 200 and r.json()['delivered_to'] == 4 and r.json()['duplicate'] is False
+    sig = _q(a, 'SELECT strategy, take_profit, stop_loss, entry_price, hold_r_b, hold_n2, master_trade_id, action '
+                'FROM signals')
+    assert sig == [('hold', None, 570.0, 600.0, 0.02, 0.5, MTID, 'BUY')]
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries WHERE offer_ms IS NOT NULL') == 4
+    again = _post_hold(a, _hold_payload())
+    assert again.json()['duplicate'] is True
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries') == 4 and _count(a, 'SELECT COUNT(*) FROM signals') == 1
+
+
+def test_a_reoffer_reuses_the_signal_and_skips_followers_who_hold_or_were_stopped_out(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    s = a.Session()
+    fm = a.fm
+    sig = s.query(fm.Signal).one()
+    users = {u.api_key: u.id for u in s.query(fm.User).all()}
+    s.add(fm.OpenPosition(user_id=users['nk_hold_user_1'], signal_id=sig.id, entry_order_id='E', symbol='BNB/USDT',
+                          kraken_symbol='PF_BNBUSD', side='BUY', quantity=1.0, target_tp=None, target_sl=570.0,
+                          kind='hold', status='open'))
+    s.add(fm.HoldSitout(user_id=users['nk_hold_user_2'], master_trade_id=MTID, reason='STOPPED_OUT'))
+    u3 = s.query(fm.User).filter_by(api_key='nk_hold_user_3').one()
+    u3.hold_enabled = False
+    for d in s.query(fm.SignalDelivery).all():
+        d.acknowledged = True                                    # the first offer was handled
+    s.commit()
+    s.close()
+    r = _post_hold(a, _hold_payload(offer_kind='reoffer', offer_ms=_hold_payload()['offer_ms'] + 500))
+    assert r.status_code == 200 and r.json()['delivered_to'] == 1       # only user 4
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 1
+    assert _count(a, 'SELECT COUNT(*) FROM hold_offers') == 2
+
+
+def test_a_late_joiner_gets_the_reoffer_but_a_pending_delivery_is_not_doubled(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    r = _post_hold(a, _hold_payload(offer_kind='reoffer', offer_ms=_hold_payload()['offer_ms'] + 500))
+    assert r.json()['delivered_to'] == 0                                  # all four still have an open delivery
+
+
+def test_broadcast_hold_changed_parameters_or_a_closed_trade_are_not_offered(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    r = _post_hold(a, _hold_payload(stop_loss='580.0', offer_ms=_hold_payload()['offer_ms'] + 500))
+    assert r.status_code == 422
+    from tests.test_master_close import _post_close, _close_payload
+    assert _post_close(a, _close_payload(MTID, symbol='ADA/USDT', reason='leader_exit')).status_code == 200
+    r = _post_hold(a, _hold_payload(offer_ms=_hold_payload()['offer_ms'] + 900))
+    assert r.json()['skipped'] == 'HOLD_ALREADY_CLOSED' and r.json()['delivered_to'] == 0
+
+
+def test_the_allowlist_limits_deliveries(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    monkeypatch.setenv('HOLD_USER_ALLOWLIST', 'h2@example.com')
+    r = _post_hold(a, _hold_payload())
+    assert r.json()['delivered_to'] == 1
+
+
+def test_a_master_trade_id_of_a_t1_signal_is_not_a_hold(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    s = a.Session()
+    s.add(a.fm.Signal(signal_id='sig-t1', action='BUY', symbol='ADA/USDT', entry_price=0.5, stop_loss=0.49,
+                      take_profit=0.52, leverage=2, risk_pct=0.01, master_trade_id=MTID))
+    s.commit()
+    s.close()
+    assert _post_hold(a, _hold_payload()).status_code == 422
+
+
+def test_the_legacy_latest_signal_endpoint_never_returns_a_hold(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    for key in ('nk_hold_user_1', 'nk_hold_user_4'):
+        r = a.client.get('/api/latest-signal', headers={'X-API-Key': key})
+        assert r.status_code == 200 and r.json().get('signal') is None, r.text
+
+
+def test_the_legacy_endpoint_still_returns_a_t1_signal_next_to_a_hold(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    s = a.Session()
+    fm = a.fm
+    t1 = fm.Signal(signal_id='sig-ada', action='BUY', symbol='ADA/USDT', entry_price=0.5, stop_loss=0.49,
+                   take_profit=0.52, leverage=2, risk_pct=0.01)
+    s.add(t1)
+    s.flush()
+    uid = s.query(fm.User).filter_by(api_key='nk_hold_user_1').one().id
+    s.add(fm.SignalDelivery(signal_id=t1.id, user_id=uid))
+    s.commit()
+    s.close()
+    r = a.client.get('/api/latest-signal', headers={'X-API-Key': 'nk_hold_user_1'})
+    assert r.json()['signal']['signal_id'] == 'sig-ada'
+
+
+def test_a_leader_exit_close_is_accepted_and_acknowledges_unexecuted_hold_deliveries(monkeypatch, tmp_path):
+    from tests.test_master_close import _post_close, _close_payload
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    r = _post_close(a, _close_payload(MTID, symbol='ADA/USDT', reason='leader_exit'))
+    assert r.status_code == 200 and r.json()['duplicate'] is False
+    assert _count(a, 'SELECT COUNT(*) FROM master_closes WHERE reason = :r', r='leader_exit') == 1
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries WHERE acknowledged = :f', f=False) == 0
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries WHERE acknowledged = :t', t=True) == 4
+
+
+def test_a_bnb_symbol_close_is_accepted(monkeypatch, tmp_path):
+    from tests.test_master_close import _post_close, _close_payload
+    a = _api(monkeypatch, tmp_path)
+    r = _post_close(a, _close_payload(MTID, symbol='BNB/USDT', reason='leader_exit'))
+    assert r.status_code == 200
+
+
+def test_hold_migrations_are_additive_and_idempotent():
+    import ast
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
+        tree = ast.parse(f.read())
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == '_HOLD_MIGRATIONS' for t in n.targets))
+    stmts = [' '.join(ast.literal_eval(n).split()) for n in node.value.elts]
+    joined = ' | '.join(stmts)
+    for needle in ("signals ADD COLUMN IF NOT EXISTS strategy VARCHAR(8) DEFAULT 't1'",
+                   'open_positions ADD COLUMN IF NOT EXISTS kind VARCHAR(8) DEFAULT \'t1\'',
+                   'open_positions ALTER COLUMN target_tp DROP NOT NULL',
+                   'signals ALTER COLUMN take_profit DROP NOT NULL',
+                   'follower_users ADD COLUMN IF NOT EXISTS hold_enabled BOOLEAN DEFAULT TRUE',
+                   'signal_deliveries ADD COLUMN IF NOT EXISTS offer_ms BIGINT',
+                   'CREATE TABLE IF NOT EXISTS hold_offers', 'CREATE TABLE IF NOT EXISTS hold_sitouts'):
+        assert needle in joined, needle
+    for s in stmts:
+        assert s.startswith(('ALTER TABLE ', 'CREATE TABLE IF NOT EXISTS ')), s
+        if s.startswith('ALTER TABLE ') and 'ADD COLUMN' in s:
+            assert 'IF NOT EXISTS' in s, s
+        assert 'DROP TABLE' not in s and 'DROP COLUMN' not in s and 'DELETE' not in s
