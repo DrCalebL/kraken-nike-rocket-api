@@ -892,3 +892,105 @@ def test_a_failing_sweep_never_blocks_the_close_jobs(monkeypatch, fast_sleep, no
 
 def test_hold_flags_docstring_says_a_blank_allowlist_is_nobody():
     assert 'NOBODY' in htl.hold_flags.__doc__ and 'every active follower' not in htl.hold_flags.__doc__
+
+
+# ---------------- main.py hold migrations at startup (executed against a fake psycopg2) ----------------
+
+def _run_hold_migration_block(monkeypatch, fail, connect_error=None):
+    import os
+    import sys
+    import textwrap
+    import threading
+    import types
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
+        src = f.read()
+    a = src.index('    # T1LIVE7 HOLD MIGRATIONS:START')
+    b = src.index('    # T1LIVE7 HOLD MIGRATIONS:END')
+    block = textwrap.dedent(src[a:b])
+    executed = []
+
+    class Cur:
+        def execute(self, stmt, *args):
+            executed.append(stmt)
+            if fail(stmt, executed.count(stmt)):
+                raise RuntimeError('lock timeout')
+
+        def close(self):
+            pass
+
+    class Conn:
+        autocommit = False
+
+        def cursor(self):
+            return Cur()
+
+        def close(self):
+            pass
+
+    def connect(url):
+        if connect_error:
+            raise connect_error
+        return Conn()
+
+    monkeypatch.setitem(sys.modules, 'psycopg2', types.SimpleNamespace(connect=connect))
+    monkeypatch.setattr('time.sleep', lambda s: None)
+    threads = []
+
+    class FakeThread:
+        def __init__(self, target=None, **kw):
+            threads.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(threading, 'Thread', FakeThread)
+    monkeypatch.setenv('HOLD_ENABLED', '1')
+    ns = {'DATABASE_URL': 'postgres://fake', 'os': os}
+    exec(compile(block, 'main_hold_block', 'exec'), ns)
+    return executed, threads
+
+
+def test_hold_migrations_apply_cleanly(monkeypatch):
+    executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: False)
+    assert any('hold_offers' in s for s in executed) and threads == []
+    import os
+    assert os.environ['HOLD_ENABLED'] == '1'
+
+
+def test_a_transient_lock_timeout_is_retried_and_succeeds(monkeypatch):
+    executed, threads = _run_hold_migration_block(
+        monkeypatch, lambda s, n: 'ADD COLUMN IF NOT EXISTS strategy' in s and n < 3)
+    assert sum('ADD COLUMN IF NOT EXISTS strategy' in s for s in executed) == 3 and threads == []
+
+
+@pytest.mark.parametrize('col', ['signals ADD COLUMN IF NOT EXISTS strategy',
+                                 'open_positions ADD COLUMN IF NOT EXISTS kind',
+                                 'follower_users ADD COLUMN IF NOT EXISTS hold_enabled'])
+def test_a_failing_essential_column_aborts_startup(monkeypatch, col):
+    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: col in s)
+
+
+def test_a_connection_failure_aborts_startup(monkeypatch):
+    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_error=OSError('refused'))
+
+
+def test_a_non_essential_failure_degrades_to_hold_off_with_a_background_alert(monkeypatch):
+    import os
+    executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: s.startswith('DO $$'))
+    assert os.environ['HOLD_ENABLED'] == '0'
+    assert len(threads) == 1 and callable(threads[0])                  # the alert runs on a thread, not at import
+    assert sum(s.startswith('DO $$') for s in executed) == 3             # retried before degrading
+
+
+def test_no_asyncio_run_runs_at_import_time_in_the_hold_block():
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
+        src = f.read()
+    a = src.index('    # T1LIVE7 HOLD MIGRATIONS:START')
+    block = src[a:src.index('    # T1LIVE7 HOLD MIGRATIONS:END')]
+    assert block.count('asyncio.run') == 1 and block.index('def _hold_alert') < block.index('asyncio.run')
+    assert 'ADA path DOES' in block or 'the ADA path itself reads' in block

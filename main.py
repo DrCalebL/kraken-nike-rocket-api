@@ -332,51 +332,76 @@ if DATABASE_URL:
         " user_id INTEGER NOT NULL, master_trade_id VARCHAR(32) NOT NULL, reason VARCHAR(32) NOT NULL,"
         " created_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, master_trade_id))",
     )
+    # Columns the ADA path itself reads (signals.strategy in the delivery queries, open_positions.kind in the monitor and
+    # guardian SELECTs, follower_users.hold_enabled in the pending query). If one of these cannot be added the code
+    # that is about to start would fail on every ADA cycle: ABORT startup (Railway then keeps the old container).
+    _HOLD_ESSENTIAL = ("signals ADD COLUMN IF NOT EXISTS strategy", "open_positions ADD COLUMN IF NOT EXISTS kind",
+                       "follower_users ADD COLUMN IF NOT EXISTS hold_enabled")
+    _HOLD_DEGRADED = []      # non-essential failures: HOLD_ENABLED is forced to 0 and an alarm is raised
     try:
         import psycopg2
+        import time as _hold_time
         _hold_conn = psycopg2.connect(DATABASE_URL)
         _hold_conn.autocommit = True
         _hold_cur = _hold_conn.cursor()
         _hold_cur.execute("SET lock_timeout = '5s'")      # never queue behind (or block) the live trading tables
-        _hold_failed = []
+        _hold_essential_failed = []
         for _hold_stmt in _HOLD_MIGRATIONS:
-            try:
-                _hold_cur.execute(_hold_stmt)
-            except Exception as e:
-                _hold_failed.append(f"{_hold_stmt[:70]}: {e}")
-                print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {e}")
+            _hold_err = None
+            for _hold_try in range(3):                    # a lock timeout is transient: retry with a short backoff
+                try:
+                    _hold_cur.execute(_hold_stmt)
+                    _hold_err = None
+                    break
+                except Exception as e:
+                    _hold_err = e
+                    _hold_time.sleep(1 + _hold_try)
+            if _hold_err is not None:
+                print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {_hold_err}")
+                if any(k in _hold_stmt for k in _HOLD_ESSENTIAL):
+                    _hold_essential_failed.append(f"{_hold_stmt[:70]}: {_hold_err}")
+                else:
+                    _HOLD_DEGRADED.append(f"{_hold_stmt[:70]}: {_hold_err}")
         _hold_cur.close()
         _hold_conn.close()
-        if _hold_failed:
-            # FAIL CLOSED and LOUD: the hold code reads these columns, so the hold stays off until a redeploy
-            # completes the schema; the ADA path does not depend on them being present.
-            os.environ['HOLD_ENABLED'] = '0'
-            print(f"🚨 HOLD_MIGRATION_INCOMPLETE: {len(_hold_failed)} statement(s) failed - HOLD_ENABLED forced to 0")
+    except Exception as e:
+        raise RuntimeError(f"HOLD_MIGRATION_ESSENTIAL_FAILED: hold schema could not be applied ({e})") from e
+    if _hold_essential_failed:
+        print(f"🚨 HOLD_MIGRATION_ESSENTIAL_FAILED: {_hold_essential_failed}")
+        raise RuntimeError("HOLD_MIGRATION_ESSENTIAL_FAILED: " + '; '.join(_hold_essential_failed))
+    if _HOLD_DEGRADED:
+        # FAIL CLOSED and LOUD: hold stays off until a redeploy completes the schema; the ADA path is unaffected.
+        os.environ['HOLD_ENABLED'] = '0'
+        print(f"🚨 HOLD_MIGRATION_INCOMPLETE: {len(_HOLD_DEGRADED)} statement(s) failed - HOLD_ENABLED forced to 0")
+
+        def _hold_alert(failed=tuple(_HOLD_DEGRADED)):
+            # a background thread (no event loop is running at import time): error_logs row + admin e-mail
             try:
-                _alarm_conn = psycopg2.connect(DATABASE_URL)
-                _alarm_conn.autocommit = True
-                _alarm_cur = _alarm_conn.cursor()
-                _alarm_cur.execute(
+                import psycopg2 as _pg
+                _c = _pg.connect(DATABASE_URL)
+                _c.autocommit = True
+                _cur = _c.cursor()
+                _cur.execute(
                     "INSERT INTO error_logs (api_key, error_type, error_message, context) VALUES (%s, %s, %s, %s)",
-                    ('system', 'HOLD_MIGRATION_INCOMPLETE', '; '.join(_hold_failed)[:500], None))
-                _alarm_cur.close()
-                _alarm_conn.close()
+                    ('system', 'HOLD_MIGRATION_INCOMPLETE', '; '.join(failed)[:500], None))
+                _cur.close()
+                _c.close()
             except Exception as e:
                 print(f"⚠️ Could not write the HOLD_MIGRATION_INCOMPLETE error_logs row: {e}")
             try:
                 import asyncio as _hold_asyncio
                 from order_utils import notify_admin as _hold_notify
                 _hold_asyncio.run(_hold_notify(title="HOLD_MIGRATION_INCOMPLETE (Kraken follower)",
-                                               details={"Failed": '; '.join(_hold_failed)[:800],
+                                               details={"Failed": '; '.join(failed)[:800],
                                                         "Action": "HOLD_ENABLED forced to 0 until a redeploy"},
                                                level="error"))
             except Exception as e:
                 print(f"⚠️ Could not notify admin about HOLD_MIGRATION_INCOMPLETE: {e}")
-        else:
-            print("✅ Hold schema up to date")
-    except Exception as e:
-        os.environ['HOLD_ENABLED'] = '0'
-        print(f"🚨 HOLD_MIGRATION_INCOMPLETE (connection): {e} - HOLD_ENABLED forced to 0")
+
+        import threading as _hold_threading
+        _hold_threading.Thread(target=_hold_alert, name='hold-migration-alert', daemon=True).start()
+    else:
+        print("✅ Hold schema up to date")
     # T1LIVE7 HOLD MIGRATIONS:END
     # T1-CLOSE MIGRATIONS:END
     print("✅ Database initialized")
