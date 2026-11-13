@@ -279,17 +279,25 @@ SQL_OTHER_KIND_ROWS = """
     FROM open_positions
     WHERE user_id = $1 AND status = 'open' AND COALESCE(kind, 't1') <> $2
 """
-SQL_INSERT_HOLD_ROW = """
-    INSERT INTO open_positions
-    (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id, symbol, kraken_symbol, side, quantity, leverage,
-     entry_fill_price, target_tp, target_sl, opened_at, status, kind)
-    VALUES ($1, $2, $3, NULL, $4, $5, $6, 'BUY', $7, $8, $9, NULL, $10, $11, 'open', 'hold')
+SQL_PROMOTE_HOLD_ROW = """
+    UPDATE open_positions SET status = 'open', entry_order_id = $2, sl_order_id = $3, quantity = $4,
+           entry_fill_price = $5, target_sl = $6, leverage = $7
+    WHERE id = $1 AND status = 'needs_recovery'
+"""
+SQL_HOLD_ROW_ENTRY = """
+    UPDATE open_positions SET entry_order_id = $2, quantity = $3, entry_fill_price = $4
+    WHERE id = $1 AND status = 'needs_recovery'
+"""
+SQL_HOLD_ROW_CLOSE = """
+    UPDATE open_positions SET status = 'closed_manual', last_fill_at = NOW()
+    WHERE id = $1 AND status = 'needs_recovery'
 """
 SQL_INSERT_HOLD_RECOVERY = """
     INSERT INTO open_positions
     (user_id, signal_id, entry_order_id, tp_order_id, sl_order_id, symbol, kraken_symbol, side, quantity, leverage,
      entry_fill_price, target_tp, target_sl, opened_at, status, kind)
     VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, NULL, $11, NOW(), 'needs_recovery', 'hold')
+    RETURNING id
 """
 
 
@@ -1508,8 +1516,15 @@ class HostedTradingLoop:
         finally:
             follower_guard.clear(user['id'], tok)
 
-    async def _hold_refuse(self, user, hold, code, detail=''):
+    async def _hold_refuse(self, user, hold, code, detail='', ack=True):
+        """A refusal. ack=True (default) = definitive: the delivery is acknowledged so it is not retried (and alarmed)
+        every 10 s for 15 min; ack=False = an unreadable state: it stays open for the next cycle."""
         self.logger.warning(f"   ⏭️ {user['api_key'][:15]}...: hold refused - {code} {detail}")
+        if ack and hold.get('delivery_id'):
+            try:
+                await self.acknowledge_signal(hold['delivery_id'])
+            except Exception as e:
+                self.logger.error(f"   ⚠️ could not acknowledge the refused hold delivery: {e}")
         await log_error_to_db(self.db_pool, user['api_key'], code, f"{code} {detail}"[:200],
                               {"master_trade_id": hold.get('master_trade_id'), "function": "execute_hold_entry"})
         return False
@@ -1533,7 +1548,7 @@ class HostedTradingLoop:
                 sat_out = await conn.fetchval(SQL_HOLD_SITOUT, user['id'], mtid)
                 same_leader = await conn.fetchval(SQL_HOLD_SAME_LEADER, user['id'], hold.get('signal_db_id'))
         except Exception as e:
-            await self._hold_refuse(user, hold, 'HOLD_SKIPPED_READ_ERROR', str(e)[:100])
+            await self._hold_refuse(user, hold, 'HOLD_SKIPPED_READ_ERROR', str(e)[:100], ack=False)
             return False
         refusal = None
         if closed:
@@ -1545,21 +1560,16 @@ class HostedTradingLoop:
         elif not hold_guard.offer_is_fresh(hold.get('offer_ms'), now_ms):
             refusal = 'HOLD_OFFER_STALE'
         if refusal:
-            if delivery_id:
-                await self.acknowledge_signal(delivery_id)
             return await self._hold_refuse(user, hold, refusal)
 
-        # Early acknowledgment (as the ADA path): a hold entry is never re-sent after it was attempted
-        if delivery_id:
-            if not await self.acknowledge_signal(delivery_id):
-                self.logger.warning(f"   ⏭️ {user_short}: hold delivery already acknowledged (executed or closed) - not entering")
-                return False
-            self.logger.info(f"   🔒 {user_short}: Hold delivery acknowledged (preventing re-execution)")
-
+        # ---- every read-only check FIRST (audit 5): a refusal here costs nothing and an unreadable state keeps the
+        # delivery open for the next cycle (inside its 15 min window); a DEFINITIVE refusal acknowledges it.
         stage = 'pre_entry'
         exchange = None
         entry_order = sl_order = None
         bracket_qty = quantity = None
+        pre_row_id = None
+        lev = hold_guard.HOLD_LEVERAGE
         signal_db_id = hold.get('signal_db_id')
         signal = {'symbol': api_symbol, 'action': 'BUY', 'entry_price': hold.get('ref_entry'),
                   'stop_loss': hold.get('stop_loss'), 'take_profit': None}
@@ -1580,6 +1590,8 @@ class HostedTradingLoop:
                 exchange, user_short, user_id=user['id'], signal_id=hold.get('signal_id'), strategy='hold')
             if has_open:
                 self.logger.warning(f"   ⏭️ {user_short}: SKIPPING HOLD - {reason}")
+                if delivery_id and not any(k in str(reason) for k in ('failed', 'error')):
+                    await self.acknowledge_signal(delivery_id)          # a real block: do not retry every cycle
                 return False
 
             equity = await self.get_user_equity(exchange)
@@ -1590,10 +1602,11 @@ class HostedTradingLoop:
                 free = _free_margin(balance)
                 ticker = await asyncio.to_thread(exchange.fetch_ticker, kraken_symbol)
             except Exception as e:
-                return await self._hold_refuse(user, hold, 'HOLD_READ_ERROR', f"{type(e).__name__}: {str(e)[:100]}")
+                return await self._hold_refuse(user, hold, 'HOLD_READ_ERROR', f"{type(e).__name__}: {str(e)[:100]}",
+                                               ack=False)
             mark = _mark_price(ticker)
             if mark is None:
-                return await self._hold_refuse(user, hold, 'HOLD_MARK_UNKNOWN')
+                return await self._hold_refuse(user, hold, 'HOLD_MARK_UNKNOWN', ack=False)
             size = hold_guard.size_hold(equity, mark, hold.get('ref_entry'), hold.get('stop_loss'), hold.get('r_b'),
                                         hold.get('n2'), lot, free)
             if not size.ok:
@@ -1605,20 +1618,46 @@ class HostedTradingLoop:
             if quantity <= 0:
                 return await self._hold_refuse(user, hold, hold_guard.HOLD_SIZE_ZERO)
             stop_loss = float(hold['stop_loss'])
+            lev = size.leverage
             self.logger.info(f"   💰 Equity: ${equity:,.2f}  hold {quantity} @ mark {mark} stop {stop_loss} "
-                             f"({hold_guard.HOLD_LEVERAGE}x{', shrunk to margin' if size.shrunk else ''})")
+                             f"({lev}x{', shrunk to margin' if size.shrunk else ''})")
 
-            # Leverage is fixed at 10x and NEVER raised: if it cannot be set, no entry (the account's preference
-            # for this symbol could be higher)
+            # Leverage is chosen from the stop distance (liquidation must sit beyond the stop), at most 10x, and
+            # NEVER raised: if it cannot be set, no entry (the account's preference could be higher)
             try:
-                await asyncio.to_thread(exchange.set_leverage, hold_guard.HOLD_LEVERAGE, kraken_symbol)
+                await asyncio.to_thread(exchange.set_leverage, lev, kraken_symbol)
             except Exception as e:
                 return await self._hold_refuse(user, hold, 'HOLD_LEVERAGE_SET_FAILED', str(e)[:100])
+
+            # ---- the atomic acknowledge, IMMEDIATELY before the entry (a hold entry is never re-sent after it was
+            # attempted; False = someone else already acknowledged it, e.g. broadcast-close)
+            if delivery_id:
+                if not await self.acknowledge_signal(delivery_id):
+                    self.logger.warning(f"   ⏭️ {user_short}: hold delivery already acknowledged (executed or closed) "
+                                        f"- not entering")
+                    return False
+                self.logger.info(f"   🔒 {user_short}: Hold delivery acknowledged (preventing re-execution)")
+
+            # ---- the recovery row BEFORE the entry order (audit 4): a restart between the entry and the SL / row
+            # leaves a needs_recovery hold row the guardian's recovery lane acts on (a naked position is closed at
+            # market, a never-filled entry ends closed_manual). It also blocks a double entry and a re-offer.
+            try:
+                pre_row_id = await self._hold_exec_fetchval(
+                    SQL_INSERT_HOLD_RECOVERY, user['id'], signal_db_id, 'pending-hold-entry', None, api_symbol,
+                    kraken_symbol, 'BUY', quantity, float(lev), mark, stop_loss)
+            except Exception as e:
+                await log_error_to_db(self.db_pool, user_api_key, "HOLD_PRE_ROW_FAILED", str(e)[:200],
+                                      {"master_trade_id": mtid})
+                await notify_admin(title="HOLD_PRE_ROW_FAILED (Kraken follower)",
+                                   details={"User": user_email, "Error": str(e)[:300],
+                                            "Action": "no entry was sent"}, level="error")
+                return False
 
             entry_order = await place_entry_order_with_retry(
                 exchange=exchange, symbol=kraken_symbol, side='buy', quantity=quantity, user_email=user_email,
                 user_api_key=user_api_key, confirm_position_fn=lambda: self._position_is_open(exchange, kraken_symbol))
             if not entry_order:
+                await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)       # nothing was entered
                 await notify_entry_failed(user_email=user_email, user_api_key=user_api_key, symbol=kraken_symbol,
                                           side='buy', quantity=quantity, error="All retry attempts exhausted (hold)")
                 await log_error_to_db(self.db_pool, user_api_key, "ENTRY_ORDER_FAILED",
@@ -1636,6 +1675,9 @@ class HostedTradingLoop:
                 bracket_qty = quantity
                 self.logger.critical("   🚨 Hold entry fill not confirmed within timeout - proceeding; SL failure "
                                      "triggers the emergency close")
+            entry_fill_price = fill_price if (confirmed and fill_price) else mark
+            await self._hold_exec_quiet(SQL_HOLD_ROW_ENTRY, pre_row_id, str(entry_order['id']), bracket_qty,
+                                        entry_fill_price)
 
             sl_price = float(exchange.price_to_precision(kraken_symbol, stop_loss))
             sl_order = await place_sl_order_with_retry(
@@ -1647,52 +1689,54 @@ class HostedTradingLoop:
                 closed = await self._emergency_close_position(
                     exchange, kraken_symbol, 'sell', bracket_qty, user_email, user_api_key, entry_order['id'],
                     reason="Hold SL order failed after all retries", user_id=user['id'], signal_db_id=signal_db_id,
-                    signal_symbol=api_symbol, side='BUY', leverage=hold_guard.HOLD_LEVERAGE,
-                    entry_fill_price=fill_price or mark, target_tp=None, target_sl=stop_loss, outcome=outcome,
-                    kind='hold')
-                if closed and not (outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol)):
-                    await self._record_unprotected_position(
-                        user_id=user['id'], user_api_key=user_api_key, signal_db_id=signal_db_id,
-                        entry_order_id=entry_order['id'], signal_symbol=api_symbol, kraken_symbol=kraken_symbol,
-                        side='BUY', quantity=bracket_qty, leverage=hold_guard.HOLD_LEVERAGE,
-                        entry_fill_price=fill_price or mark, target_tp=None, target_sl=stop_loss,
-                        reason='SL_FAILED_CLOSE_UNVERIFIED', kind='hold')
+                    signal_symbol=api_symbol, side='BUY', leverage=lev, entry_fill_price=entry_fill_price,
+                    target_tp=None, target_sl=stop_loss, outcome=outcome, kind='hold', skip_record=True)
+                if closed and outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol):
+                    await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)
+                # else: the row stays needs_recovery and the guardian's recovery lane finishes the job
                 stage = 'done'
                 return False
             self.logger.info(f"   ✅ Hold SL @ ${sl_price}: {sl_order['id']}")
 
-            entry_fill_price = fill_price if (confirmed and fill_price) else mark
             opened_at = datetime.utcnow()
-            recorded = False
             try:
-                async with self.db_pool.acquire() as conn:
-                    await conn.execute(SQL_INSERT_HOLD_ROW, user['id'], signal_db_id, entry_order['id'],
-                                       sl_order['id'], api_symbol, kraken_symbol, bracket_qty,
-                                       float(hold_guard.HOLD_LEVERAGE), entry_fill_price, sl_price, opened_at)
-                recorded = True
+                await self._hold_exec(SQL_PROMOTE_HOLD_ROW, pre_row_id, str(entry_order['id']), str(sl_order['id']),
+                                      bracket_qty, entry_fill_price, sl_price, float(lev))
             except Exception as e:
-                self.logger.error(f"   ⚠️ Failed to record hold (trade still placed): {e}")
+                # The position is open WITH its SL but the row cannot be promoted: close it at market, then cancel the
+                # stop (audit M1). The row stays needs_recovery (guardian recovery) if the close cannot be verified.
+                self.logger.error(f"   ⚠️ Failed to promote the hold row (trade placed): {e}")
                 await log_error_to_db(self.db_pool, user_api_key, "POSITION_RECORD_FAILED", str(e)[:200],
                                       {"symbol": kraken_symbol, "entry_order_id": str(entry_order['id']),
                                        "sl_order_id": str(sl_order['id']), "kind": "hold"})
                 await notify_admin(title="POSITION_RECORD_FAILED (Kraken follower hold)",
                                    details={"User": user_email, "Symbol": kraken_symbol,
                                             "Entry Order": str(entry_order['id']), "SL Order": str(sl_order['id']),
-                                            "Error": str(e)[:300],
-                                            "Impact": "Hold keeps its SL but has no open_positions row"},
+                                            "Error": str(e)[:300], "Action": "closing the hold at market"},
                                    level="error")
-            if recorded:
-                await self._late_close_check(user, signal_db_id, user_api_key)
-                try:
-                    async with self.db_pool.acquire() as conn:
-                        await conn.execute("""
-                            UPDATE follower_users SET
-                                billing_cycle_start = $2
-                            WHERE id = $1 AND billing_cycle_start IS NULL
-                        """, user['id'], opened_at)
-                except Exception as e:
-                    await log_error_to_db(self.db_pool, user_api_key, "BILLING_CYCLE_START_FAILED", str(e)[:200],
-                                          {"function": "execute_hold_entry", "user_id": user['id']})
+                outcome = {}
+                closed = await self._emergency_close_position(
+                    exchange, kraken_symbol, 'sell', bracket_qty, user_email, user_api_key, entry_order['id'],
+                    reason="Hold row could not be recorded", user_id=user['id'], signal_db_id=signal_db_id,
+                    signal_symbol=api_symbol, side='BUY', leverage=lev, entry_fill_price=entry_fill_price,
+                    target_tp=None, target_sl=stop_loss, sl_order_id=str(sl_order['id']), outcome=outcome,
+                    kind='hold', skip_record=True)
+                if closed and outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol):
+                    await self._cancel_order_verified(exchange, str(sl_order['id']), kraken_symbol)
+                    await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)
+                stage = 'done'
+                return False
+            await self._late_close_check(user, signal_db_id, user_api_key)
+            try:
+                async with self.db_pool.acquire() as conn:
+                    await conn.execute("""
+                        UPDATE follower_users SET
+                            billing_cycle_start = $2
+                        WHERE id = $1 AND billing_cycle_start IS NULL
+                    """, user['id'], opened_at)
+            except Exception as e:
+                await log_error_to_db(self.db_pool, user_api_key, "BILLING_CYCLE_START_FAILED", str(e)[:200],
+                                      {"function": "execute_hold_entry", "user_id": user['id']})
             stage = 'done'
             self.logger.info(f"   🎉 {user_short}: Hold entered")
             return True
@@ -1703,12 +1747,44 @@ class HostedTradingLoop:
                                    "function": "execute_hold_entry"})
             if stage == 'entry_sent':
                 await self._post_entry_exception(e, exchange, user, signal, kraken_symbol, entry_order,
-                                                 bracket_qty or quantity, hold_guard.HOLD_LEVERAGE, signal_db_id,
-                                                 sl_order, None, kind='hold')
+                                                 bracket_qty or quantity, lev, signal_db_id,
+                                                 sl_order, None, kind='hold', pre_row_id=pre_row_id)
             return False
 
+    async def _hold_exec(self, sql, *args, tries=3):
+        """One write with a short retry (the hold row bookkeeping must not be lost to a DB blip). Raises after the last."""
+        last = None
+        for attempt in range(tries):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    return await conn.execute(sql, *args)
+            except Exception as e:
+                last = e
+                if attempt < tries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        raise last
+
+    async def _hold_exec_fetchval(self, sql, *args, tries=3):
+        last = None
+        for attempt in range(tries):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    return await conn.fetchval(sql, *args)
+            except Exception as e:
+                last = e
+                if attempt < tries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        raise last
+
+    async def _hold_exec_quiet(self, sql, *args):
+        """A best-effort row write: failure is logged, never raised (the recovery row already protects the position)."""
+        try:
+            await self._hold_exec(sql, *args)
+        except Exception as e:
+            self.logger.error(f"   ⚠️ hold row bookkeeping failed: {e}")
+
     async def _post_entry_exception(self, exc, exchange, user, signal, kraken_symbol, entry_order, quantity,
-                                    leverage, signal_db_id, sl_order=None, tp_order=None, kind='t1'):
+                                    leverage, signal_db_id, sl_order=None, tp_order=None, kind='t1', pre_row_id=None):
         """
         R3-H1: an exception after the entry was sent. Position open or unknown ->
         needs_recovery row carrying the signal levels, qty and every known leg id.
@@ -1736,13 +1812,22 @@ class HostedTradingLoop:
             )
             if not await self._verified_flat(exchange, kraken_symbol):
                 self.logger.critical(f"   🚨 Post-entry exception with the position open or unknown - recording needs_recovery")
+                if pre_row_id:                       # the hold's recovery row already carries it (no duplicate row)
+                    await self._hold_exec_quiet(SQL_HOLD_ROW_ENTRY, pre_row_id,
+                                                str(entry_order['id']) if entry_order else 'unknown', quantity,
+                                                float(signal['entry_price']))
+                    return
                 await self._record_unprotected_position(**record, reason=reason, sl_order_id=sl_oid, tp_order_id=tp_oid)
                 return
             leftover_sl = sl_oid if (sl_oid and not await self._cancel_order_verified(exchange, sl_oid, kraken_symbol)) else None
             leftover_tp = tp_oid if (tp_oid and not await self._cancel_order_verified(exchange, tp_oid, kraken_symbol)) else None
             if leftover_sl or leftover_tp:
+                if pre_row_id:
+                    return                           # stays needs_recovery; the guardian cancels / closes
                 await self._record_unprotected_position(**record, reason='POST_ENTRY_EXCEPTION_LEFTOVER',
                                                         sl_order_id=leftover_sl, tp_order_id=leftover_tp)
+            elif pre_row_id:
+                await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)       # flat and clean
         except Exception as e:
             self.logger.critical(f"   ❌ Post-entry exception handling failed: {e}")
             await notify_admin(
@@ -1892,6 +1977,7 @@ class HostedTradingLoop:
         tp_order_id: str = None,
         outcome: Optional[Dict] = None,
         kind: str = 't1',
+        skip_record: bool = False,
     ):
         """
         Emergency market close when TP/SL placement fails.
@@ -1952,7 +2038,10 @@ class HostedTradingLoop:
                     self.logger.critical(f"   ⏳ Retrying in {backoff:.0f}s...")
                     await asyncio.sleep(backoff)
 
-        if not close_success:
+        if not close_success and skip_record:
+            self.logger.critical(f"   ❌❌❌ ALL {EMERGENCY_MAX_RETRIES} EMERGENCY CLOSE ATTEMPTS FAILED ❌❌❌ "
+                                 f"(the caller's needs_recovery row already carries the position)")
+        if not close_success and not skip_record:
             self.logger.critical(f"   ❌❌❌ ALL {EMERGENCY_MAX_RETRIES} EMERGENCY CLOSE ATTEMPTS FAILED ❌❌❌")
             self.logger.critical(f"   🚨 Recording unprotected position for guardian recovery")
 

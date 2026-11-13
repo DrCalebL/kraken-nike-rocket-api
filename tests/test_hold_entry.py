@@ -328,7 +328,7 @@ def test_sl_failure_closes_the_hold_immediately(monkeypatch, fast_sleep, notify_
     e = _env(monkeypatch)
     e.ex.fault('create_order', ccxt.ExchangeError('rejected'), times=50, when=_is_sl)
     run(_enter(e))
-    assert e.ex.positions == {} and _hold_rows(e) == []
+    assert e.ex.positions == {} and [r['status'] for r in _hold_rows(e)] == ['closed_manual']
     closes = [i for _m, i in _orders(e.ex) if i.get('params', {}).get('reduceOnly') and i['type'] == 'market']
     assert len(closes) == 1 and closes[0]['side'] == 'sell'
 
@@ -815,7 +815,7 @@ def test_a_delivery_acknowledged_by_the_close_is_never_entered_hold_or_ada(monke
     ada = _ada_item(e)
     e.db.acked_deliveries.add(ada['delivery_id'])
     assert run(e.loop.execute_trade(e.user, ada)) is False
-    assert e.ex.calls() == [] and e.db.rows == []
+    assert _entries(e.ex) == [] and e.ex.calls('create_order') == [] and e.db.rows == []
 
 
 def test_the_acknowledge_is_one_atomic_update_that_returns_the_id(monkeypatch):
@@ -1204,3 +1204,173 @@ def test_a_different_leader_trade_is_not_blocked_by_the_same_leader_check(monkey
                  signal_id=99, target_tp=None)
     run(_enter(e, mtid=MTID_B, delivery_id=8102, leader='L-2'))
     assert len(_entries(e.ex)) == 1 and 'HOLD_DUPLICATE_LEADER_TRADE' not in e.db.error_types()
+
+
+# ======================================================================================================
+# audit: per-hold leverage, reads before the ack, the recovery row before the entry, crash safety
+# ======================================================================================================
+
+def test_the_leverage_follows_the_stop_distance_and_is_stored_on_the_row(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e, stop=528.0, r_b=0.05))                                   # 12% stop -> 6x
+    assert [i['leverage'] for _m, i in e.ex.calls('set_leverage')] == [6]
+    row, = _hold_rows(e)
+    assert row['leverage'] == 6.0 and row['status'] == 'open'
+
+
+def test_a_stop_so_wide_that_even_1x_is_liquidated_first_is_refused(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e, stop=90.0, r_b=0.05))
+    assert _entries(e.ex) == [] and e.ex.calls('set_leverage') == []
+    assert 'HOLD_STOP_TOO_WIDE' in e.db.error_types() and _hold_rows(e) == []
+
+
+def test_every_read_only_check_runs_before_the_ack_and_the_ack_right_before_the_entry(monkeypatch, fast_sleep,
+                                                                                    notify_log):
+    e = _env(monkeypatch)
+    item = e.hold.add_delivery(e.user)
+    seq = []
+    real_ack = e.loop.acknowledge_signal
+
+    async def ack(d):
+        seq.append('ack')
+        return await real_ack(d)
+
+    monkeypatch.setattr(e.loop, 'acknowledge_signal', ack)
+    run(e.loop._execute_hold_for_user(item))
+    names = [m for m, _i in e.ex.calls()]
+    for read in ('fetch_positions', 'fetch_open_orders', 'fetch_balance', 'fetch_ticker', 'set_leverage'):
+        assert names.index(read) < names.index('create_market_order')
+    assert seq == ['ack']
+    # the ack sits between the last read (set_leverage) and the entry: nothing is sent to the venue before it
+    sqls = [s for _m, s, _a in e.pool.calls]
+    i_ack = next(i for i, s in enumerate(sqls) if 'UPDATE signal_deliveries' in s)
+    assert 'INSERT INTO open_positions' in ' '.join(sqls[i_ack + 1:i_ack + 3])
+
+
+def test_a_definitive_refusal_acknowledges_but_an_unreadable_state_keeps_the_delivery(monkeypatch, fast_sleep,
+                                                                                    notify_log):
+    e = _env(monkeypatch)
+    e.ex.free_margin = 0.5
+    run(_enter(e))
+    assert 'HOLD_MARGIN_SKIP' in e.db.error_types() and len(e.pool.sql('UPDATE signal_deliveries')) == 1
+    e2 = _env(monkeypatch)
+    e2.ex.fault('fetch_ticker', ccxt.NetworkError('down'))
+    run(_enter(e2))
+    assert 'HOLD_READ_ERROR' in e2.db.error_types() and e2.pool.sql('UPDATE signal_deliveries') == []
+
+
+def test_a_real_block_acknowledges_and_a_failed_slot_read_does_not(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.open_position(BNB, 'long', 1.0, 590.0)                              # a manual position: a real block
+    run(_enter(e))
+    assert len(e.pool.sql('UPDATE signal_deliveries')) == 1
+    e2 = _env(monkeypatch)
+    e2.pool.fail_on(htl.SQL_OTHER_KIND_ROWS, RuntimeError('db down'))
+    run(_enter(e2))
+    assert _entries(e2.ex) == [] and e2.pool.sql('UPDATE signal_deliveries') == []
+
+
+def test_the_recovery_row_exists_before_the_entry_order_and_is_promoted_after_the_sl(monkeypatch, fast_sleep,
+                                                                                    notify_log):
+    e = _env(monkeypatch)
+    seen = []
+    real = htl.place_entry_order_with_retry
+
+    async def spy(**kw):
+        seen.append([(r['status'], r.get('kind'), r['target_tp'], r['target_sl']) for r in e.db.rows])
+        return await real(**kw)
+
+    monkeypatch.setattr(htl, 'place_entry_order_with_retry', spy)
+    run(_enter(e))
+    assert seen == [[('needs_recovery', 'hold', None, 570.0)]]
+    row, = _hold_rows(e)
+    assert row['status'] == 'open' and row['sl_order_id'] in e.ex.orders and row['entry_order_id'] != 'pending-hold-entry'
+    assert row['quantity'] == 6.66
+
+
+def test_an_entry_that_never_happened_closes_its_recovery_row(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+
+    async def none(**kw):
+        return None
+
+    monkeypatch.setattr(htl, 'place_entry_order_with_retry', none)
+    run(_enter(e))
+    assert [r['status'] for r in _hold_rows(e)] == ['closed_manual'] and e.ex.positions == {}
+
+
+def test_a_failed_pre_row_means_no_entry(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.pool.fail_on(htl.SQL_INSERT_HOLD_RECOVERY, RuntimeError('db down'))
+    run(_enter(e))
+    assert _entries(e.ex) == [] and 'HOLD_PRE_ROW_FAILED' in e.db.error_types()
+
+
+class Crash(BaseException):
+    """The process dying: not caught by any `except Exception`."""
+
+
+def test_a_crash_after_the_entry_leaves_a_recovery_row_the_guardian_closes(monkeypatch, fast_sleep, notify_log):
+    import position_guardian as pg
+    from tests.fakes import FakeClock, SleepRecorder
+    e = _env(monkeypatch)
+    monkeypatch.setenv('GUARDIAN_MODE', 'enforce')
+
+    async def die(**kw):
+        raise Crash()
+
+    monkeypatch.setattr(htl, 'place_sl_order_with_retry', die)
+    item = e.hold.add_delivery(e.user)
+    with pytest.raises(Crash):
+        run(e.loop._execute_hold_for_user(item))
+    assert e.ex.positions[BNB]['contracts'] == 6.66 and e.ex.orders == {}          # naked, and the process "died"
+    row, = _hold_rows(e)
+    assert row['status'] == 'needs_recovery' and row['target_tp'] is None and row['target_sl'] == 570.0
+    # the restarted guardian (enforce) closes the naked position through its recovery lane
+    clock = FakeClock()
+    g = pg.PositionGuardian(e.pool, clock=clock.time, sleep=SleepRecorder(clock))
+    g.active_exchanges[e.user['api_key']] = e.ex
+
+    async def go():
+        await g.invariant_pass(full=True, dry=False)
+
+    run(go())
+    assert e.ex.positions == {}
+    assert e.db.row(row['id'])['status'] == 'closed'
+    # a re-offer of the same trade finds the row (any status) and never enters again
+    run(_enter(e, delivery_id=8300))
+    assert len(_entries(e.ex)) == 1
+
+
+def test_a_crash_before_the_entry_fills_leaves_a_row_that_ends_closed_manual(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+
+    async def die(**kw):
+        raise Crash()
+
+    monkeypatch.setattr(htl, 'place_entry_order_with_retry', die)
+    with pytest.raises(Crash):
+        run(e.loop._execute_hold_for_user(e.hold.add_delivery(e.user)))
+    row, = _hold_rows(e)
+    assert row['status'] == 'needs_recovery' and e.ex.positions == {}
+    run(_enter(e, delivery_id=8301))
+    assert _entries(e.ex) == []                                                # the row blocks a double entry
+
+
+def test_a_promotion_blip_is_retried_and_the_row_still_opens(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.hold.fail_promote = 2
+    run(_enter(e))
+    row, = _hold_rows(e)
+    assert row['status'] == 'open' and e.ex.positions[BNB]['contracts'] == 6.66
+
+
+def test_a_row_that_cannot_be_promoted_closes_the_position_and_cancels_the_stop(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.hold.fail_promote = 10
+    run(_enter(e))
+    assert e.ex.positions == {} and e.ex.orders == {}                          # closed at market, SL cancelled
+    row, = _hold_rows(e)
+    assert row['status'] == 'closed_manual' and 'POSITION_RECORD_FAILED' in e.db.error_types()
+    assert any('POSITION_RECORD_FAILED' in n['title'] for n in notify_log)

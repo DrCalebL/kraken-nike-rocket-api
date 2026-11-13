@@ -322,7 +322,8 @@ def test_every_target_tp_reader_is_null_safe():
 def test_every_ada_insert_still_writes_a_tp_and_only_the_hold_inserts_write_null():
     loop = _src('hosted_trading_loop.py')
     assert 'target_tp, target_sl, opened_at, status)\n                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)' in loop
-    assert "VALUES ($1, $2, $3, NULL, $4, $5, $6, 'BUY', $7, $8, $9, NULL, $10, $11, 'open', 'hold')" in loop
+    assert "VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, $9, $10, NULL, $11, NOW(), 'needs_recovery', 'hold')" in loop
+    assert "SET status = 'open', entry_order_id = $2, sl_order_id = $3" in loop      # the promotion keeps target_tp NULL
 
 
 # ---------------- review H1: one empty read never touches a live hold ----------------

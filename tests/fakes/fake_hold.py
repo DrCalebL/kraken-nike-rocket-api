@@ -19,7 +19,10 @@ class HoldDB:
         self.leader_of_signal = {}      # signals.id -> hold_leader_trade_id
         p = self.pool
         p.on(htl.SQL_OTHER_KIND_ROWS, self._other_kind_rows)
-        p.on(htl.SQL_INSERT_HOLD_ROW, self._insert_hold)
+        p.on(htl.SQL_PROMOTE_HOLD_ROW, self._promote)
+        p.on(htl.SQL_HOLD_ROW_ENTRY, self._row_entry)
+        p.on(htl.SQL_HOLD_ROW_CLOSE, self._row_close)
+        self.fail_promote = 0           # the next N promotions raise (a DB blip)
         p.on(htl.SQL_INSERT_HOLD_RECOVERY, self._insert_hold_recovery)
         p.on(htl.SQL_HOLD_CLOSED, lambda m, s, a: 1 if a[0] in self.closed else None)
         p.on(htl.SQL_HOLD_SITOUT, lambda m, s, a: 1 if (a[0], a[1]) in self.sitouts else None)
@@ -41,15 +44,6 @@ class HoldDB:
         return [dict(r, kind=r.get('kind') or 't1') for r in self.db.rows
                 if r['user_id'] == user_id and r['status'] == 'open' and (r.get('kind') or 't1') != strategy]
 
-    def _insert_hold(self, method, sql, args):
-        (user_id, signal_id, entry_order_id, sl_order_id, symbol, kraken_symbol, qty, lev, fill, sl, opened) = args
-        self.db.rows.append({
-            'id': next(self.db._ids), 'user_id': user_id, 'signal_id': signal_id, 'entry_order_id': entry_order_id,
-            'tp_order_id': None, 'sl_order_id': sl_order_id, 'symbol': symbol, 'kraken_symbol': kraken_symbol,
-            'side': 'BUY', 'quantity': qty, 'leverage': lev, 'entry_fill_price': fill, 'target_tp': None,
-            'target_sl': sl, 'opened_at': opened, 'status': 'open', 'kind': 'hold', 'last_fill_at': None})
-        return 'INSERT 0 1'
-
     def _insert_hold_recovery(self, method, sql, args):
         (user_id, signal_id, entry_order_id, sl_order_id, symbol, kraken_symbol, side, qty, lev, fill, sl) = args
         self.db.rows.append({
@@ -58,7 +52,37 @@ class HoldDB:
             'side': side, 'quantity': qty, 'leverage': lev, 'entry_fill_price': fill, 'target_tp': None,
             'target_sl': sl, 'opened_at': self.db.now(), 'status': 'needs_recovery', 'kind': 'hold',
             'last_fill_at': None})
-        return 'INSERT 0 1'
+        return self.db.rows[-1]['id'] if method == 'fetchval' else 'INSERT 0 1'
+
+    def _guard_row(self, row_id):
+        return next((r for r in self.db.rows if r['id'] == row_id and r['status'] == 'needs_recovery'), None)
+
+    def _promote(self, method, sql, args):
+        if self.fail_promote > 0:
+            self.fail_promote -= 1
+            raise RuntimeError('db blip')
+        row_id, entry_id, sl_id, qty, fill, sl, lev = args
+        r = self._guard_row(row_id)
+        if r is None:
+            return 'UPDATE 0'
+        r.update(status='open', entry_order_id=entry_id, sl_order_id=sl_id, quantity=qty, entry_fill_price=fill,
+                 target_sl=sl, leverage=lev)
+        return 'UPDATE 1'
+
+    def _row_entry(self, method, sql, args):
+        row_id, entry_id, qty, fill = args
+        r = self._guard_row(row_id)
+        if r is None:
+            return 'UPDATE 0'
+        r.update(entry_order_id=entry_id, quantity=qty, entry_fill_price=fill)
+        return 'UPDATE 1'
+
+    def _row_close(self, method, sql, args):
+        r = self._guard_row(args[0])
+        if r is None:
+            return 'UPDATE 0'
+        r.update(status='closed_manual', last_fill_at=self.db.now())
+        return 'UPDATE 1'
 
     def _sitout_insert(self, method, sql, args):
         user_id, signal_id, reason = args
