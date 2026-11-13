@@ -354,3 +354,44 @@ def test_a_confirmed_flat_hold_still_closes_after_the_second_read(monkeypatch, f
     e.ex.set_price(BNB, 569.0)
     run(e.mon.check_position(_position(e, row)))
     assert e.recorded == [(row['id'], 'SL')]
+
+
+async def test_enforce_closes_at_market_when_the_price_is_already_through_the_hold_stop(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    ex.prices[BNB] = 560.0                                           # already beyond the 570 stop
+    await env.g.invariant_pass(full=True, dry=False)
+    assert ex.positions == {}
+    (m, info), = env.order_calls(ex)
+    assert info['type'] == 'market' and info['side'] == 'sell' and info['params']['reduceOnly'] is True
+    assert info['amount'] == 6.66 and ex.orders == {}                # no stop was placed above the market
+    assert 'GUARDIAN_HOLD_SL_CLOSED_BEYOND_STOP' in env.db.error_types()
+
+
+async def test_enforce_places_the_stop_when_the_price_is_still_above_it(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    ex.prices[BNB] = 571.0
+    await env.g.invariant_pass(full=True, dry=False)
+    assert ex.positions[BNB]['contracts'] == 6.66 and len(ex.orders) == 1
+
+
+@pytest.mark.parametrize('mode', ['legacy', 'shadow'])
+async def test_legacy_and_shadow_never_close_a_hold_that_is_through_its_stop(monkeypatch, notify_log, mode):
+    env = guardian_env(monkeypatch, mode=mode)
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    ex.prices[BNB] = 560.0
+    await _every_mode_pass(env, mode)
+    assert env.order_calls(ex) == [] and ex.positions[BNB]['contracts'] == 6.66
+
+
+async def test_a_hold_closed_beyond_its_stop_is_then_labelled_sl_by_the_monitor(monkeypatch, notify_log, fast_sleep):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    ex.prices[BNB] = 560.0
+    await env.g.invariant_pass(full=True, dry=False)
+    assert pm.hold_exit_type(dict(env.db.row(row['id'])), 560.0) == 'SL'

@@ -1025,7 +1025,8 @@ class PositionGuardian:
         TP_LEVEL_UNKNOWN / ROW_LEVELS_INVALID, in legacy, shadow and enforce alike (bracket_guard.decide is not run).
         A live position without a reduce-only stop is a critical HOLD_SL_MISSING alarm; in ENFORCE (dry=False) the
         guardian also re-places that stop, reduce-only, at the row's target_sl for the live quantity (a naked 10x long
-        is the worse risk). A failed placement is an alarm, never a close."""
+        is the worse risk). When the market is already at/through target_sl it sends the reduce-only market close the stop
+        would have sent instead. A failed placement is an alarm."""
         has_sl = any(leg.kind in bg.SL_KINDS and leg.reduce_only and leg.side == 'sell' for leg in legs)
         if pos is None or has_sl:
             return True
@@ -1049,6 +1050,16 @@ class PositionGuardian:
                 return True
         except Exception as e:
             await self._read_failed(user, sym, 'hold_sl_reread', e)
+            return True
+        px = await self._ticker_last(exchange, sym)
+        if px is not None and px <= level:
+            # the market is already at/through the stop: a sell stop above the market is not a stop. Do what the
+            # stop would have done, a reduce-only market close of the live qty; position_monitor then labels the
+            # exit SL (price at/below target_sl), records the trade and writes the sit-out.
+            order_id = await self._attempt_market_close(exchange, sym, 'sell', pos.qty)
+            await self._alarm(user, sym, 'HOLD_SL_CLOSED_BEYOND_STOP' if order_id and order_id != ALREADY_FLAT
+                              else 'HOLD_SL_REPLACE_FAILED', 'critical',
+                              {'row': row['id'], 'level': level, 'px': px, 'order': order_id})
             return True
         oid = await self._place_leg(exchange, sym, 'SL', pos, level)
         if oid is None:
