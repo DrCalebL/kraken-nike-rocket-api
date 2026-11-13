@@ -286,7 +286,8 @@ def test_close_path_writes_only_exit_hint_close_fill_qty_and_close_jobs(monkeypa
     run(e.loop.process_close_jobs())
     run(e.loop.process_close_jobs())
     allowed = (' '.join(htl.SQL_CLOSE_JOB_SET.split()), ' '.join(htl.SQL_SET_EXIT_HINT.split()),
-               ' '.join(htl.SQL_ADD_CLOSE_FILL.split()))
+               ' '.join(htl.SQL_ADD_CLOSE_FILL.split()),
+               ' '.join(htl.SQL_LATE_CLOSE_SWEEP.split()))      # T1LIVE-7: inserts close_jobs rows only
     muts = e.pool.mutations()
     assert muts and all(sql in allowed for _m, sql, _a in muts), [sql for _m, sql, _a in muts]
 

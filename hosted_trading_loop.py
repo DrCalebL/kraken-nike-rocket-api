@@ -254,6 +254,17 @@ SQL_LATE_CLOSE_JOB = """
     WHERE op.user_id = $1 AND op.signal_id = $2 AND op.status IN ('open', 'needs_recovery')
     ON CONFLICT (position_id) DO NOTHING
 """
+# Once per process_close_jobs cycle: any open/needs_recovery row of a trade the master already closed that has no job
+# yet (an entry that raced the CLOSE and whose own late check failed or never ran) gets one. Idempotent.
+SQL_LATE_CLOSE_SWEEP = """
+    INSERT INTO close_jobs (position_id, user_id, master_trade_id, status, attempts, created_at, updated_at)
+    SELECT op.id, op.user_id, mc.master_trade_id, 'pending', 0, NOW(), NOW()
+    FROM open_positions op
+    JOIN signals s ON op.signal_id = s.id
+    JOIN master_closes mc ON mc.master_trade_id = s.master_trade_id
+    WHERE op.status IN ('open', 'needs_recovery')
+    ON CONFLICT (position_id) DO NOTHING
+"""
 SQL_HOLD_CLOSED = "SELECT 1 FROM master_closes WHERE master_trade_id = $1"
 SQL_HOLD_SITOUT = "SELECT 1 FROM hold_sitouts WHERE user_id = $1 AND master_trade_id = $2"
 SQL_OTHER_KIND_ROWS = """
@@ -276,7 +287,8 @@ SQL_INSERT_HOLD_RECOVERY = """
 
 
 def hold_flags() -> Dict:
-    """HOLD_ENABLED (default OFF) and the optional HOLD_USER_ALLOWLIST (blank = every active follower)."""
+    """HOLD_ENABLED (default OFF) and whether HOLD_USER_ALLOWLIST is set. A blank/unset allowlist means NOBODY is
+    allowed ('*' = everyone), so HOLD_ENABLED alone enters no one."""
     return {'HOLD_ENABLED': _env_flag('HOLD_ENABLED', False),
             'HOLD_USER_ALLOWLIST': bool((os.getenv('HOLD_USER_ALLOWLIST') or '').strip())}
 
@@ -2104,6 +2116,15 @@ class HostedTradingLoop:
         and their jobs, so setting it back to 1 runs the backlog; jobs past 24 h then expire). Returns the job count."""
         if not close_flags()['CLOSE_JOBS_ENABLED']:
             return 0
+        try:                                   # T1LIVE-7: the late-entry sweep (never blocks the jobs below)
+            async with self.db_pool.acquire() as conn:
+                res = await conn.execute(SQL_LATE_CLOSE_SWEEP)
+            n = str(res).split()[-1]
+            if n.isdigit() and int(n) > 0:
+                await log_error_to_db(self.db_pool, 'system', "LATE_ENTRY_AFTER_CLOSE",
+                                      f"{n} position(s) of already-closed trades got a close job", {"count": int(n)})
+        except Exception as e:
+            self.logger.error(f"   ⚠️ late-close sweep failed: {close_guard.redact_text(str(e))[:150]}")
         async with self.db_pool.acquire() as conn:
             jobs = [dict(r) for r in await conn.fetch(SQL_CLOSE_JOBS_DUE)]
         if not jobs:

@@ -858,3 +858,37 @@ def test_the_exit_type_widen_is_guarded_and_the_hold_migration_fails_loud_and_cl
     assert "SET lock_timeout = '5s'" in src
     assert 'HOLD_MIGRATION_INCOMPLETE' in src and "os.environ['HOLD_ENABLED'] = '0'" in src
     assert 'notify_admin as _hold_notify' in src and 'INSERT INTO error_logs' in src
+
+
+def test_every_close_cycle_sweeps_rows_of_already_closed_trades_into_jobs(monkeypatch, fast_sleep, notify_log, tmp_path):
+    monkeypatch.setattr(htl, 'CLOSE_EVENTS', htl.make_close_event_log(str(tmp_path / 'c.jsonl')))
+    e = _env(monkeypatch)
+    run(_enter(e))
+    row, = _hold_rows(e)
+    e.hold.closed.add(MTID)                                          # the CLOSE raced the entry and the late check missed
+
+    def sweep(method, sql, args):
+        e.cdb.add_job(row, master_trade_id=MTID, side='BUY')
+        return 'INSERT 0 1'
+
+    e.pool.on(htl.SQL_LATE_CLOSE_SWEEP, sweep)
+    run(e.loop.process_close_jobs())
+    assert e.cdb.job(row['id'])['status'] == 'done' and e.ex.positions == {}
+    assert 'LATE_ENTRY_AFTER_CLOSE' in e.db.error_types()
+    assert 'ON CONFLICT (position_id) DO NOTHING' in htl.SQL_LATE_CLOSE_SWEEP
+    assert "op.status IN ('open', 'needs_recovery')" in htl.SQL_LATE_CLOSE_SWEEP
+
+
+def test_a_failing_sweep_never_blocks_the_close_jobs(monkeypatch, fast_sleep, notify_log, tmp_path):
+    monkeypatch.setattr(htl, 'CLOSE_EVENTS', htl.make_close_event_log(str(tmp_path / 'c.jsonl')))
+    e = _env(monkeypatch)
+    run(_enter(e))
+    row, = _hold_rows(e)
+    e.cdb.add_job(row, master_trade_id=MTID, side='BUY')
+    e.pool.fail_on(htl.SQL_LATE_CLOSE_SWEEP, RuntimeError('db'))
+    run(e.loop.process_close_jobs())
+    assert e.cdb.job(row['id'])['status'] == 'done'
+
+
+def test_hold_flags_docstring_says_a_blank_allowlist_is_nobody():
+    assert 'NOBODY' in htl.hold_flags.__doc__ and 'every active follower' not in htl.hold_flags.__doc__
