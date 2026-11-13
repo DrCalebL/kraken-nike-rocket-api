@@ -896,7 +896,7 @@ def test_hold_flags_docstring_says_a_blank_allowlist_is_nobody():
 
 # ---------------- main.py hold migrations at startup (executed against a fake psycopg2) ----------------
 
-def _run_hold_migration_block(monkeypatch, fail, connect_error=None):
+def _run_hold_migration_block(monkeypatch, fail, connect_error=None, migrated=False, connect_failures=0):
     import os
     import sys
     import textwrap
@@ -911,10 +911,18 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None):
     executed = []
 
     class Cur:
+        row = None
+
         def execute(self, stmt, *args):
             executed.append(stmt)
+            if stmt.startswith('SELECT'):                 # the information_schema pre-checks
+                self.row = (('YES',) if 'is_nullable' in stmt else (1,)) if migrated else None
+                return
             if fail(stmt, executed.count(stmt)):
                 raise RuntimeError('lock timeout')
+
+        def fetchone(self):
+            return self.row
 
         def close(self):
             pass
@@ -928,13 +936,17 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None):
         def close(self):
             pass
 
+    attempts = {'n': 0}
+
     def connect(url):
-        if connect_error:
-            raise connect_error
+        attempts['n'] += 1
+        if connect_error or attempts['n'] <= connect_failures:
+            raise connect_error or OSError('refused')
         return Conn()
 
     monkeypatch.setitem(sys.modules, 'psycopg2', types.SimpleNamespace(connect=connect))
-    monkeypatch.setattr('time.sleep', lambda s: None)
+    sleeps = []
+    monkeypatch.setattr('time.sleep', lambda s: sleeps.append(s))
     threads = []
 
     class FakeThread:
@@ -947,8 +959,15 @@ def _run_hold_migration_block(monkeypatch, fail, connect_error=None):
     monkeypatch.setattr(threading, 'Thread', FakeThread)
     monkeypatch.setenv('HOLD_ENABLED', '1')
     ns = {'DATABASE_URL': 'postgres://fake', 'os': os}
-    exec(compile(block, 'main_hold_block', 'exec'), ns)
+    try:
+        exec(compile(block, 'main_hold_block', 'exec'), ns)
+    finally:
+        _run_hold_migration_block.sleeps, _run_hold_migration_block.connects = sleeps, attempts['n']
     return executed, threads
+
+
+def _ddl(executed):
+    return [s for s in executed if s.startswith(('ALTER', 'CREATE', 'DO'))]
 
 
 def test_hold_migrations_apply_cleanly(monkeypatch):
@@ -994,3 +1013,77 @@ def test_no_asyncio_run_runs_at_import_time_in_the_hold_block():
     block = src[a:src.index('    # T1LIVE7 HOLD MIGRATIONS:END')]
     assert block.count('asyncio.run') == 1 and block.index('def _hold_alert') < block.index('asyncio.run')
     assert 'ADA path DOES' in block or 'the ADA path itself reads' in block
+
+
+def test_a_migrated_database_issues_no_ddl_at_all_so_a_redeploy_takes_no_table_lock(monkeypatch):
+    executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=True)
+    ddl = [s for s in _ddl(executed) if not s.startswith('DO $$')]
+    assert ddl == [], ddl                                        # zero ALTER / CREATE statements
+    assert threads == []
+
+
+def test_a_fresh_database_still_gets_every_statement(monkeypatch):
+    executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=False)
+    ddl = _ddl(executed)
+    assert sum(s.startswith('ALTER TABLE') for s in ddl) >= 10 and sum(s.startswith('CREATE TABLE') for s in ddl) == 2
+
+
+def test_only_the_missing_column_is_added(monkeypatch):
+    import re
+    executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, migrated=False)
+    # pre-check queries precede each statement and carry the table and column as parameters, never in the text
+    assert any('information_schema.columns' in s for s in executed)
+
+
+@pytest.mark.parametrize('col', ['signals ADD COLUMN IF NOT EXISTS hold_r_b', 'signals ADD COLUMN IF NOT EXISTS hold_n2',
+                                 'signals ADD COLUMN IF NOT EXISTS hold_leader_trade_id',
+                                 'signals ADD COLUMN IF NOT EXISTS hold_leader_entry_ms',
+                                 'signal_deliveries ADD COLUMN IF NOT EXISTS offer_ms'])
+def test_the_orm_mapped_hold_columns_are_essential(monkeypatch, col):
+    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: col in s)
+
+
+def test_the_connection_is_retried_seven_times_without_a_sleep_after_the_last(monkeypatch):
+    with pytest.raises(RuntimeError, match='HOLD_MIGRATION_ESSENTIAL_FAILED'):
+        _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_failures=99)
+    assert _run_hold_migration_block.connects == 7 and len(_run_hold_migration_block.sleeps) == 6
+    executed, _ = _run_hold_migration_block(monkeypatch, lambda s, n: False, connect_failures=3)
+    assert _run_hold_migration_block.connects == 4 and any('hold_offers' in s for s in executed)
+
+
+def test_a_statement_is_tried_three_times_with_two_sleeps_only(monkeypatch):
+    with pytest.raises(RuntimeError):
+        _run_hold_migration_block(monkeypatch, lambda s, n: 'ADD COLUMN IF NOT EXISTS strategy' in s)
+    assert _run_hold_migration_block.sleeps.count(1) >= 1 and _run_hold_migration_block.sleeps == [1, 2]
+
+
+def test_railway_has_a_healthcheck_above_the_worst_case_startup():
+    import json
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'railway.json'), encoding='utf-8') as f:
+        deploy = json.load(f)['deploy']
+    assert deploy['healthcheckPath'] == '/' and deploy['healthcheckTimeout'] >= 600
+
+
+# ---------------- master contract: n2 is a notional / equity multiple ----------------
+
+def test_the_masters_n2_above_one_is_accepted_and_sized():
+    ref, stop, atr = 600.264, 570.1, 3.0
+    n2 = 0.02 * ref / (2.5 * atr)
+    r_b = n2 * (ref - stop) / ref
+    assert round(n2, 4) == 1.6007 and round(r_b, 4) == 0.0804
+    now = 1_790_000_000_000
+    payload = {'master_trade_id': MTID, 'leader_trade_id': 'L-1', 'action': 'BUY', 'symbol': 'BNB/USDT',
+               'ref_entry': '600.264', 'stop_loss': '570.1', 'r_b': '0.0804', 'n2': '1.6007',
+               'leader_entry_ms': now - 3_600_000, 'offer_ms': now - 1000, 'offer_kind': 'entry', 'protocol': 'hold-1'}
+    assert hg.validate_hold_payload(payload, {'BNB/USDT': 'PF_BNBUSD'}, now) is None
+    s = hg.size_hold(10000, 600.264, '600.264', '570.1', '0.0804', '1.6007', 0.01, 10000)
+    assert s.ok and 26 < s.qty < 27 and s.margin_needed < 10000 * 0.95      # risk leg ~26.66, cap ~26.67
+    assert hg.validate_hold_payload(dict(payload, n2='10.01'), {'BNB/USDT': 'x'}, now).startswith('n2')
+
+
+def test_a_big_n2_is_still_bounded_by_the_ten_x_margin_fit():
+    s = hg.size_hold(10000, 600.0, 600.0, 570.0, 0.15, 10, 0.01, 1000)
+    assert s.ok and s.shrunk and s.margin_needed <= 1000 * 0.95 + 1e-9

@@ -3,6 +3,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "/opt/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port $PORT"
+    "startCommand": "/opt/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port $PORT",
+    "healthcheckPath": "/",
+    "healthcheckTimeout": 600
   }
 }

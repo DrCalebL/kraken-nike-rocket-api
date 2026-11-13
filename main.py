@@ -332,21 +332,67 @@ if DATABASE_URL:
         " user_id INTEGER NOT NULL, master_trade_id VARCHAR(32) NOT NULL, reason VARCHAR(32) NOT NULL,"
         " created_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, master_trade_id))",
     )
-    # Columns the ADA path itself reads (signals.strategy in the delivery queries, open_positions.kind in the monitor and
-    # guardian SELECTs, follower_users.hold_enabled in the pending query). If one of these cannot be added the code
-    # that is about to start would fail on every ADA cycle: ABORT startup (Railway then keeps the old container).
-    _HOLD_ESSENTIAL = ("signals ADD COLUMN IF NOT EXISTS strategy", "open_positions ADD COLUMN IF NOT EXISTS kind",
+    # Columns the ADA path itself reads or maps: signals.strategy / hold_* and signal_deliveries.offer_ms (ORM models used
+    # by the ADA endpoints), open_positions.kind (monitor and guardian SELECTs), follower_users.hold_enabled (pending
+    # query). If one of these cannot be added the code that is about to start would fail on every ADA cycle: ABORT the
+    # import (railway.json has a healthcheck, so Railway then keeps the old container).
+    _HOLD_ESSENTIAL = ("signals ADD COLUMN IF NOT EXISTS strategy", "signals ADD COLUMN IF NOT EXISTS hold_r_b",
+                       "signals ADD COLUMN IF NOT EXISTS hold_n2", "signals ADD COLUMN IF NOT EXISTS hold_leader_trade_id",
+                       "signals ADD COLUMN IF NOT EXISTS hold_leader_entry_ms",
+                       "signal_deliveries ADD COLUMN IF NOT EXISTS offer_ms",
+                       "open_positions ADD COLUMN IF NOT EXISTS kind",
                        "follower_users ADD COLUMN IF NOT EXISTS hold_enabled")
     _HOLD_DEGRADED = []      # non-essential failures: HOLD_ENABLED is forced to 0 and an alarm is raised
+    import re as _hold_re
+    import time as _hold_time
+
+    def _hold_already_applied(cur, stmt):
+        """True when the statement is a no-op on this database. A redeploy on a migrated DB must take NO table lock
+        (ADD COLUMN IF NOT EXISTS and DROP NOT NULL still request ACCESS EXCLUSIVE), so look in information_schema
+        first. Any doubt (no match, a failed check) returns False: the statement then runs as before."""
+        try:
+            m = _hold_re.match(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+)", stmt)
+            if m:
+                cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
+                return cur.fetchone() is not None
+            m = _hold_re.match(r"ALTER TABLE (\w+) ALTER COLUMN (\w+) DROP NOT NULL", stmt)
+            if m:
+                cur.execute("SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() "
+                            "AND table_name = %s AND column_name = %s", (m.group(1), m.group(2)))
+                row = cur.fetchone()
+                return row is not None and str(row[0]).upper() == 'YES'
+            m = _hold_re.match(r"CREATE TABLE IF NOT EXISTS (\w+)", stmt)
+            if m:
+                cur.execute("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() "
+                            "AND table_name = %s", (m.group(1),))
+                return cur.fetchone() is not None
+        except Exception:
+            return False
+        return False                      # the DO $$ statement guards itself (it only ALTERs when the column is short)
+
+    _hold_conn = None
+    _hold_connect_err = None
+    for _hold_attempt in range(1, 8):                 # like init_db: 7 tries with a capped exponential backoff
+        try:
+            import psycopg2
+            _hold_conn = psycopg2.connect(DATABASE_URL)
+            break
+        except Exception as e:
+            _hold_connect_err = e
+            if _hold_attempt < 7:                     # never sleep after the last attempt
+                _hold_time.sleep(min(2 ** _hold_attempt, 30))
+    if _hold_conn is None:
+        raise RuntimeError(f"HOLD_MIGRATION_ESSENTIAL_FAILED: hold schema could not be applied "
+                           f"(no database connection: {_hold_connect_err})") from _hold_connect_err
+    _hold_essential_failed = []
     try:
-        import psycopg2
-        import time as _hold_time
-        _hold_conn = psycopg2.connect(DATABASE_URL)
         _hold_conn.autocommit = True
         _hold_cur = _hold_conn.cursor()
         _hold_cur.execute("SET lock_timeout = '5s'")      # never queue behind (or block) the live trading tables
-        _hold_essential_failed = []
         for _hold_stmt in _HOLD_MIGRATIONS:
+            if _hold_already_applied(_hold_cur, _hold_stmt):
+                continue
             _hold_err = None
             for _hold_try in range(3):                    # a lock timeout is transient: retry with a short backoff
                 try:
@@ -355,7 +401,8 @@ if DATABASE_URL:
                     break
                 except Exception as e:
                     _hold_err = e
-                    _hold_time.sleep(1 + _hold_try)
+                    if _hold_try < 2:                     # never sleep after the last attempt
+                        _hold_time.sleep(1 + _hold_try)
             if _hold_err is not None:
                 print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {_hold_err}")
                 if any(k in _hold_stmt for k in _HOLD_ESSENTIAL):
