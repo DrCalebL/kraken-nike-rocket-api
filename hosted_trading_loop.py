@@ -302,9 +302,13 @@ SQL_INSERT_HOLD_RECOVERY = """
 
 
 def hold_flags() -> Dict:
-    """HOLD_ENABLED (default OFF) and whether HOLD_USER_ALLOWLIST is set. A blank/unset allowlist means NOBODY is
+    """HOLD_ENABLED (default OFF) is EFFECTIVE only when GUARDIAN_MODE=enforce (a hold's missing stop is re-placed by
+    the enforce guardian only; HOLD_REQUESTED shows the raw switch), and whether HOLD_USER_ALLOWLIST is set. A blank/unset allowlist means NOBODY is
     allowed ('*' = everyone), so HOLD_ENABLED alone enters no one."""
-    return {'HOLD_ENABLED': _env_flag('HOLD_ENABLED', False),
+    requested = _env_flag('HOLD_ENABLED', False)
+    enforce = follower_guard.guardian_mode(GUARDIAN_MODES) == 'enforce'
+    return {'HOLD_ENABLED': requested and enforce,        # EFFECTIVE: the hold SL repair exists only in enforce
+            'HOLD_REQUESTED': requested, 'GUARDIAN_ENFORCE': enforce,
             'HOLD_USER_ALLOWLIST': bool((os.getenv('HOLD_USER_ALLOWLIST') or '').strip())}
 
 
@@ -441,6 +445,7 @@ class HostedTradingLoop:
         self.logger = logging.getLogger('HOSTED_TRADING')
         self.hold_available = None   # None = unchecked; True/False after check_hold_market
         self._hold_checked = 0.0
+        self._hold_enforce_alarmed = 0.0
     
     async def get_active_users(self) -> List[Dict]:
         """Get all users with active agents and valid credentials"""
@@ -512,6 +517,24 @@ class HostedTradingLoop:
             
             return [dict(row) for row in rows]
     
+    async def _hold_enforce_check(self):
+        """HOLD_ENABLED=1 without GUARDIAN_MODE=enforce: the hold stays OFF and this raises HOLD_NEEDS_GUARDIAN_ENFORCE
+        (error_logs + admin mail, at most once an hour). Startup and every cycle."""
+        flags = hold_flags()
+        if not flags['HOLD_REQUESTED'] or flags['GUARDIAN_ENFORCE']:
+            return
+        now = _monotonic()
+        if self._hold_enforce_alarmed and now - self._hold_enforce_alarmed < 3600:
+            return
+        self._hold_enforce_alarmed = now
+        self.logger.critical("🚨 HOLD_ENABLED=1 but GUARDIAN_MODE is not 'enforce': the BNB hold is DISABLED")
+        await log_error_to_db(self.db_pool, 'system', 'HOLD_NEEDS_GUARDIAN_ENFORCE',
+                              "HOLD_ENABLED=1 needs GUARDIAN_MODE=enforce; hold disabled",
+                              {"guardian_mode": follower_guard.guardian_mode(GUARDIAN_MODES)})
+        await notify_admin(title="HOLD_NEEDS_GUARDIAN_ENFORCE (Kraken follower)",
+                           details={"Action": "set GUARDIAN_MODE=enforce, or HOLD_ENABLED=0; hold disabled until then"},
+                           level="error")
+
     async def get_pending_holds_batched(self) -> List[Dict]:
         """Unacknowledged, fresh (< 15 min) hold deliveries. Empty unless HOLD_ENABLED is on AND PF_BNBUSD was found
         at startup. Allowlisted users only. A read error raises (the cycle's hold leg is skipped, never guessed)."""
@@ -2514,6 +2537,7 @@ class HostedTradingLoop:
         # blocks the ADA signals
         holds = []
         try:
+            await self._hold_enforce_check()
             if hold_flags()['HOLD_ENABLED']:
                 await self.check_hold_market()
                 holds = await self.get_pending_holds_batched()
@@ -2627,6 +2651,10 @@ class HostedTradingLoop:
         self.logger.info("=" * 60)
         close_events().emit('CLOSE_CONFIG', 'info', flags=close_flags())
         self.logger.info(f"🐗 BNB hold flags: {hold_flags()}")
+        try:
+            await self._hold_enforce_check()
+        except Exception as e:
+            self.logger.error(f"❌ Hold enforce check failed: {e}")
         if hold_flags()['HOLD_ENABLED']:
             try:
                 ok = await self.check_hold_market(force=True)

@@ -605,7 +605,9 @@ async def broadcast_close(
 
 def hold_service_enabled() -> bool:
     """HOLD_ENABLED (default OFF): the master relay may call /api/broadcast-hold before the owner switches it on."""
-    return (os.getenv('HOLD_ENABLED') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    on = (os.getenv('HOLD_ENABLED') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    import follower_guard
+    return on and follower_guard.guardian_mode(('legacy', 'shadow', 'enforce')) == 'enforce'   # the hold SL repair is enforce-only
 
 
 def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str, leader_trade_id: str = None):

@@ -33,8 +33,8 @@ class Env:
     pass
 
 
-def _env(monkeypatch, equity=10000.0, enabled=True, **user_fields):
-    monkeypatch.delenv('GUARDIAN_MODE', raising=False)
+def _env(monkeypatch, equity=10000.0, enabled=True, guardian='enforce', **user_fields):
+    monkeypatch.setenv('GUARDIAN_MODE', guardian)
     for k in ('HOLD_SIZE_SCALE', 'HOLD_MAX_RISK_PCT', 'HOLD_SL_MATCH_PCT'):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
@@ -233,7 +233,8 @@ def test_hold_disabled_by_default_never_trades_or_even_reads(monkeypatch, fast_s
     assert e.ex.calls() == [] and _hold_rows(e) == [] and e.pool.sql('UPDATE signal_deliveries') == []
     assert run(e.loop.get_pending_holds_batched()) == []
     monkeypatch.delenv('HOLD_USER_ALLOWLIST')
-    assert htl.hold_flags() == {'HOLD_ENABLED': False, 'HOLD_USER_ALLOWLIST': False}
+    assert htl.hold_flags() == {'HOLD_ENABLED': False, 'HOLD_REQUESTED': False, 'GUARDIAN_ENFORCE': True,
+                                'HOLD_USER_ALLOWLIST': False}
 
 
 def test_unavailable_market_disables_the_hold(monkeypatch, fast_sleep, notify_log):
@@ -542,6 +543,7 @@ def _api(monkeypatch, tmp_path):
     from tests.test_master_close import _api as base
     monkeypatch.setenv('HOLD_ENABLED', '1')
     monkeypatch.setenv('HOLD_USER_ALLOWLIST', '*')
+    monkeypatch.setenv('GUARDIAN_MODE', 'enforce')
     a = base(monkeypatch, tmp_path)
     fm = a.fm
     s = a.Session()
@@ -1374,3 +1376,50 @@ def test_a_row_that_cannot_be_promoted_closes_the_position_and_cancels_the_stop(
     row, = _hold_rows(e)
     assert row['status'] == 'closed_manual' and 'POSITION_RECORD_FAILED' in e.db.error_types()
     assert any('POSITION_RECORD_FAILED' in n['title'] for n in notify_log)
+
+
+# ---------------- audit 3: the hold is effective only with GUARDIAN_MODE=enforce ----------------
+
+@pytest.mark.parametrize('mode', ['shadow', 'legacy', 'bogus'])
+def test_hold_is_disabled_without_guardian_enforce_and_alarms_once(monkeypatch, fast_sleep, notify_log, mode):
+    e = _env(monkeypatch, guardian=mode)
+    assert htl.hold_flags()['HOLD_ENABLED'] is False and htl.hold_flags()['HOLD_REQUESTED'] is True
+    item = e.hold.add_delivery(e.user)
+    run(e.loop._hold_enforce_check())
+    run(e.loop._hold_enforce_check())                                     # hourly dedupe
+    assert e.db.error_types().count('HOLD_NEEDS_GUARDIAN_ENFORCE') == 1
+    assert len([n for n in notify_log if 'HOLD_NEEDS_GUARDIAN_ENFORCE' in n['title']]) == 1
+    assert run(e.loop.get_pending_holds_batched()) == []
+    run(e.loop.execute_hold_entry(e.user, {'delivery_id': item['delivery_id']}))
+    assert e.ex.calls() == []
+
+
+def test_the_default_guardian_mode_is_shadow_so_the_hold_is_off_by_default_even_when_requested(monkeypatch,
+                                                                                               fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    monkeypatch.delenv('GUARDIAN_MODE')
+    assert htl.hold_flags()['HOLD_ENABLED'] is False
+    run(e.loop.poll_and_execute())
+    assert 'HOLD_NEEDS_GUARDIAN_ENFORCE' in e.db.error_types() and e.ex.calls() == []
+
+
+def test_enforce_enables_the_hold_and_there_is_no_alarm(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    assert htl.hold_flags()['HOLD_ENABLED'] is True
+    run(e.loop._hold_enforce_check())
+    assert 'HOLD_NEEDS_GUARDIAN_ENFORCE' not in e.db.error_types()
+
+
+def test_the_endpoint_skips_offers_without_guardian_enforce(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    monkeypatch.setenv('GUARDIAN_MODE', 'shadow')
+    r = _post_hold(a, _hold_payload())
+    assert r.status_code == 200 and r.json()['skipped'] == 'HOLD_DISABLED'
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 0
+
+
+def test_ada_leverage_cap_follows_the_effective_hold_switch(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch, guardian='shadow')                              # hold effectively off: no 10x cap
+    sig = dict(_ada_item(e), **_ada_signal_for_leverage())
+    run(e.loop.execute_trade(dict(e.user, hold_enabled=True), sig))
+    assert e.ex.leverage == 16

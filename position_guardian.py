@@ -584,9 +584,13 @@ class PositionGuardian:
             # Check if there are protective orders for this symbol
             symbol_orders = [o for o in open_orders if o.get('symbol') == symbol]
 
-            # Also check: does the DB know about this position?
-            async with self.db_pool.acquire() as conn:
-                db_position = await conn.fetchval(SQL_TRACKED_OPEN_ROWS, user['id'])
+            # Also check: does the DB know about THIS position? Counted per (user, symbol) (audit 3): a tracked row on
+            # another symbol (e.g. a BNB hold, or an ADA bracket next to a naked rowless BNB position) proves nothing
+            # about this one. Same predicate as SQL_TRACKED_OPEN_ROWS: an 'open' row with both leg ids recorded.
+            db_position = sum(1 for r in user_rows
+                              if r['status'] == 'open' and r.get('tp_order_id') is not None
+                              and r.get('sl_order_id') is not None
+                              and self._unified(exchange, r.get('kraken_symbol') or r.get('symbol')) == symbol)
 
             if not follower_guard.legacy_rowless_should_close(symbol_orders, db_position):
                 # Position has some protection or is tracked — skip

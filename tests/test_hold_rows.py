@@ -477,3 +477,26 @@ def test_a_failed_label_read_defers(monkeypatch, fast_sleep, notify_log):
     e.pool.fail_on(pm.SQL_EXIT_LABEL, RuntimeError('db down'))
     run(e.mon.check_position(_position(e, row)))
     assert e.recorded == [] and e.db.row(row['id'])['status'] == 'open'
+
+
+# ---------------- audit 3: a tracked row on one symbol never hides a naked rowless position on another ----------------
+
+@pytest.mark.parametrize('mode', ['legacy', 'enforce'])
+async def test_a_tracked_ada_row_does_not_hide_a_naked_rowless_bnb_position(monkeypatch, notify_log, mode):
+    env = guardian_env(monkeypatch, mode=mode)
+    user, ex = env.user()
+    env.bracket(user, ex)                                              # a tracked ADA bracket (both leg ids)
+    ex.open_position(BNB, 'long', 6.66, 600.0, ts_ms=env.clock.ms() - 900_000)       # naked, rowless
+    await env.g._check_user_for_unprotected(user, rowless_only=(mode == 'enforce'))
+    closes = [i for _m, i in ex.calls('create_order') if i.get('params', {}).get('reduceOnly')]
+    assert [i['symbol'] for i in closes] == [BNB] and BNB not in ex.positions and ADA in ex.positions
+
+
+async def test_a_tracked_row_on_the_same_symbol_still_protects_its_position(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='legacy')
+    user, ex = env.user()
+    row, sl, tp = env.bracket(user, ex)
+    ex.external_cancel(sl)
+    ex.external_cancel(tp)                                             # legs gone, but the row is tracked for this symbol
+    await env.g._check_user_for_unprotected(user)
+    assert ex.calls('create_order') == [] and ADA in ex.positions
