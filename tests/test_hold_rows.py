@@ -14,6 +14,7 @@ import position_monitor as pm
 from hosted_trading_loop import HostedTradingLoop
 from position_monitor import PositionMonitor
 from tests.fakes import fast_sleep, guardian_env, new_user_id, notify_log  # noqa: F401  (pytest fixtures)
+from tests.fakes.fake_close import CloseDB
 from tests.fakes.fake_hold import HoldDB
 from tests.fakes.fake_krakenfutures import FakeKrakenFutures
 from tests.fakes.fake_pool import FakePool, FollowerDB
@@ -62,6 +63,7 @@ def _env(monkeypatch):
     e.pool = FakePool()
     e.db = FollowerDB(e.pool)
     e.hold = HoldDB(e.db)
+    e.cdb = CloseDB(e.db)
     e.user = e.db.add_user(new_user_id())
     e.ex = FakeKrakenFutures(name=e.user['api_key'])
     e.recorded = []
@@ -410,3 +412,68 @@ async def test_the_beyond_stop_decision_uses_a_fresh_ticker_not_the_pass_cache(m
     monkeypatch.setattr(env.g, '_ticker_last', stale)
     await env.g.invariant_pass(full=True, dry=False)
     assert ex.positions == {} and 'GUARDIAN_HOLD_SL_CLOSED_BEYOND_STOP' in env.db.error_types()
+
+
+# ---------------- audit 2: a stale position dict never mislabels a leader exit ----------------
+
+def _stale(e, row):
+    return dict(_position(e, row), exit_hint=None, close_fill_qty=None)       # what the cycle loaded minutes ago
+
+
+def test_a_leader_exit_written_after_the_cycle_loaded_the_row_is_still_labelled_leader(monkeypatch, fast_sleep,
+                                                                                     notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e)
+    stale = _stale(e, row)
+    e.db.row(row['id']).update(exit_hint='LEADER', close_fill_qty=6.66)         # execute_close ran in between
+    e.ex.create_order(BNB, 'market', 'sell', 6.66, None, {'reduceOnly': True})
+    run(e.mon.check_position(stale))
+    assert e.recorded == [(row['id'], 'LEADER')] and e.hold.sitouts == set()
+    assert e.db.row(row['id'])['status'] == 'open' and e.pool.sql("SET status = 'needs_review'") == []
+
+
+def test_the_same_race_on_an_ada_row_is_labelled_leader_and_time(monkeypatch, fast_sleep, notify_log):
+    for hint, want in (('LEADER', 'LEADER'), ('TIME', 'TIME')):
+        e = _env(monkeypatch)
+        ada, sl, tp = _ada_row(e)
+        stale = _stale(e, ada)
+        e.db.row(ada['id']).update(exit_hint=hint, close_fill_qty=100.0)
+        e.ex.external_cancel(tp)
+        e.ex.create_order(ADA, 'market', 'sell', 100, None, {'reduceOnly': True})
+        run(e.mon.check_position(stale))
+        assert e.recorded == [(ada['id'], want)]
+
+
+def test_while_the_master_close_is_still_running_the_label_is_deferred(monkeypatch, fast_sleep, notify_log):
+    import follower_guard
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e, exit_hint='LEADER', close_fill_qty=None)
+    e.ex.create_order(BNB, 'market', 'sell', 6.66, None, {'reduceOnly': True})     # filled; the fill is not recorded yet
+    tok = follower_guard.mark(e.user['id'])                                       # execute_close holds the user
+    try:
+        run(e.mon.check_position(_position(e, row)))
+    finally:
+        follower_guard.clear(e.user['id'], tok)
+    assert e.recorded == [] and e.db.row(row['id'])['status'] == 'open' and sl in e.ex.orders
+    assert e.pool.sql("SET status = 'needs_review'") == [] and e.hold.sitouts == set()
+
+
+def test_a_pending_close_job_also_defers_and_a_finished_one_does_not(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e, exit_hint='LEADER', close_fill_qty=None)
+    e.ex.create_order(BNB, 'market', 'sell', 6.66, None, {'reduceOnly': True})
+    e.cdb.add_job(row, master_trade_id='a' * 32, side='BUY', status='pending')
+    run(e.mon.check_position(_position(e, row)))
+    assert e.recorded == []
+    e.cdb.job(row['id']).update(status='failed')
+    run(e.mon.check_position(_position(e, row)))                                  # no fill ever: the SL / distance label
+    assert len(e.pool.sql("SET status = 'needs_review'")) == 1                   # undeferred: the unknown-exit review
+
+
+def test_a_failed_label_read_defers(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e)
+    e.ex.set_price(BNB, 569.0)
+    e.pool.fail_on(pm.SQL_EXIT_LABEL, RuntimeError('db down'))
+    run(e.mon.check_position(_position(e, row)))
+    assert e.recorded == [] and e.db.row(row['id'])['status'] == 'open'

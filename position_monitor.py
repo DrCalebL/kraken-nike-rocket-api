@@ -112,6 +112,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
 import ccxt
+import follower_guard
 from cryptography.fernet import Fernet
 
 from config import (
@@ -161,6 +162,12 @@ def _time_exit_hint(position: dict) -> bool:
 
 
 HOLD_FLAT_CONFIRM_GAP_S = 2.0
+SQL_EXIT_LABEL = """
+    SELECT op.exit_hint, op.close_fill_qty,
+           (SELECT 1 FROM close_jobs cj WHERE cj.position_id = op.id AND (cj.status = 'pending'
+              OR (cj.status = 'done' AND cj.updated_at > NOW() - INTERVAL '180 seconds')) LIMIT 1) AS job_busy
+    FROM open_positions op WHERE op.id = $1
+"""
 SQL_HOLD_SITOUT_INSERT = """
     INSERT INTO hold_sitouts (user_id, master_trade_id, reason)
     SELECT $1, s.master_trade_id, $3 FROM signals s WHERE s.id = $2 AND s.master_trade_id IS NOT NULL
@@ -1289,6 +1296,29 @@ class PositionMonitor:
             await log_error_to_db(self.db_pool, str(position.get('user_id', 'unknown')), "HOLD_SITOUT_FAILED",
                                   str(e)[:200], {"position_id": position.get('id')})
 
+    async def _fresh_exit_fields(self, position: dict):
+        """Re-read exit_hint / close_fill_qty (and whether a close job is busy) from the DB into `position`. Returns
+        'DEFER' when the master close that wrote the hint has not recorded its fill yet and is still in flight (this
+        process's in-flight token, or a pending / just-done close job); 'DEFER' also on a failed read (fail closed:
+        the next cycle looks again). A missing row leaves `position` as it was."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                row = await conn.fetchrow(SQL_EXIT_LABEL, position['id'])
+        except Exception as e:
+            self.logger.warning(f"⚠️ exit_hint read failed for position {position.get('id')}: {e}")
+            return 'DEFER'
+        if not row:
+            return None
+        position['exit_hint'], position['close_fill_qty'] = row['exit_hint'], row['close_fill_qty']
+        try:
+            filled = float(row['close_fill_qty'] or 0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        if row['exit_hint'] in ('TIME', 'LEADER') and filled <= 0 and (
+                follower_guard.is_inflight(position.get('user_id')) or row.get('job_busy')):
+            return 'DEFER'
+        return None
+
     async def _hold_flat_confirmed(self, exchange, kraken_symbol, side, qty, tp_oid, sl_oid, user_api_key) -> bool:
         """A second symbol-scoped read VERIFY_FLAT_GAP_S later must also say closed. Any error or a live position
         is 'not confirmed' (the row then stays open and the next monitor cycle looks again)."""
@@ -1363,6 +1393,15 @@ class PositionMonitor:
                     position.get('tp_order_id'), position.get('sl_order_id'), position['user_api_key']):
                 self.logger.warning(f"⚠️ {user_short}: hold {kraken_symbol} read flat once but is not confirmed - "
                                     f"row stays open, SL untouched")
+                return
+
+            # T1LIVE-7 (audit 2): the row this cycle started with may be minutes old. A leader-exit / time-exit close
+            # writes exit_hint and close_fill_qty AFTER we loaded it, so read both again now that the position is
+            # flat; while that close is still running (hint set, no fill yet, user in flight or its job busy) the
+            # label is not final: defer to the next cycle instead of mislabelling (hold -> needs_review).
+            fresh = await self._fresh_exit_fields(position)
+            if fresh == 'DEFER':
+                self.logger.info(f"⏳ {user_short}: a master close of {kraken_symbol} is still running - label deferred")
                 return
 
             # Position closed

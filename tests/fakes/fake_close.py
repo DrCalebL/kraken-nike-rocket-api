@@ -12,6 +12,7 @@ from datetime import timedelta
 import close_guard as cg
 import hosted_trading_loop as htl
 import position_guardian as pg
+import position_monitor as pm
 
 ACTIVE = ('open', 'needs_recovery')
 
@@ -29,6 +30,7 @@ class CloseDB:
         p.on(htl.SQL_SET_EXIT_HINT, self._exit_hint)
         p.on(htl.SQL_ADD_CLOSE_FILL, self._add_fill)
         p.on(pg.SQL_CLOSE_BUSY, self._busy)
+        p.on(pm.SQL_EXIT_LABEL, self._exit_label)
 
     # ---------- helpers for tests ----------
     def add_close(self, master_trade_id, side='BUY', symbol='ADA/USDT', matched=1):
@@ -98,6 +100,15 @@ class CloseDB:
             return 'UPDATE 0'
         r['close_fill_qty'] = float(r.get('close_fill_qty') or 0) + float(args[1])
         return 'UPDATE 1'
+
+    def _exit_label(self, method, sql, args):
+        r = next((r for r in self.db.rows if r['id'] == args[0]), None)
+        if r is None:
+            return None
+        j = self.jobs.get(args[0])
+        floor = self.db.now() - timedelta(seconds=cg.CLOSE_BUSY_WINDOW_S)
+        busy = j is not None and (j['status'] == 'pending' or (j['status'] == 'done' and j['updated_at'] > floor))
+        return {'exit_hint': r.get('exit_hint'), 'close_fill_qty': r.get('close_fill_qty'), 'job_busy': 1 if busy else None}
 
     def _busy(self, method, sql, args):
         user_id = args[0]
