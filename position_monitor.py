@@ -160,6 +160,7 @@ def _time_exit_hint(position: dict) -> bool:
         return False
 
 
+HOLD_FLAT_CONFIRM_GAP_S = 2.0
 SQL_HOLD_SITOUT_INSERT = """
     INSERT INTO hold_sitouts (user_id, master_trade_id, reason)
     SELECT $1, s.master_trade_id, $3 FROM signals s WHERE s.id = $2 AND s.master_trade_id IS NOT NULL
@@ -1288,16 +1289,16 @@ class PositionMonitor:
             await log_error_to_db(self.db_pool, str(position.get('user_id', 'unknown')), "HOLD_SITOUT_FAILED",
                                   str(e)[:200], {"position_id": position.get('id')})
 
-    async def _cancel_leftover(self, exchange, kraken_symbol, legs):
-        for leg_name, oid in legs:
-            if not oid:
-                continue
-            try:
-                exchange.cancel_order(oid, kraken_symbol)
-            except ccxt.OrderNotFound:
-                pass
-            except Exception as e:
-                self.logger.debug(f"   Could not cancel {leg_name}: {e}")
+    async def _hold_flat_confirmed(self, exchange, kraken_symbol, side, qty, tp_oid, sl_oid, user_api_key) -> bool:
+        """A second symbol-scoped read VERIFY_FLAT_GAP_S later must also say closed. Any error or a live position
+        is 'not confirmed' (the row then stays open and the next monitor cycle looks again)."""
+        await asyncio.sleep(HOLD_FLAT_CONFIRM_GAP_S)
+        try:
+            again = await self.check_position_closed(exchange, kraken_symbol, side, qty, tp_oid, sl_oid, user_api_key)
+        except Exception as e:
+            self.logger.warning(f"   ⚠️ hold flat confirmation read failed: {e}")
+            return False
+        return again.get('closed') is True and not again.get('anomaly')
 
     async def check_position(self, position: dict):
         """Check a single position - is it still open on Kraken?"""
@@ -1355,6 +1356,15 @@ class PositionMonitor:
                     self.logger.warning(f"⚠️ {user_short}: Manual close detected - marked for review")
                 return
             
+            # T1LIVE-7 (review H1): ONE empty positions read is never proof that a hold is flat. Before ANY status
+            # change, trade record or leg cancel on a hold row, the flat must be confirmed by a second read.
+            if _is_hold(position) and not await self._hold_flat_confirmed(
+                    exchange, kraken_symbol, position['side'], position.get('filled_quantity') or position['quantity'],
+                    position.get('tp_order_id'), position.get('sl_order_id'), position['user_api_key']):
+                self.logger.warning(f"⚠️ {user_short}: hold {kraken_symbol} read flat once but is not confirmed - "
+                                    f"row stays open, SL untouched")
+                return
+
             # Position closed
             exit_price = result.get('exit_price')
             exit_type = result.get('exit_type', 'UNKNOWN')
@@ -1382,7 +1392,8 @@ class PositionMonitor:
                             position['id']
                         )
                     await self._hold_sitout(position, 'NEEDS_REVIEW')
-                    await self._cancel_leftover(exchange, kraken_symbol, [('SL', position.get('sl_order_id'))])
+                    # the hold's SL is NOT cancelled on an unknown exit (review H1): a leftover reduce-only stop is
+                    # the lesser risk and the guardian / an admin decides
                     return
                 self.logger.info(f"🐗 {user_short}: HOLD exit {exit_type} on {position['symbol']} @ ${exit_price:.4f}")
             else:

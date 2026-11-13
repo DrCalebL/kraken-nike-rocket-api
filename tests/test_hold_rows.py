@@ -146,7 +146,7 @@ def test_a_hold_exit_that_is_neither_the_stop_nor_the_leader_goes_to_needs_revie
     run(e.mon.check_position(_position(e, row)))
     assert e.recorded == [] and updates == [(row['id'],)]
     assert (e.user['id'], 'M' * 32) in e.hold.sitouts
-    assert sl not in e.ex.orders                                    # the leftover stop never outlives the position
+    assert sl in e.ex.orders                                        # the SL is NOT cancelled on an unknown exit (H1)
 
 
 def test_a_hold_with_a_null_tp_never_raises_in_the_monitor(monkeypatch, fast_sleep, notify_log):
@@ -303,3 +303,34 @@ def test_every_ada_insert_still_writes_a_tp_and_only_the_hold_inserts_write_null
     loop = _src('hosted_trading_loop.py')
     assert 'target_tp, target_sl, opened_at, status)\n                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)' in loop
     assert "VALUES ($1, $2, $3, NULL, $4, $5, $6, 'BUY', $7, $8, $9, NULL, $10, $11, 'open', 'hold')" in loop
+
+
+# ---------------- review H1: one empty read never touches a live hold ----------------
+
+def test_one_empty_positions_read_leaves_a_live_hold_open_and_its_sl_untouched(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e)
+    e.ex.empty_position_reads = 1                                   # the first read misses PF_BNBUSD
+    run(e.mon.check_position(_position(e, row)))
+    assert e.recorded == [] and e.db.row(row['id'])['status'] == 'open'
+    assert sl in e.ex.orders and e.ex.calls('cancel_order') == [] and e.hold.sitouts == set()
+    assert e.pool.sql("SET status = 'needs_review'") == []
+
+
+def test_one_empty_read_with_a_trade_near_the_stop_is_not_labelled_sl(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e)
+    e.ex.trades.append({'id': 't', 'order': 'x', 'timestamp': 1, 'symbol': BNB, 'side': 'sell', 'price': 569.0,
+                        'amount': 1.0, 'info': {}})                 # an old fill near the stop
+    e.ex.empty_position_reads = 1
+    run(e.mon.check_position(_position(e, row)))
+    assert e.recorded == [] and e.hold.sitouts == set() and sl in e.ex.orders
+    assert e.db.row(row['id'])['status'] == 'open'
+
+
+def test_a_confirmed_flat_hold_still_closes_after_the_second_read(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    row, sl = _hold_row(e)
+    e.ex.set_price(BNB, 569.0)
+    run(e.mon.check_position(_position(e, row)))
+    assert e.recorded == [(row['id'], 'SL')]
