@@ -1051,7 +1051,7 @@ class PositionGuardian:
         except Exception as e:
             await self._read_failed(user, sym, 'hold_sl_reread', e)
             return True
-        px = await self._ticker_last(exchange, sym)
+        px = await self._fresh_last(exchange, sym)       # a FRESH read: the pass-level cache may be minutes old
         if px is not None and px <= level:
             # the market is already at/through the stop: a sell stop above the market is not a stop. Do what the
             # stop would have done, a reduce-only market close of the live qty; position_monitor then labels the
@@ -1124,6 +1124,15 @@ class PositionGuardian:
             kraken_api_key_encrypted=user.get('kraken_api_key_encrypted'),
             kraken_api_secret_encrypted=user.get('kraken_api_secret_encrypted')))
         return True
+
+    async def _fresh_last(self, exchange, sym):
+        """The last price read now (never the per-pass _ticker_cache); None when unreadable."""
+        try:
+            ticker = await self._call(exchange.fetch_ticker, sym)
+            return float(ticker['last']) if ticker and ticker.get('last') is not None else None
+        except Exception as e:
+            logger.warning(f"⚠️ GUARDIAN: fresh ticker read failed for {sym}: {e}")
+            return None
 
     async def _ticker_last(self, exchange, sym):
         if sym in self._ticker_cache:

@@ -395,3 +395,17 @@ async def test_a_hold_closed_beyond_its_stop_is_then_labelled_sl_by_the_monitor(
     ex.prices[BNB] = 560.0
     await env.g.invariant_pass(full=True, dry=False)
     assert pm.hold_exit_type(dict(env.db.row(row['id'])), 560.0) == 'SL'
+
+
+async def test_the_beyond_stop_decision_uses_a_fresh_ticker_not_the_pass_cache(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    ex.prices[BNB] = 560.0                                           # the market is through the stop NOW
+
+    async def stale(exchange, sym):
+        return 700.0                                                 # the cached value from earlier in the pass
+
+    monkeypatch.setattr(env.g, '_ticker_last', stale)
+    await env.g.invariant_pass(full=True, dry=False)
+    assert ex.positions == {} and 'GUARDIAN_HOLD_SL_CLOSED_BEYOND_STOP' in env.db.error_types()
