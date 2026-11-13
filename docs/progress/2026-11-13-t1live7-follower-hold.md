@@ -21,3 +21,39 @@ A master that lost its state can mint a new `master_trade_id` for the same Binan
 `HOLD_DUPLICATE_LEADER_TRADE` (error_logs row + admin alert) for a NEW id whose `leader_trade_id` already has a hold signal;
 delivery skips, and `execute_hold_entry` refuses (acknowledging the delivery), any user with an open / needs_recovery hold
 row whose signal has the same `hold_leader_trade_id`.
+
+## Audit round (Fable multi-audit of 7d8dc9c)
+- Leverage per hold: `lev = min(10, floor(0.8 / d))`, `d = (P - stop) / P` at the follower's own mark (`hold_guard.LIQ_BUFFER`).
+  ASSUMPTION (unverified on the venue): an isolated long liquidates at about -1/lev of price, maintenance margin makes it closer;
+  the stop must sit inside 80% of that distance. `lev < 1` refuses (`HOLD_STOP_TOO_WIDE`). The margin fit uses that lev and
+  `set_leverage(lev)` runs before the entry (a failure = no entry). The row stores the chosen leverage.
+- Entry order of operations: all read-only checks (slot, balance, ticker, size, set_leverage) -> atomic acknowledge -> a
+  `needs_recovery` hold row (`kind='hold'`, target_tp NULL, planned qty, target_sl) -> entry -> confirmed fill -> SL -> promote the
+  row to `open` (3 tries). A crash anywhere after the row leaves a row the guardian's recovery lane acts on (naked position closed at
+  market; a never-filled entry ends `closed_manual`). A promotion that cannot be written closes the position at market and cancels
+  the stop. A definitive refusal acknowledges the delivery; an unreadable state leaves it open for the next cycle. A hold attempt
+  that fails after the row was written ends `closed_manual`, which (like any row of that trade) blocks a later re-offer of the SAME
+  master_trade_id for this user: a transient failure costs that offer, never a double entry.
+- `HOLD_ENABLED` is effective only with `GUARDIAN_MODE=enforce` (the hold SL repair exists only there); otherwise the hold stays
+  off and `HOLD_NEEDS_GUARDIAN_ENFORCE` is raised at startup and each cycle (hourly dedupe). The endpoint skips offers likewise.
+- The rowless legacy scan counts tracked rows per (user, symbol). The guardian's hold-symbol exemption (never closing a hold
+  symbol by the rowless rule) is kept: with enforce it is redundant (rowed symbols are skipped anyway) and only matters for a
+  hold row left over after a mode change.
+- position_monitor re-reads `exit_hint` / `close_fill_qty` after a confirmed flat and defers the label while a master close is
+  still running (hint set, no fill, user in flight or its job pending / done < 180 s).
+
+## Deploy runbook (checks run BEFORE merge: Railway auto-deploys on merge)
+1. Pre-deploy queries on the production DB, each must return NO rows / zero:
+   - `SELECT master_trade_id FROM signals WHERE master_trade_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1` (else the unique
+     index migration aborts every boot).
+   - the late-close sweep: `SELECT op.id FROM open_positions op JOIN signals s ON op.signal_id = s.id JOIN master_closes mc ON
+     mc.master_trade_id = s.master_trade_id LEFT JOIN close_jobs cj ON cj.position_id = op.id WHERE op.status IN ('open',
+     'needs_recovery') AND cj.position_id IS NULL` (else the first cycle queues close jobs for those rows).
+2. Apply the hold DDL BY HAND in a quiet minute (psql, `SET lock_timeout = '5s'`, the statements of `_HOLD_MIGRATIONS` and the
+   CLOSE block), then deploy: the boot migrations then take no table lock (they skip what exists).
+3. Deploy or change env (`HOLD_ENABLED`, `GUARDIAN_MODE`, `HOLD_USER_ALLOWLIST`) outside 23:55-00:30Z (daily hold offers /
+   re-offers) and outside HH:58-HH:05 (ADA entries); nothing else restarts the loop then.
+4. No rollback to an older image while any `kind='hold'` row is open or `needs_recovery`: the old code does not know the kind
+   and would treat a TP-less row as an unprotected position.
+5. Canary first: `HOLD_ENABLED=1`, `GUARDIAN_MODE=enforce`, `HOLD_USER_ALLOWLIST=<one or two follower ids>`. For those users the
+   ADA auto-raised leverage is capped at 10x (never below the signal's own leverage).
