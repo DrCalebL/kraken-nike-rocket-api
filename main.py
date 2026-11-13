@@ -324,6 +324,10 @@ if DATABASE_URL:
         " master_trade_id VARCHAR(32) NOT NULL, offer_ms BIGINT NOT NULL, offer_kind VARCHAR(8) NOT NULL,"
         " received_at TIMESTAMP NOT NULL DEFAULT NOW(), delivered INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (master_trade_id, offer_ms))",
+        "DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = 'trades' AND column_name = 'exit_type' AND data_type = 'character varying' "
+        "AND character_maximum_length < 16) THEN ALTER TABLE trades ALTER COLUMN exit_type TYPE VARCHAR(16); "
+        "END IF; END $$",
         "CREATE TABLE IF NOT EXISTS hold_sitouts ("
         " user_id INTEGER NOT NULL, master_trade_id VARCHAR(32) NOT NULL, reason VARCHAR(32) NOT NULL,"
         " created_at TIMESTAMP NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, master_trade_id))",
@@ -333,16 +337,46 @@ if DATABASE_URL:
         _hold_conn = psycopg2.connect(DATABASE_URL)
         _hold_conn.autocommit = True
         _hold_cur = _hold_conn.cursor()
+        _hold_cur.execute("SET lock_timeout = '5s'")      # never queue behind (or block) the live trading tables
+        _hold_failed = []
         for _hold_stmt in _HOLD_MIGRATIONS:
             try:
                 _hold_cur.execute(_hold_stmt)
             except Exception as e:
+                _hold_failed.append(f"{_hold_stmt[:70]}: {e}")
                 print(f"⚠️ Hold migration failed ({_hold_stmt[:60]}...): {e}")
         _hold_cur.close()
         _hold_conn.close()
-        print("✅ Hold schema up to date")
+        if _hold_failed:
+            # FAIL CLOSED and LOUD: the hold code reads these columns, so the hold stays off until a redeploy
+            # completes the schema; the ADA path does not depend on them being present.
+            os.environ['HOLD_ENABLED'] = '0'
+            print(f"🚨 HOLD_MIGRATION_INCOMPLETE: {len(_hold_failed)} statement(s) failed - HOLD_ENABLED forced to 0")
+            try:
+                _alarm_conn = psycopg2.connect(DATABASE_URL)
+                _alarm_conn.autocommit = True
+                _alarm_cur = _alarm_conn.cursor()
+                _alarm_cur.execute(
+                    "INSERT INTO error_logs (api_key, error_type, error_message, context) VALUES (%s, %s, %s, %s)",
+                    ('system', 'HOLD_MIGRATION_INCOMPLETE', '; '.join(_hold_failed)[:500], None))
+                _alarm_cur.close()
+                _alarm_conn.close()
+            except Exception as e:
+                print(f"⚠️ Could not write the HOLD_MIGRATION_INCOMPLETE error_logs row: {e}")
+            try:
+                import asyncio as _hold_asyncio
+                from order_utils import notify_admin as _hold_notify
+                _hold_asyncio.run(_hold_notify(title="HOLD_MIGRATION_INCOMPLETE (Kraken follower)",
+                                               details={"Failed": '; '.join(_hold_failed)[:800],
+                                                        "Action": "HOLD_ENABLED forced to 0 until a redeploy"},
+                                               level="error"))
+            except Exception as e:
+                print(f"⚠️ Could not notify admin about HOLD_MIGRATION_INCOMPLETE: {e}")
+        else:
+            print("✅ Hold schema up to date")
     except Exception as e:
-        print(f"⚠️ Hold schema migration - {e}")
+        os.environ['HOLD_ENABLED'] = '0'
+        print(f"🚨 HOLD_MIGRATION_INCOMPLETE (connection): {e} - HOLD_ENABLED forced to 0")
     # T1LIVE7 HOLD MIGRATIONS:END
     # T1-CLOSE MIGRATIONS:END
     print("✅ Database initialized")

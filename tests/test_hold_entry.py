@@ -716,7 +716,7 @@ def test_hold_migrations_are_additive_and_idempotent():
                    'CREATE TABLE IF NOT EXISTS hold_offers', 'CREATE TABLE IF NOT EXISTS hold_sitouts'):
         assert needle in joined, needle
     for s in stmts:
-        assert s.startswith(('ALTER TABLE ', 'CREATE TABLE IF NOT EXISTS ')), s
+        assert s.startswith(('ALTER TABLE ', 'CREATE TABLE IF NOT EXISTS ', 'DO $$ BEGIN IF EXISTS')), s
         if s.startswith('ALTER TABLE ') and 'ADD COLUMN' in s:
             assert 'IF NOT EXISTS' in s, s
         assert 'DROP TABLE' not in s and 'DROP COLUMN' not in s and 'DELETE' not in s
@@ -838,3 +838,23 @@ def test_an_existing_row_for_the_same_signal_blocks_the_entry(monkeypatch, fast_
     has_open, why = run(e.loop.check_any_open_positions_or_orders(e.ex, 'u', user_id=e.user['id'],
                                                                   signal_id='sig-ada-1'))
     assert has_open is True and why == 'Position already exists for this signal'
+
+
+def test_the_exit_type_widen_is_guarded_and_the_hold_migration_fails_loud_and_closed():
+    import ast
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, 'main.py'), encoding='utf-8') as f:
+        src = f.read()
+    node = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == '_HOLD_MIGRATIONS' for t in n.targets))
+    do = [' '.join(ast.literal_eval(n).split()) for n in node.value.elts if ast.literal_eval(n).startswith('DO ')]
+    assert len(do) == 1
+    sql = do[0]
+    for needle in ("table_name = 'trades'", "column_name = 'exit_type'", "data_type = 'character varying'",
+                   'character_maximum_length < 16', 'ALTER TABLE trades ALTER COLUMN exit_type TYPE VARCHAR(16)',
+                   'IF EXISTS (SELECT 1 FROM information_schema.columns', 'END IF'):
+        assert needle in sql, needle
+    assert "SET lock_timeout = '5s'" in src
+    assert 'HOLD_MIGRATION_INCOMPLETE' in src and "os.environ['HOLD_ENABLED'] = '0'" in src
+    assert 'notify_admin as _hold_notify' in src and 'INSERT INTO error_logs' in src
