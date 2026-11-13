@@ -241,9 +241,29 @@ async def test_a_hold_whose_stop_is_missing_is_alarmed_not_closed(monkeypatch, n
     user, ex = env.user()
     row, _ = _hold_bracket(env, user, ex, with_sl=False)
     await _every_mode_pass(env, mode)
-    assert env.order_calls(ex) == [] and ex.positions[BNB]['contracts'] == 6.66
+    assert ex.positions[BNB]['contracts'] == 6.66 and ex.calls('create_limit_order') == []
+    if mode == 'enforce':                                            # review M2: the stop is re-placed, nothing else
+        (m, info), = env.order_calls(ex)
+        assert m == 'create_order' and info['side'] == 'sell' and info['amount'] == 6.66
+        assert info['params']['reduceOnly'] is True and info['params']['triggerPrice'] == 570.0
+        assert env.db.row(row['id'])['sl_order_id'] in ex.orders
+        assert 'GUARDIAN_HOLD_SL_REPLACED' in env.db.error_types()
+    else:
+        assert env.order_calls(ex) == []                             # legacy / shadow: alarm only
     if mode != 'legacy':
         assert 'GUARDIAN_HOLD_SL_MISSING' in env.db.error_types()
+
+
+async def test_a_failed_hold_sl_replacement_is_an_alarm_never_a_close(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='enforce')
+    user, ex = env.user()
+    row, _ = _hold_bracket(env, user, ex, with_sl=False)
+    import ccxt
+    ex.fault('create_order', ccxt.ExchangeError('rejected'), times=20)
+    await env.g.invariant_pass(full=True, dry=False)
+    assert ex.positions[BNB]['contracts'] == 6.66
+    assert not any(i.get('params', {}).get('reduceOnly') and i['type'] == 'market' for _m, i in ex.calls('create_order'))
+    assert 'GUARDIAN_HOLD_SL_REPLACE_FAILED' in env.db.error_types()
 
 
 @pytest.mark.parametrize('mode', ['shadow', 'enforce'])

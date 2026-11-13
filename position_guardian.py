@@ -971,7 +971,7 @@ class PositionGuardian:
         if row is None and not any(leg.oid in owned for leg in legs):
             return True                        # flat, rowless, only foreign orders: nothing to do
         if row is not None and row['status'] == 'open' and _is_hold_row(row):
-            return await self._hold_row_check(user, sym, row, pos, legs)
+            return await self._hold_row_check(exchange, user, sym, row, pos, legs, dry, since)
         rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT) if row is not None else None
         if row is not None and rec is None:
             return await self._invalid_levels(exchange, user, sym, row, dry)
@@ -1020,14 +1020,43 @@ class PositionGuardian:
             await self._alarm(user, sym, alarm_code, severity, ctx)
         return await self._execute(exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since)
 
-    async def _hold_row_check(self, user, sym, row, pos, legs) -> bool:
+    async def _hold_row_check(self, exchange, user, sym, row, pos, legs, dry, since) -> bool:
         """T1LIVE-7: an 'open' hold row has a stop and NO TP. It is never closed, never TP-repaired and raises no
-        TP_LEVEL_UNKNOWN / ROW_LEVELS_INVALID, in legacy, shadow and enforce alike (bracket_guard.decide is not
-        run). The only finding is a missing reduce-only stop on a live position: an alarm (HOLD_SL_MISSING), no act."""
+        TP_LEVEL_UNKNOWN / ROW_LEVELS_INVALID, in legacy, shadow and enforce alike (bracket_guard.decide is not run).
+        A live position without a reduce-only stop is a critical HOLD_SL_MISSING alarm; in ENFORCE (dry=False) the
+        guardian also re-places that stop, reduce-only, at the row's target_sl for the live quantity (a naked 10x long
+        is the worse risk). A failed placement is an alarm, never a close."""
         has_sl = any(leg.kind in bg.SL_KINDS and leg.reduce_only and leg.side == 'sell' for leg in legs)
-        if pos is not None and not has_sl:
-            await self._alarm(user, sym, 'HOLD_SL_MISSING', 'critical',
-                              {'row': row['id'], 'sl_order_id': row.get('sl_order_id')})
+        if pos is None or has_sl:
+            return True
+        await self._alarm(user, sym, 'HOLD_SL_MISSING', 'critical',
+                          {'row': row['id'], 'sl_order_id': row.get('sl_order_id')})
+        if dry:
+            return True
+        try:
+            level = float(row['target_sl'])
+            valid = level > 0 and level == level and level != float('inf')
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid:
+            await self._alarm(user, sym, 'HOLD_SL_REPLACE_FAILED', 'critical', {'row': row['id'], 'why': 'target_sl'})
+            return True
+        if await self._busy(user['id'], since):
+            await self._yield(user)
+            return False
+        try:
+            if await self._symbol_position(exchange, sym) is None:        # one empty read is never a flat
+                return True
+        except Exception as e:
+            await self._read_failed(user, sym, 'hold_sl_reread', e)
+            return True
+        oid = await self._place_leg(exchange, sym, 'SL', pos, level)
+        if oid is None:
+            await self._alarm(user, sym, 'HOLD_SL_REPLACE_FAILED', 'critical', {'row': row['id'], 'level': level})
+            return True
+        await self._set_row_leg(row, SQL_SET_SL, oid)
+        self._retired[(user['id'], sym)].add(oid)
+        await self._alarm(user, sym, 'HOLD_SL_REPLACED', 'warning', {'row': row['id'], 'level': level, 'oid': oid})
         return True
 
     async def _resolve_reappearance(self, exchange, user, sym, row, p) -> bool:
