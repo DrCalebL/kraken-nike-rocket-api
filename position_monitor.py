@@ -107,6 +107,7 @@ import secrets
 import time
 import json
 import hashlib
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -157,6 +158,54 @@ def _time_exit_hint(position: dict) -> bool:
         return float(position.get('close_fill_qty') or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+SQL_HOLD_SITOUT_INSERT = """
+    INSERT INTO hold_sitouts (user_id, master_trade_id, reason)
+    SELECT $1, s.master_trade_id, $3 FROM signals s WHERE s.id = $2 AND s.master_trade_id IS NOT NULL
+    ON CONFLICT (user_id, master_trade_id) DO NOTHING
+"""
+
+
+def _is_hold(position: dict) -> bool:
+    return str(position.get('kind') or 't1').lower() == 'hold'
+
+
+def _leader_exit_hint(position: dict) -> bool:
+    """T1LIVE-7: execute_close wrote exit_hint='LEADER' AND recorded a close fill > 0 (the leader exit, not the SL)."""
+    if position.get('exit_hint') != 'LEADER':
+        return False
+    try:
+        return float(position.get('close_fill_qty') or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def hold_exit_type(position: dict, exit_price) -> Optional[str]:
+    """Label of a hold's exit: 'LEADER' (leader_exit close filled), 'SL' (the exit is at/below the stop, within
+    HOLD_SL_MATCH_PCT, default 2%, of slippage above it) or None = cannot be told (-> needs_review). A hold has no
+    TP, so nothing is ever labelled TP and target_tp is never read."""
+    if _leader_exit_hint(position):
+        return 'LEADER'
+    try:
+        sl, px = float(position.get('target_sl')), float(exit_price)
+        tol = float(os.getenv('HOLD_SL_MATCH_PCT') or 0.02)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(sl) and math.isfinite(px) and sl > 0 and px > 0 and 0 < tol < 0.5):
+        return None
+    return 'SL' if px <= sl * (1 + tol) else None
+
+
+def _position_matches(exchange, pos: dict, kraken_symbol: str) -> bool:
+    """True when a ccxt position IS this row's symbol: the unified symbol of the market, else (market unknown) the
+    base asset. Symbol-scoped on purpose: another symbol's open position says nothing about this row."""
+    pos_symbol = str(pos.get('symbol') or '')
+    try:
+        return pos_symbol == exchange.market(kraken_symbol)['symbol']
+    except Exception:
+        base = kraken_symbol.replace('PF_', '').replace('USD', '').upper()
+        return bool(base) and base in pos_symbol.upper()
 
 
 class PositionMonitor:
@@ -755,6 +804,7 @@ class PositionMonitor:
                     op.last_fill_at,
                     op.exit_hint,
                     op.close_fill_qty,
+                    op.kind,
                     u.api_key as user_api_key,
                     u.kraken_api_key_encrypted,
                     u.kraken_api_secret_encrypted,
@@ -872,22 +922,15 @@ class PositionMonitor:
                     
                     self.logger.info(f"   Position {i}: symbol={pos_symbol}, contracts={pos_contracts}, side={pos_side}")
                     
-                    symbol_base = kraken_symbol.replace('PF_', '').replace('USD', '')
-                    
-                    if symbol_base in str(pos_symbol).upper():
+                    if _position_matches(exchange, pos, kraken_symbol):
                         contracts = abs(float(pos_contracts))
                         if contracts > 0:
                             self.logger.info(f"✅ Position found: {pos_symbol} {pos_side} ({contracts} contracts)")
                             return {'closed': False, 'current_size': contracts}
             
-            # Check for ANY position
-            for pos in positions:
-                contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
-                if contracts > 0:
-                    self.logger.info(f"✅ Position found (any symbol): {pos.get('symbol')} ({contracts} contracts)")
-                    return {'closed': False, 'current_size': contracts}
-            
-            self.logger.info(f"📭 No open positions found in Kraken API response")
+            # T1LIVE-7: NO any-symbol fallback. An ADA close must be recorded while a BNB hold is open (and vice
+            # versa); a position on another symbol proves nothing about this one.
+            self.logger.info(f"📭 No open position for {kraken_symbol} in the Kraken API response")
             
             # No position found - check which order filled
             exit_type = 'UNKNOWN'
@@ -939,15 +982,10 @@ class PositionMonitor:
                 # Re-run the same position matching logic
                 if positions:
                     for pos in positions:
-                        symbol_base = kraken_symbol.replace('PF_', '').replace('USD', '')
-                        if symbol_base in str(pos.get('symbol', '')).upper():
+                        if _position_matches(exchange, pos, kraken_symbol):
                             contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
                             if contracts > 0:
                                 return {'closed': False, 'current_size': contracts}
-                    for pos in positions:
-                        contracts = abs(float(pos.get('contracts') or pos.get('contractSize') or 0))
-                        if contracts > 0:
-                            return {'closed': False, 'current_size': contracts}
                 # No positions found on retry — return closed:False to recheck next cycle
                 # rather than marking closed on a potentially incomplete API response
                 return {'closed': False, 'retry_no_positions': True}
@@ -1238,6 +1276,29 @@ class PositionMonitor:
             )
             return False
     
+    async def _hold_sitout(self, position: dict, reason: str):
+        """Record that this follower sits out the hold's master_trade_id for good (stopped out / needs review).
+        Never raises; a failed write is an error_logs alarm (the open_positions row of the trade still blocks a
+        re-entry, so this is the second lock, not the only one)."""
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute(SQL_HOLD_SITOUT_INSERT, position['user_id'], position.get('signal_id'), reason)
+        except Exception as e:
+            self.logger.error(f"   ⚠️ hold sit-out not recorded for position {position.get('id')}: {e}")
+            await log_error_to_db(self.db_pool, str(position.get('user_id', 'unknown')), "HOLD_SITOUT_FAILED",
+                                  str(e)[:200], {"position_id": position.get('id')})
+
+    async def _cancel_leftover(self, exchange, kraken_symbol, legs):
+        for leg_name, oid in legs:
+            if not oid:
+                continue
+            try:
+                exchange.cancel_order(oid, kraken_symbol)
+            except ccxt.OrderNotFound:
+                pass
+            except Exception as e:
+                self.logger.debug(f"   Could not cancel {leg_name}: {e}")
+
     async def check_position(self, position: dict):
         """Check a single position - is it still open on Kraken?"""
         user_short = position['user_api_key'][:15] + "..."
@@ -1307,19 +1368,41 @@ class PositionMonitor:
                     )
                 return
             
-            # Verify exit type
-            entry = position.get('avg_entry_price') or position['entry_fill_price']
-            tp = position['target_tp']
-            sl = position['target_sl']
+            hold = _is_hold(position)
+            if hold:
+                # T1LIVE-7: a hold has no TP (target_tp is NULL and never read). Its exit is LEADER (the leader_exit
+                # close filled), SL (at/below the stop) or unknown -> needs_review, no trade recorded.
+                exit_type = hold_exit_type(position, exit_price)
+                if exit_type is None:
+                    self.logger.warning(f"⚠️ {user_short}: HOLD exit on {position['symbol']} @ ${exit_price} is neither "
+                                        f"the leader exit nor the stop - marked for review")
+                    async with self.db_pool.acquire() as conn:
+                        await conn.execute(
+                            "UPDATE open_positions SET status = 'needs_review' WHERE id = $1",
+                            position['id']
+                        )
+                    await self._hold_sitout(position, 'NEEDS_REVIEW')
+                    await self._cancel_leftover(exchange, kraken_symbol, [('SL', position.get('sl_order_id'))])
+                    return
+                self.logger.info(f"🐗 {user_short}: HOLD exit {exit_type} on {position['symbol']} @ ${exit_price:.4f}")
+            else:
+                entry = position.get('avg_entry_price') or position['entry_fill_price']
+                tp = position['target_tp']
+                sl = position['target_sl']
+                dist_to_tp = abs(exit_price - tp)
+                dist_to_sl = abs(exit_price - sl)
             
-            dist_to_tp = abs(exit_price - tp)
-            dist_to_sl = abs(exit_price - sl)
-            
-            if _time_exit_hint(position):
+            if hold:
+                pass
+            elif _time_exit_hint(position):
                 # T08 master CLOSE: execute_close wrote exit_hint='TIME' before its reduce-only close and recorded
                 # a non-zero close fill, so this exit was the 168 h time exit, not the SL/TP
                 exit_type = 'TIME'
                 self.logger.info(f"⏱️ {user_short}: TIME EXIT (master CLOSE) on {position['symbol']} @ ${exit_price:.4f}")
+            elif _leader_exit_hint(position):
+                # T1LIVE-7: the leader (Binance) exited and execute_close followed it (exit_hint 'LEADER' + a fill)
+                exit_type = 'LEADER'
+                self.logger.info(f"🧭 {user_short}: LEADER EXIT (master CLOSE) on {position['symbol']} @ ${exit_price:.4f}")
             elif dist_to_tp < dist_to_sl:
                 exit_type = 'TP'
                 self.logger.info(f"🎯 {user_short}: TP HIT on {position['symbol']} @ ${exit_price:.4f}")
@@ -1345,9 +1428,13 @@ class PositionMonitor:
             
             # Record the trade closure
             await self.record_trade_close(position, exit_price, exit_type, datetime.utcnow(), kraken_pnl=kraken_pnl)
+            if hold and exit_type == 'SL':
+                await self._hold_sitout(position, 'STOPPED_OUT')    # never re-entered on this master_trade_id
             
             # Cancel remaining order(s): a TIME exit cancels both recorded legs; OrderNotFound counts as done
-            if exit_type == 'TIME':
+            if hold:
+                remaining = [('SL', position.get('sl_order_id'))] if exit_type == 'LEADER' else []
+            elif exit_type in ('TIME', 'LEADER'):
                 remaining = [('SL', position.get('sl_order_id')), ('TP', position.get('tp_order_id'))]
             elif exit_type == 'TP':
                 remaining = [('SL', position['sl_order_id'])]

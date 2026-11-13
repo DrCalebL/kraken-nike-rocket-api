@@ -99,7 +99,7 @@ SQL_CLOSE_BUSY = (
 SQL_ROWS_FOR_USER = """
     SELECT id, user_id, signal_id, entry_order_id, tp_order_id, sl_order_id,
            symbol, kraken_symbol, side, quantity, leverage, entry_fill_price,
-           target_tp, target_sl, opened_at, status
+           target_tp, target_sl, opened_at, status, kind
     FROM open_positions
     WHERE user_id = $1
       AND (status IN ('open', 'needs_recovery') OR opened_at > NOW() - INTERVAL '7 days')
@@ -133,7 +133,7 @@ SQL_NEEDS_RECOVERY_ROWS = """
     SELECT
         op.id, op.user_id, op.entry_order_id, op.tp_order_id, op.sl_order_id,
         op.symbol, op.kraken_symbol, op.side, op.quantity,
-        op.entry_fill_price, op.target_tp, op.target_sl, op.opened_at, op.status,
+        op.entry_fill_price, op.target_tp, op.target_sl, op.opened_at, op.status, op.kind,
         u.api_key, u.email,
         u.kraken_api_key_encrypted, u.kraken_api_secret_encrypted
     FROM open_positions op
@@ -190,6 +190,11 @@ async def _log_error_to_db(pool, api_key: str, error_type: str, error_message: s
             )
     except Exception as e:
         logger.error(f"Failed to log error to DB: {e}")
+
+
+def _is_hold_row(row):
+    """T1LIVE-7: an open_positions row of the BNB hold (stop only: target_tp is NULL, tp_order_id is NULL)."""
+    return str((row or {}).get('kind') or 't1').lower() == 'hold'
 
 
 def _pos_from_ccxt(p):
@@ -559,10 +564,14 @@ class PositionGuardian:
             return 0
 
         rowed = set()
+        user_rows = await self._rows_for_user(user['id'])
         if rowless_only:
             rowed = {self._unified(exchange, r.get('kraken_symbol') or r.get('symbol'))
-                     for r in await self._rows_for_user(user['id'])
+                     for r in user_rows
                      if r['status'] in follower_guard.ACTIVE_STATUSES}
+        # T1LIVE-7: a hold's symbol is never closed by the rowless rule (its SL is the only leg it has), in every mode
+        rowed |= {self._unified(exchange, r.get('kraken_symbol') or r.get('symbol'))
+                  for r in user_rows if r['status'] == 'open' and _is_hold_row(r)}
 
         closed_count = 0
         for pos in open_positions:
@@ -961,6 +970,8 @@ class PositionGuardian:
         owned = follower_guard.service_oids(srows) | self._retired[(uid, sym)]
         if row is None and not any(leg.oid in owned for leg in legs):
             return True                        # flat, rowless, only foreign orders: nothing to do
+        if row is not None and row['status'] == 'open' and _is_hold_row(row):
+            return await self._hold_row_check(user, sym, row, pos, legs)
         rec = follower_guard.rec_from_row(row, 'last', bg.TP_LIMIT) if row is not None else None
         if row is not None and rec is None:
             return await self._invalid_levels(exchange, user, sym, row, dry)
@@ -1008,6 +1019,16 @@ class PositionGuardian:
         for alarm_code, severity, ctx in alarms + more:
             await self._alarm(user, sym, alarm_code, severity, ctx)
         return await self._execute(exchange, user, sym, row, pos, rec, raw, acts, churn, dry, since)
+
+    async def _hold_row_check(self, user, sym, row, pos, legs) -> bool:
+        """T1LIVE-7: an 'open' hold row has a stop and NO TP. It is never closed, never TP-repaired and raises no
+        TP_LEVEL_UNKNOWN / ROW_LEVELS_INVALID, in legacy, shadow and enforce alike (bracket_guard.decide is not
+        run). The only finding is a missing reduce-only stop on a live position: an alarm (HOLD_SL_MISSING), no act."""
+        has_sl = any(leg.kind in bg.SL_KINDS and leg.reduce_only and leg.side == 'sell' for leg in legs)
+        if pos is not None and not has_sl:
+            await self._alarm(user, sym, 'HOLD_SL_MISSING', 'critical',
+                              {'row': row['id'], 'sl_order_id': row.get('sl_order_id')})
+        return True
 
     async def _resolve_reappearance(self, exchange, user, sym, row, p) -> bool:
         """

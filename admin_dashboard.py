@@ -329,7 +329,7 @@ def get_positions_needing_review() -> List[Dict]:
             # Calculate potential P&L if it was closed
             # (This is theoretical since we don't know actual close price)
             risk_amount = abs(float(entry) - float(sl)) * float(qty)
-            reward_amount = abs(float(tp) - float(entry)) * float(qty)
+            reward_amount = abs(float(tp) - float(entry)) * float(qty) if tp is not None else 0.0   # a hold has no TP
             
             positions.append({
                 'id': pid,
@@ -341,7 +341,7 @@ def get_positions_needing_review() -> List[Dict]:
                 'quantity': float(qty),
                 'leverage': float(leverage),
                 'entry': float(entry),
-                'tp': float(tp),
+                'tp': float(tp) if tp is not None else None,
                 'sl': float(sl),
                 'risk_amount': risk_amount,
                 'reward_amount': reward_amount,
@@ -718,7 +718,7 @@ def generate_admin_html(users: List[Dict], errors: List[Dict], stats: Dict, revi
                     <td><span style="color: {side_color}; font-weight: 600;">{pos['side']}</span> {pos['symbol']}</td>
                     <td>{pos['quantity']:.4f} @ {pos['leverage']}x</td>
                     <td>${pos['entry']:.2f}</td>
-                    <td><span style="color: #10b981">${pos['tp']:.2f}</span></td>
+                    <td><span style="color: #10b981">{('$%.2f' % pos['tp']) if pos['tp'] is not None else '-'}</span></td>
                     <td><span style="color: #ef4444">${pos['sl']:.2f}</span></td>
                     <td>{(pos['opened_at'] + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M') + ' SGT' if pos['opened_at'] else 'N/A'}</td>
                     <td style="color: #f59e0b;">{pos['reason']}</td>
