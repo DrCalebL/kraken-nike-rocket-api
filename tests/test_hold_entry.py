@@ -1133,3 +1133,74 @@ def test_a_failing_close_index_degrades_and_alerts_but_keeps_hold_on(monkeypatch
     executed, threads = _run_hold_migration_block(monkeypatch, lambda s, n: 'ix_close_jobs_status' in s)
     assert len(threads) == 1 and os.environ['HOLD_ENABLED'] == '1'
     assert sum('ix_close_jobs_status' in s and s.startswith('CREATE') for s in executed) == 3
+
+
+# ---------------- the same Binance hold under a second master_trade_id ----------------
+
+MTID_B = 'fedcba9876543210fedcba9876543210'
+
+
+def test_a_new_master_trade_id_for_a_known_leader_trade_is_refused_with_409_and_an_alarm(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    with a.engine.begin() as c:
+        c.execute(a.text('CREATE TABLE error_logs (api_key TEXT, error_type TEXT, error_message TEXT, context TEXT)'))
+    assert _post_hold(a, _hold_payload()).status_code == 200
+    r = _post_hold(a, _hold_payload(master_trade_id=MTID_B, offer_ms=_hold_payload()['offer_ms'] + 50))
+    assert r.status_code == 409 and 'HOLD_DUPLICATE_LEADER_TRADE' in r.json()['detail']
+    assert _count(a, 'SELECT COUNT(*) FROM signals') == 1 and _count(a, 'SELECT COUNT(*) FROM hold_offers') == 1
+    assert _count(a, 'SELECT COUNT(*) FROM signal_deliveries') == 4
+    assert _q(a, 'SELECT error_type FROM error_logs') == [('HOLD_DUPLICATE_LEADER_TRADE',)]
+
+
+def test_the_refusal_does_not_need_the_error_logs_table_and_a_different_leader_trade_is_fine(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    assert _post_hold(a, _hold_payload()).status_code == 200
+    assert _post_hold(a, _hold_payload(master_trade_id=MTID_B, offer_ms=_hold_payload()['offer_ms'] + 50)
+                      ).status_code == 409                                 # no error_logs table here: still refused
+    r = _post_hold(a, _hold_payload(master_trade_id=MTID_B, leader_trade_id='L-2',
+                                    offer_ms=_hold_payload()['offer_ms'] + 60))
+    assert r.status_code == 200                                             # a genuinely new Binance hold
+
+
+def test_a_user_holding_the_same_leader_trade_gets_no_delivery_even_for_another_mtid(monkeypatch, tmp_path):
+    import follower_endpoints as fe
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    s = a.Session()
+    fm = a.fm
+    sig = s.query(fm.Signal).one()
+    # a second hold signal row carrying the same leader trade (e.g. written before this check existed)
+    twin = fm.Signal(signal_id='sig-twin', action='BUY', symbol='BNB/USDT', entry_price=600.0, stop_loss=570.0,
+                     take_profit=None, strategy='hold', hold_r_b=0.02, hold_n2=0.5, hold_leader_trade_id='L-1',
+                     master_trade_id=MTID_B)
+    s.add(twin)
+    s.flush()
+    uid = s.query(fm.User).filter_by(api_key='nk_hold_user_1').one().id
+    s.add(fm.OpenPosition(user_id=uid, signal_id=sig.id, entry_order_id='E', symbol='BNB/USDT',
+                          kraken_symbol='PF_BNBUSD', side='BUY', quantity=1.0, target_tp=None, target_sl=570.0,
+                          kind='hold', status='open'))
+    for d in s.query(fm.SignalDelivery).all():
+        d.acknowledged = True
+    s.commit()
+    eligible = {u.api_key for u in fe._hold_eligible_users(s, twin.id, MTID_B, 'L-1')}
+    s.close()
+    assert 'nk_hold_user_1' not in eligible and 'nk_hold_user_4' in eligible
+
+
+def test_execute_never_opens_a_second_hold_for_the_same_leader_trade(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.db.add_row(user_id=e.user['id'], symbol='BNB/USDT', kraken_symbol='PF_BNBUSD', kind='hold', status='open',
+                 signal_id=99, target_tp=None, sl_order_id='x')
+    e.hold.leader_of_signal[99] = 'L1'
+    run(_enter(e, mtid=MTID_B, delivery_id=8101))                          # same leader trade, a new master_trade_id
+    assert _entries(e.ex) == [] and 'HOLD_DUPLICATE_LEADER_TRADE' in e.db.error_types()
+    assert len(e.pool.sql('UPDATE signal_deliveries')) == 1                # acknowledged: never retried
+
+
+def test_a_different_leader_trade_is_not_blocked_by_the_same_leader_check(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.hold.leader_of_signal[99] = 'L1'
+    e.db.add_row(user_id=e.user['id'], symbol='BNB/USDT', kraken_symbol='PF_BNBUSD', kind='hold', status='closed',
+                 signal_id=99, target_tp=None)
+    run(_enter(e, mtid=MTID_B, delivery_id=8102, leader='L-2'))
+    assert len(_entries(e.ex)) == 1 and 'HOLD_DUPLICATE_LEADER_TRADE' not in e.db.error_types()

@@ -11,3 +11,13 @@ Built to the contract in the coordinator brief (spec s3 + s9 "same as HL vault")
 - Unverified on the real venue: PF_BNBUSD lot (fake uses 0.01) and tick (0.1); free-margin field of the flex account
   (`info.accounts.flex.availableMargin`, else `USD.free`; unreadable -> hold skipped); cross vs isolated margin;
   width of `trades.exit_type` for the new label `LEADER`.
+
+## Pre-deploy check (run on the production DB before the first deploy of this branch)
+`SELECT master_trade_id FROM signals WHERE master_trade_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1` must return NO rows.
+Otherwise the `ux_signals_master_trade_id` unique-index migration cannot be built and (it is essential) aborts every boot.
+
+## Same Binance hold, second master_trade_id
+A master that lost its state can mint a new `master_trade_id` for the same Binance hold. `/api/broadcast-hold` answers 409
+`HOLD_DUPLICATE_LEADER_TRADE` (error_logs row + admin alert) for a NEW id whose `leader_trade_id` already has a hold signal;
+delivery skips, and `execute_hold_entry` refuses (acknowledging the delivery), any user with an open / needs_recovery hold
+row whose signal has the same `hold_leader_trade_id`.

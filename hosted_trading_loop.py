@@ -266,6 +266,13 @@ SQL_LATE_CLOSE_SWEEP = """
     ON CONFLICT (position_id) DO NOTHING
 """
 SQL_HOLD_CLOSED = "SELECT 1 FROM master_closes WHERE master_trade_id = $1"
+# the SAME Binance hold under another master_trade_id (a master that lost its state): this user already has it
+SQL_HOLD_SAME_LEADER = """
+    SELECT 1 FROM open_positions op JOIN signals s ON op.signal_id = s.id
+    WHERE op.user_id = $1 AND op.status IN ('open', 'needs_recovery') AND s.strategy = 'hold'
+      AND s.hold_leader_trade_id = (SELECT hold_leader_trade_id FROM signals WHERE id = $2)
+    LIMIT 1
+"""
 SQL_HOLD_SITOUT = "SELECT 1 FROM hold_sitouts WHERE user_id = $1 AND master_trade_id = $2"
 SQL_OTHER_KIND_ROWS = """
     SELECT id, kraken_symbol, side, tp_order_id, sl_order_id, COALESCE(kind, 't1') AS kind
@@ -1524,6 +1531,7 @@ class HostedTradingLoop:
             async with self.db_pool.acquire() as conn:
                 closed = await conn.fetchval(SQL_HOLD_CLOSED, mtid)
                 sat_out = await conn.fetchval(SQL_HOLD_SITOUT, user['id'], mtid)
+                same_leader = await conn.fetchval(SQL_HOLD_SAME_LEADER, user['id'], hold.get('signal_db_id'))
         except Exception as e:
             await self._hold_refuse(user, hold, 'HOLD_SKIPPED_READ_ERROR', str(e)[:100])
             return False
@@ -1532,6 +1540,8 @@ class HostedTradingLoop:
             refusal = 'HOLD_ALREADY_CLOSED'
         elif sat_out:
             refusal = 'HOLD_SAT_OUT'
+        elif same_leader:
+            refusal = 'HOLD_DUPLICATE_LEADER_TRADE'
         elif not hold_guard.offer_is_fresh(hold.get('offer_ms'), now_ms):
             refusal = 'HOLD_OFFER_STALE'
         if refusal:

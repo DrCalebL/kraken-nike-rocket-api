@@ -608,7 +608,7 @@ def hold_service_enabled() -> bool:
     return (os.getenv('HOLD_ENABLED') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
+def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str, leader_trade_id: str = None):
     """Followers to deliver an offer to: access, agent on, credentials set, hold_enabled, on the allowlist (if one
     is set; unset = nobody, '*' = everyone), with NO open_positions row of this trade (any status: also covers a follower who already holds or was
     stopped out), no hold_sitouts record, and no still-open delivery of this trade. Fail closed: a read error
@@ -622,6 +622,12 @@ def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
     have_row = {r[0] for r in db.query(OpenPosition.user_id).join(Signal, OpenPosition.signal_id == Signal.id)
                 .filter(Signal.master_trade_id == mtid).all()}
     sat_out = {r[0] for r in db.query(HoldSitout.user_id).filter(HoldSitout.master_trade_id == mtid).all()}
+    # the SAME Binance hold under another master_trade_id (a master that lost its state): never a second position
+    same_leader = set()
+    if leader_trade_id:
+        same_leader = {r[0] for r in db.query(OpenPosition.user_id).join(Signal, OpenPosition.signal_id == Signal.id)
+                       .filter(Signal.strategy == 'hold', Signal.hold_leader_trade_id == leader_trade_id,
+                               OpenPosition.status.in_(('open', 'needs_recovery'))).all()}
     pending = {r[0] for r in db.query(SignalDelivery.user_id).filter(
         SignalDelivery.signal_id == signal_db_id, SignalDelivery.acknowledged == False,
         SignalDelivery.failed == False,
@@ -629,7 +635,29 @@ def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str):
         SignalDelivery.delivered_at > datetime.utcnow() - timedelta(minutes=15)).all()}
     allow = hold_guard.parse_allowlist(os.getenv('HOLD_USER_ALLOWLIST'))
     return [u for u in users if u.id not in have_row and u.id not in sat_out and u.id not in pending
+            and u.id not in same_leader
             and hold_guard.user_allowed(allow, u.id, u.email)]
+
+
+async def _hold_duplicate_alarm(db: Session, msg: str, new_mtid: str, old_mtid: str):
+    """error_logs row + admin e-mail for a second master_trade_id on the same Binance hold. Never raises."""
+    try:
+        db.rollback()
+        db.execute(text("INSERT INTO error_logs (api_key, error_type, error_message, context) "
+                        "VALUES (:k, :t, :m, :c)"),
+                   {'k': 'system', 't': 'HOLD_DUPLICATE_LEADER_TRADE', 'm': msg[:500],
+                    'c': json.dumps({'new_master_trade_id': new_mtid, 'existing_master_trade_id': old_mtid})})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.error(f"   ⚠️ HOLD_DUPLICATE_LEADER_TRADE error_logs row not written: {e}")
+    try:
+        from order_utils import notify_admin
+        await notify_admin(title="HOLD_DUPLICATE_LEADER_TRADE (Kraken follower)",
+                           details={"New master_trade_id": new_mtid, "Existing": old_mtid,
+                                    "Action": "offer refused (409); check the master's state"}, level="error")
+    except Exception as e:
+        logger.error(f"   ⚠️ HOLD_DUPLICATE_LEADER_TRADE admin alert failed: {e}")
 
 
 @router.post("/api/broadcast-hold")
@@ -675,6 +703,15 @@ async def broadcast_hold(
             if not same:
                 raise HTTPException(status_code=422, detail="hold parameters differ from the first offer")
         else:
+            twin = db.query(Signal).filter(Signal.strategy == 'hold',
+                                           Signal.hold_leader_trade_id == payload['leader_trade_id']).first()
+            if twin is not None:
+                # a NEW master_trade_id for a Binance hold we already know: the master lost its state. Refuse.
+                msg = (f"hold offer with a new master_trade_id {mtid} for leader_trade_id {payload['leader_trade_id']} "
+                       f"already offered as {twin.master_trade_id}")
+                logger.error(f"🚨 HOLD_DUPLICATE_LEADER_TRADE: {msg}")
+                await _hold_duplicate_alarm(db, msg, mtid, twin.master_trade_id)
+                raise HTTPException(status_code=409, detail="HOLD_DUPLICATE_LEADER_TRADE: " + msg)
             sig = Signal(signal_id=secrets.token_urlsafe(16), action='BUY', symbol=payload['symbol'],
                          entry_price=ref, stop_loss=stop, take_profit=None, leverage=float(hold_guard.HOLD_LEVERAGE),
                          risk_pct=r_b, strategy='hold', hold_r_b=r_b, hold_n2=n2,
@@ -683,7 +720,7 @@ async def broadcast_hold(
                          notes='BNB hold copied from Binance')
             db.add(sig)
             db.flush()
-        users = _hold_eligible_users(db, sig.id, mtid)
+        users = _hold_eligible_users(db, sig.id, mtid, payload['leader_trade_id'])
         for u in users:
             db.add(SignalDelivery(signal_id=sig.id, user_id=u.id, offer_ms=offer_ms))
         db.add(HoldOffer(master_trade_id=mtid, offer_ms=offer_ms, offer_kind=payload['offer_kind'],

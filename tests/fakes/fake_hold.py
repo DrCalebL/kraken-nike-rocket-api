@@ -16,6 +16,7 @@ class HoldDB:
         self.sitouts = set()            # (user_id, master_trade_id)
         self.pending = []               # SQL_PENDING_HOLDS rows
         self.mtid_of_signal = {}        # signals.id -> master_trade_id
+        self.leader_of_signal = {}      # signals.id -> hold_leader_trade_id
         p = self.pool
         p.on(htl.SQL_OTHER_KIND_ROWS, self._other_kind_rows)
         p.on(htl.SQL_INSERT_HOLD_ROW, self._insert_hold)
@@ -24,8 +25,16 @@ class HoldDB:
         p.on(htl.SQL_HOLD_SITOUT, lambda m, s, a: 1 if (a[0], a[1]) in self.sitouts else None)
         p.on(htl.SQL_PENDING_HOLDS, lambda m, s, a: [dict(r) for r in self.pending])
         p.on(pm.SQL_HOLD_SITOUT_INSERT, self._sitout_insert)
+        p.on(htl.SQL_HOLD_SAME_LEADER, self._same_leader)
         base = db.signal_db_id
         p.on('SELECT id FROM signals WHERE signal_id', lambda m, s, a: 88 if str(a[0]).startswith('sig-hold') else base)
+
+    def _same_leader(self, method, sql, args):
+        user_id, signal_id = args
+        leader = self.leader_of_signal.get(signal_id)
+        return 1 if leader is not None and any(
+            r['user_id'] == user_id and r['status'] in ('open', 'needs_recovery') and r.get('kind') == 'hold'
+            and self.leader_of_signal.get(r.get('signal_id')) == leader for r in self.db.rows) else None
 
     def _other_kind_rows(self, method, sql, args):
         user_id, strategy = args
@@ -57,16 +66,17 @@ class HoldDB:
         return 'INSERT 0 1'
 
     def add_delivery(self, user, mtid='0123456789abcdef0123456789abcdef', offer_ms=None, delivery_id=None,
-                     ref=600.0, stop=570.0, r_b=0.02, n2=0.5, signal_db_id=88):
+                     ref=600.0, stop=570.0, r_b=0.02, n2=0.5, signal_db_id=88, leader='L1'):
         import time
         delivery_id = delivery_id or 7000 + user['id']
         self.db.deliveries[delivery_id] = user['id']
         self.mtid_of_signal[signal_db_id] = mtid
+        self.leader_of_signal[signal_db_id] = leader
         row = {'user_id': user['id'], 'api_key': user['api_key'], 'email': user['email'],
                'kraken_api_key_encrypted': 'enc-k', 'kraken_api_secret_encrypted': 'enc-s',
                'delivery_id': delivery_id, 'offer_ms': offer_ms if offer_ms is not None else int(time.time() * 1000),
                'signal_db_id': signal_db_id, 'signal_id': 'sig-hold-%d' % user['id'], 'master_trade_id': mtid,
                'symbol': 'BNB/USDT', 'entry_price': ref, 'stop_loss': stop, 'hold_r_b': r_b, 'hold_n2': n2,
-               'hold_leader_trade_id': 'L1'}
+               'hold_leader_trade_id': leader}
         self.pending.append(row)
         return row
