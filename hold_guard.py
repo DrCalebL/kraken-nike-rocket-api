@@ -12,8 +12,8 @@ Sizing (the HL vault ruling "Binance R", ported from rocket_twin/leader.py g1c_s
     q = min(eq * r_b / (P - stop), eq * n2 / P) * HOLD_SIZE_SCALE, floored to the lot.
 The follower risks r_b of ITS equity if the shared stop is hit, and never more than the normal n2 notional (never
 sizes up on a better price). A late join sizes at its own price (owner: same as the HL vault G1c); the only price
-refusal is P <= stop * 1.01. Leverage is fixed at 10x and
-is NEVER raised: when the margin does not fit the free margin the size shrinks to fit, and below one lot the entry is
+refusal is P <= stop * 1.01. Leverage is chosen per hold as
+min(10, floor(0.8 / stop distance)) (see LIQ_BUFFER) and is NEVER raised: when the margin does not fit the free margin the size shrinks to fit, and below one lot the entry is
 skipped (HOLD_MARGIN_SKIP). Every unreadable or non-finite input refuses (fail closed).
 """
 import math
@@ -26,7 +26,15 @@ HOLD_PROTOCOL = 'hold-1'
 HOLD_ACTION = 'BUY'
 HOLD_SYMBOL = 'BNB/USDT'
 OFFER_KINDS = ('entry', 'reoffer')
-HOLD_LEVERAGE = 10                      # fixed; never raised
+HOLD_LEVERAGE = 10                      # the CEILING: a hold never runs above 10x
+# Liquidation before stop (audit): Kraken multi-collateral isolates the symbol's margin (leveragepreferences), and a long at
+# leverage L is liquidated at about -1/L of price (maintenance margin only makes it closer). Binance's stop is often 7-12%+
+# below the mark (more on a late join), where 10x would be liquidated first. So per hold:
+#     d   = (P - stop) / P                   (the stop distance at the follower's own mark P)
+#     lev = min(10, floor(LIQ_BUFFER / d))   (LIQ_BUFFER = 0.8: the stop must sit inside 80% of the liquidation distance,
+#                                              leaving 20% of it as the maintenance-margin / slippage buffer)
+# lev < 1 refuses (HOLD_STOP_TOO_WIDE). ASSUMPTION: liquidation distance ~ 1/lev; not verified on the venue.
+LIQ_BUFFER = Decimal('0.8')
 HOLD_MAX_AGE_MS = 15 * 60_000           # an offer older than this is refused (endpoint) / not executed (loop)
 HOLD_MAX_FUTURE_MS = 5 * 60_000
 MIN_STOP_DISTANCE = Decimal('1.01')     # P must be above stop * 1.01
@@ -42,6 +50,7 @@ HOLD_MARK_NEAR_STOP = 'HOLD_MARK_NEAR_STOP'
 HOLD_SIZE_ZERO = 'HOLD_SIZE_ZERO'
 HOLD_MARGIN_SKIP = 'HOLD_MARGIN_SKIP'
 HOLD_MARGIN_UNKNOWN = 'HOLD_MARGIN_UNKNOWN'
+HOLD_STOP_TOO_WIDE = 'HOLD_STOP_TOO_WIDE'
 
 _TRADE_ID_RE = re.compile(r'[0-9a-f]{32}')
 
@@ -154,7 +163,7 @@ class HoldSize:
     leverage: int = HOLD_LEVERAGE
     shrunk: bool = False                # the margin did not fit: qty is the largest size that does
     q_wanted: float = None              # the size before the margin shrink
-    margin_needed: float = None         # for qty at the fixed leverage, with Kraken's 1.5x factor
+    margin_needed: float = None         # for qty at `leverage`, with Kraken's 1.5x factor
     detail: str = ''
 
     @property
@@ -185,12 +194,18 @@ def size_hold(equity, mark, ref_entry, stop, r_b, n2, lot, free_margin, scale=No
         return HoldSize(reason=HOLD_STOP_NOT_BELOW_REF)
     if p <= st * MIN_STOP_DISTANCE:
         return HoldSize(reason=HOLD_MARK_NEAR_STOP, detail='mark %s <= stop %s x 1.01' % (p, st))
+    d = (p - st) / p
+    lev_n = min(Decimal(HOLD_LEVERAGE), (LIQ_BUFFER / d).to_integral_value(rounding=ROUND_FLOOR))
+    if lev_n < 1:
+        return HoldSize(reason=HOLD_STOP_TOO_WIDE, leverage=0,
+                        detail='stop %s is %.1f%% below mark %s: even 1x would be liquidated first' % (st, d * 100, p))
+    lev_i = int(lev_n)
     q_risk = eq * rb / (p - st)
     q_cap = eq * nn / p
     q = _floor_lot(min(q_risk, q_cap) * sc, lt)
     if q <= 0:
         return HoldSize(reason=HOLD_SIZE_ZERO)
-    lev = Decimal(HOLD_LEVERAGE)
+    lev = Decimal(lev_i)
     q_fit = _floor_lot(free * MARGIN_USE * lev / (MARGIN_FACTOR * p), lt)       # the largest size that fits
     shrunk = False
     q_wanted = q
@@ -199,8 +214,8 @@ def size_hold(equity, mark, ref_entry, stop, r_b, n2, lot, free_margin, scale=No
         q = q_fit
         if q <= 0:
             return HoldSize(reason=HOLD_MARGIN_SKIP, shrunk=True, q_wanted=float(q_wanted),
-                            detail='free margin %s fits less than one lot at %dx' % (free, HOLD_LEVERAGE))
-    return HoldSize(qty=float(q), reason=HOLD_OK, shrunk=shrunk, q_wanted=float(q_wanted),
+                            leverage=lev_i, detail='free margin %s fits less than one lot at %dx' % (free, lev_i))
+    return HoldSize(qty=float(q), reason=HOLD_OK, leverage=lev_i, shrunk=shrunk, q_wanted=float(q_wanted),
                     margin_needed=float(q * p / lev * MARGIN_FACTOR))
 
 

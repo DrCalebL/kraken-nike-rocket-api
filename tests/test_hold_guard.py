@@ -172,3 +172,33 @@ def test_allowlist_parsing_and_membership():
     al = hg.parse_allowlist('7, A@B.com ,,12')
     assert hg.user_allowed(al, 7, 'x') and hg.user_allowed(al, 99, 'a@b.COM') and not hg.user_allowed(al, 8, 'q@q.q')
     assert not hg.user_allowed(hg.parse_allowlist(','), 1, 'a@b.c')       # a list that parsed to nothing allows nobody
+
+
+# ---------------- liquidation must sit beyond the stop: lev = min(10, floor(0.8 / d)) ----------------
+
+@pytest.mark.parametrize('stop,expected', [(570.0, 10), (552.0, 10), (528.0, 6), (480.0, 4), (420.0, 2), (300.0, 1)])
+def test_leverage_is_chosen_from_the_stop_distance(stop, expected):
+    s = size(stop=stop, r_b=0.05)
+    assert s.ok and s.leverage == expected
+    d = (600.0 - stop) / 600.0
+    assert d <= 0.8 / s.leverage + 1e-9                           # the stop sits inside 80% of the liquidation distance
+
+
+def test_a_12_percent_stop_runs_at_6x_and_a_late_join_at_22_percent_at_3x():
+    assert size(stop=528.0).leverage == 6
+    late = size(mark=700.0, ref_entry=600.0, stop=546.0)           # a late join: stop 22% below ITS mark
+    assert late.ok and late.leverage == 3
+
+
+def test_a_stop_85_percent_away_is_refused_even_at_1x():
+    s = size(stop=90.0)
+    assert not s.ok and s.reason == hg.HOLD_STOP_TOO_WIDE and s.qty is None
+    assert size(stop=121.0).ok and size(stop=121.0).leverage == 1    # d = 79.8%: exactly the 1x edge
+    assert size(stop=119.0).reason == hg.HOLD_STOP_TOO_WIDE           # d = 80.2%: beyond it
+
+
+def test_the_margin_fit_uses_the_chosen_leverage():
+    s10, s6 = size(free_margin=300.0), size(stop=528.0, r_b=0.02, free_margin=300.0)
+    assert s10.leverage == 10 and s6.leverage == 6
+    assert s6.margin_needed <= 300 * 0.95 + 1e-9 and s6.shrunk
+    assert s6.qty == 1.9                                            # 300 * 0.95 * 6 / (1.5 * 600)
