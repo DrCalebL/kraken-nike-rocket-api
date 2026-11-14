@@ -375,6 +375,14 @@ class PositionGuardian:
         return exchange
 
     @staticmethod
+    def _resolve(exchange, symbol):
+        """The unified symbol of a row's PF_ id, or None when the market lookup fails."""
+        try:
+            return exchange.market(symbol)['symbol']
+        except Exception:
+            return None
+
+    @staticmethod
     def _unified(exchange, symbol):
         try:
             return exchange.market(symbol)['symbol']
@@ -587,10 +595,16 @@ class PositionGuardian:
             # Also check: does the DB know about THIS position? Counted per (user, symbol) (audit 3): a tracked row on
             # another symbol (e.g. a BNB hold, or an ADA bracket next to a naked rowless BNB position) proves nothing
             # about this one. Same predicate as SQL_TRACKED_OPEN_ROWS: an 'open' row with both leg ids recorded.
-            db_position = sum(1 for r in user_rows
-                              if r['status'] == 'open' and r.get('tp_order_id') is not None
-                              and r.get('sl_order_id') is not None
-                              and self._unified(exchange, r.get('kraken_symbol') or r.get('symbol')) == symbol)
+            tracked = [r for r in user_rows
+                       if r['status'] == 'open' and r.get('tp_order_id') is not None
+                       and r.get('sl_order_id') is not None]
+            resolved = [(r, self._resolve(exchange, r.get('kraken_symbol') or r.get('symbol'))) for r in tracked]
+            if any(sym is None for _r, sym in resolved):
+                # a tracked row whose symbol cannot be resolved: fall back to the old account-wide rule (any tracked
+                # row protects; never close on an unresolved symbol)
+                db_position = len(tracked)
+            else:
+                db_position = sum(1 for _r, sym in resolved if sym == symbol)
 
             if not follower_guard.legacy_rowless_should_close(symbol_orders, db_position):
                 # Position has some protection or is tracked — skip

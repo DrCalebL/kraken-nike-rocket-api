@@ -23,15 +23,18 @@ delivery skips, and `execute_hold_entry` refuses (acknowledging the delivery), a
 row whose signal has the same `hold_leader_trade_id`.
 
 ## Audit round (Fable multi-audit of 7d8dc9c)
-- Leverage per hold: `lev = min(10, floor(0.8 / d))`, `d = (P - stop) / P` at the follower's own mark (`hold_guard.LIQ_BUFFER`).
-  ASSUMPTION (unverified on the venue): an isolated long liquidates at about -1/lev of price, maintenance margin makes it closer;
-  the stop must sit inside 80% of that distance. `lev < 1` refuses (`HOLD_STOP_TOO_WIDE`). The margin fit uses that lev and
+- Leverage per hold: `lev = min(10, floor(0.8 / (d + HOLD_MM + HOLD_FUNDING_ALLOW)))`, `d = (P - stop) / P` at the follower's own
+  mark, `HOLD_MM` default 0.025, `HOLD_FUNDING_ALLOW` default 0.02 (`hold_guard.LIQ_BUFFER`). ASSUMPTION (unverified on the venue):
+  an isolated long liquidates at about -(1/lev - MM) of price; the stop plus MM plus funding must sit inside 80% of that
+  distance. **Verify PF_BNBUSD's maintenance margin on the Kraken demo venue BEFORE HOLD_ENABLED=1** (and tune HOLD_MM). `lev < 1` refuses (`HOLD_STOP_TOO_WIDE`). The margin fit uses that lev and
   `set_leverage(lev)` runs before the entry (a failure = no entry). The row stores the chosen leverage.
 - Entry order of operations: all read-only checks (slot, balance, ticker, size, set_leverage) -> atomic acknowledge -> a
   `needs_recovery` hold row (`kind='hold'`, target_tp NULL, planned qty, target_sl) -> entry -> confirmed fill -> SL -> promote the
   row to `open` (3 tries). A crash anywhere after the row leaves a row the guardian's recovery lane acts on (naked position closed at
   market; a never-filled entry ends `closed_manual`). A promotion that cannot be written closes the position at market and cancels
-  the stop. A definitive refusal acknowledges the delivery; an unreadable state leaves it open for the next cycle. A hold attempt
+  the stop (a stop that cannot be cancelled keeps the row `needs_recovery`, and the stop's id is written onto the recovery row the
+moment it is placed). A pre-entry row that never got an entry order (a failed or crashed attempt that never traded) does not
+block a later re-offer; a row that traded does. A definitive refusal acknowledges the delivery; an unreadable state leaves it open for the next cycle. A hold attempt
   that fails after the row was written ends `closed_manual`, which (like any row of that trade) blocks a later re-offer of the SAME
   master_trade_id for this user: a transient failure costs that offer, never a double entry.
 - `HOLD_ENABLED` is effective only with `GUARDIAN_MODE=enforce` (the hold SL repair exists only there); otherwise the hold stays

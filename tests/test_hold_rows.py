@@ -500,3 +500,20 @@ async def test_a_tracked_row_on_the_same_symbol_still_protects_its_position(monk
     ex.external_cancel(tp)                                             # legs gone, but the row is tracked for this symbol
     await env.g._check_user_for_unprotected(user)
     assert ex.calls('create_order') == [] and ADA in ex.positions
+
+
+async def test_an_unresolvable_row_symbol_falls_back_to_the_account_wide_rule_and_never_closes(monkeypatch, notify_log):
+    env = guardian_env(monkeypatch, mode='legacy')
+    user, ex = env.user()
+    env.bracket(user, ex)                                              # a tracked ADA row
+    ex.open_position(BNB, 'long', 6.66, 600.0, ts_ms=env.clock.ms() - 900_000)   # naked, rowless
+    real_market = ex.market
+
+    def flaky(symbol):
+        if symbol == 'PF_ADAUSD':
+            raise RuntimeError('market lookup failed')
+        return real_market(symbol)
+
+    monkeypatch.setattr(ex, 'market', flaky)
+    await env.g._check_user_for_unprotected(user)
+    assert ex.calls('create_order') == [] and BNB in ex.positions      # unresolved: the old rule hides it, nothing closes
