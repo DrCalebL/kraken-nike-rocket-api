@@ -87,7 +87,7 @@ def size(**kw):
 
 def test_risk_sized_when_the_risk_leg_is_smaller():
     s = size()                                  # risk: 10000 * 0.02 / 30 = 6.666 ; cap: 10000 * 0.5 / 600 = 8.33
-    assert s.ok and s.qty == 6.66 and s.leverage == 10 and not s.shrunk
+    assert s.ok and s.qty == 6.66 and s.leverage == 8 and not s.shrunk      # d 5% + 4.5% costs -> floor(0.8/0.095)
 
 
 def test_notional_cap_when_the_stop_is_tight():
@@ -130,8 +130,8 @@ def test_size_scale_halves_and_caps_at_one(monkeypatch):
 
 def test_margin_shrinks_to_fit_and_never_raises_leverage():
     full = size()
-    s = size(free_margin=300)                   # 300 * 0.95 * 10 / (1.5 * 600) = 3.166 -> 3.16
-    assert s.ok and s.shrunk and s.qty == 3.16 and s.q_wanted == full.qty and s.leverage == 10
+    s = size(free_margin=300)                   # 300 * 0.95 * 8 / (1.5 * 600) = 2.533 -> 2.53
+    assert s.ok and s.shrunk and s.qty == 2.53 and s.q_wanted == full.qty and s.leverage == 8
     assert s.margin_needed <= 300 * 0.95 + 1e-9
 
 
@@ -174,31 +174,43 @@ def test_allowlist_parsing_and_membership():
     assert not hg.user_allowed(hg.parse_allowlist(','), 1, 'a@b.c')       # a list that parsed to nothing allows nobody
 
 
-# ---------------- liquidation must sit beyond the stop: lev = min(10, floor(0.8 / d)) ----------------
+# ---------------- liquidation must sit beyond the stop: lev = min(10, floor(0.8 / (d + MM + funding))) ----------------
 
-@pytest.mark.parametrize('stop,expected', [(570.0, 10), (552.0, 10), (528.0, 6), (480.0, 4), (420.0, 2), (300.0, 1)])
-def test_leverage_is_chosen_from_the_stop_distance(stop, expected):
+@pytest.mark.parametrize('stop,expected', [(594.0, 10), (570.0, 8), (552.0, 6), (528.0, 4), (480.0, 3), (420.0, 2),
+                                           (300.0, 1), (150.0, 1)])
+def test_leverage_is_chosen_from_the_stop_distance_plus_maintenance_margin_and_funding(stop, expected):
     s = size(stop=stop, r_b=0.05)
     assert s.ok and s.leverage == expected
     d = (600.0 - stop) / 600.0
-    assert d <= 0.8 / s.leverage + 1e-9                           # the stop sits inside 80% of the liquidation distance
+    assert d + 0.025 + 0.02 <= 0.8 / s.leverage + 1e-9            # stop + MM + funding sit inside 80% of liquidation
 
 
-def test_a_12_percent_stop_runs_at_6x_and_a_late_join_at_22_percent_at_3x():
-    assert size(stop=528.0).leverage == 6
+def test_an_8_percent_stop_runs_at_6x_a_12_percent_one_at_4x_and_a_late_join_at_22_percent_at_3x():
+    assert size(stop=552.0).leverage == 6                          # floor(0.8 / 0.125)
+    assert size(stop=528.0).leverage == 4
     late = size(mark=700.0, ref_entry=600.0, stop=546.0)           # a late join: stop 22% below ITS mark
     assert late.ok and late.leverage == 3
 
 
-def test_a_stop_85_percent_away_is_refused_even_at_1x():
-    s = size(stop=90.0)
-    assert not s.ok and s.reason == hg.HOLD_STOP_TOO_WIDE and s.qty is None
-    assert size(stop=121.0).ok and size(stop=121.0).leverage == 1    # d = 79.8%: exactly the 1x edge
-    assert size(stop=119.0).reason == hg.HOLD_STOP_TOO_WIDE           # d = 80.2%: beyond it
+def test_a_stop_so_wide_that_even_1x_is_liquidated_first_is_refused():
+    for stop in (90.0, 119.0, 140.0):
+        s = size(stop=stop)
+        assert not s.ok and s.reason == hg.HOLD_STOP_TOO_WIDE and s.qty is None
+    assert size(stop=150.0).ok                                     # d = 75% + 4.5% = 79.5% <= 80%
+
+
+def test_maintenance_margin_and_funding_allowance_are_env_tunable(monkeypatch):
+    assert size(stop=552.0).leverage == 6
+    monkeypatch.setenv('HOLD_MM', '0.05')
+    monkeypatch.setenv('HOLD_FUNDING_ALLOW', '0.05')
+    assert size(stop=552.0).leverage == 4                          # floor(0.8 / 0.18)
+    monkeypatch.setenv('HOLD_MM', 'junk')
+    monkeypatch.setenv('HOLD_FUNDING_ALLOW', '-1')
+    assert size(stop=552.0).leverage == 6                          # unreadable / out of range -> the defaults
 
 
 def test_the_margin_fit_uses_the_chosen_leverage():
-    s10, s6 = size(free_margin=300.0), size(stop=528.0, r_b=0.02, free_margin=300.0)
-    assert s10.leverage == 10 and s6.leverage == 6
-    assert s6.margin_needed <= 300 * 0.95 + 1e-9 and s6.shrunk
-    assert s6.qty == 1.9                                            # 300 * 0.95 * 6 / (1.5 * 600)
+    s8, s4 = size(free_margin=300.0), size(stop=528.0, r_b=0.02, free_margin=300.0)
+    assert s8.leverage == 8 and s4.leverage == 4
+    assert s4.margin_needed <= 300 * 0.95 + 1e-9 and s4.shrunk
+    assert s4.qty == 1.26             # 300 * 0.95 * 4 / (1.5 * 600) = 1.2666 -> 1.26

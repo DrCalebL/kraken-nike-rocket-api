@@ -13,7 +13,7 @@ Sizing (the HL vault ruling "Binance R", ported from rocket_twin/leader.py g1c_s
 The follower risks r_b of ITS equity if the shared stop is hit, and never more than the normal n2 notional (never
 sizes up on a better price). A late join sizes at its own price (owner: same as the HL vault G1c); the only price
 refusal is P <= stop * 1.01. Leverage is chosen per hold as
-min(10, floor(0.8 / stop distance)) (see LIQ_BUFFER) and is NEVER raised: when the margin does not fit the free margin the size shrinks to fit, and below one lot the entry is
+min(10, floor(0.8 / (stop distance + HOLD_MM + HOLD_FUNDING_ALLOW))) (see LIQ_BUFFER) and is NEVER raised: when the margin does not fit the free margin the size shrinks to fit, and below one lot the entry is
 skipped (HOLD_MARGIN_SKIP). Every unreadable or non-finite input refuses (fail closed).
 """
 import math
@@ -28,13 +28,26 @@ HOLD_SYMBOL = 'BNB/USDT'
 OFFER_KINDS = ('entry', 'reoffer')
 HOLD_LEVERAGE = 10                      # the CEILING: a hold never runs above 10x
 # Liquidation before stop (audit): Kraken multi-collateral isolates the symbol's margin (leveragepreferences), and a long at
-# leverage L is liquidated at about -1/L of price (maintenance margin only makes it closer). Binance's stop is often 7-12%+
-# below the mark (more on a late join), where 10x would be liquidated first. So per hold:
-#     d   = (P - stop) / P                   (the stop distance at the follower's own mark P)
-#     lev = min(10, floor(LIQ_BUFFER / d))   (LIQ_BUFFER = 0.8: the stop must sit inside 80% of the liquidation distance,
-#                                              leaving 20% of it as the maintenance-margin / slippage buffer)
-# lev < 1 refuses (HOLD_STOP_TOO_WIDE). ASSUMPTION: liquidation distance ~ 1/lev; not verified on the venue.
+# leverage L is liquidated at about -(1/L - MM) of price. Binance's stop is often 7-12%+ below the mark (more on a late
+# join), where 10x would be liquidated first. So per hold:
+#     d   = (P - stop) / P                                  (the stop distance at the follower's own mark P)
+#     lev = min(10, floor(LIQ_BUFFER / (d + HOLD_MM + HOLD_FUNDING_ALLOW)))
+# LIQ_BUFFER = 0.8: the stop plus the maintenance margin and a funding allowance must sit inside 80% of the liquidation
+# distance, leaving 20% as slippage buffer. HOLD_MM (default 0.025) and HOLD_FUNDING_ALLOW (default 0.02) are env-tunable.
+# lev < 1 refuses (HOLD_STOP_TOO_WIDE). ASSUMPTIONS, NOT VERIFIED ON THE VENUE: liquidation ~ -(1/lev - MM); the PF_BNBUSD
+# maintenance margin. VERIFY PF_BNBUSD's maintenance margin on the Kraken demo venue BEFORE HOLD_ENABLED=1.
 LIQ_BUFFER = Decimal('0.8')
+DEFAULT_HOLD_MM = Decimal('0.025')
+DEFAULT_HOLD_FUNDING_ALLOW = Decimal('0.02')
+
+
+def _env_fraction(name, default):
+    """A non-negative decimal below 1 from the environment; unset, unreadable or out of range -> the default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    d = _dec(raw)
+    return d if d is not None and 0 <= d < 1 else default
 HOLD_MAX_AGE_MS = 15 * 60_000           # an offer older than this is refused (endpoint) / not executed (loop)
 HOLD_MAX_FUTURE_MS = 5 * 60_000
 MIN_STOP_DISTANCE = Decimal('1.01')     # P must be above stop * 1.01
@@ -195,10 +208,11 @@ def size_hold(equity, mark, ref_entry, stop, r_b, n2, lot, free_margin, scale=No
     if p <= st * MIN_STOP_DISTANCE:
         return HoldSize(reason=HOLD_MARK_NEAR_STOP, detail='mark %s <= stop %s x 1.01' % (p, st))
     d = (p - st) / p
-    lev_n = min(Decimal(HOLD_LEVERAGE), (LIQ_BUFFER / d).to_integral_value(rounding=ROUND_FLOOR))
+    cost = d + _env_fraction('HOLD_MM', DEFAULT_HOLD_MM) + _env_fraction('HOLD_FUNDING_ALLOW', DEFAULT_HOLD_FUNDING_ALLOW)
+    lev_n = min(Decimal(HOLD_LEVERAGE), (LIQ_BUFFER / cost).to_integral_value(rounding=ROUND_FLOOR))
     if lev_n < 1:
         return HoldSize(reason=HOLD_STOP_TOO_WIDE, leverage=0,
-                        detail='stop %s is %.1f%% below mark %s: even 1x would be liquidated first' % (st, d * 100, p))
+                        detail='stop %s is %.1f%% below mark %s (+ maintenance margin and funding allowance): even 1x would be liquidated first' % (st, d * 100, p))
     lev_i = int(lev_n)
     q_risk = eq * rb / (p - st)
     q_cap = eq * nn / p

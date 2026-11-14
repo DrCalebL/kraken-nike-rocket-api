@@ -87,7 +87,7 @@ def test_hold_entry_places_a_confirmed_stop_only_position(monkeypatch, fast_slee
     pos = e.ex.positions[BNB]
     assert pos['side'] == 'long' and pos['contracts'] == 6.66            # min(10000*.02/30, 10000*.5/600) at mark 600
     (_, lev), = e.ex.calls('set_leverage')
-    assert lev['leverage'] == 10
+    assert lev['leverage'] == 8
     sls = [i for _m, i in _orders(e.ex) if _is_sl(i)]
     assert len(sls) == 1 and float(sls[0]['amount']) == 6.66 and sls[0]['params']['stopPrice'] == 570.0
     assert e.ex.calls('create_limit_order') == [] and not any(i['type'] == 'limit' for _m, i in _orders(e.ex))
@@ -135,7 +135,7 @@ def test_leverage_is_set_before_the_entry_and_never_above_ten(monkeypatch, fast_
     run(_enter(e))
     names = [m for m, _i in e.ex.calls()]
     assert names.index('set_leverage') < names.index('create_market_order')
-    assert all(i['leverage'] == 10 for _m, i in e.ex.calls('set_leverage'))
+    assert all(i['leverage'] == 8 for _m, i in e.ex.calls('set_leverage'))
 
 
 def test_a_failed_leverage_set_means_no_entry(monkeypatch, fast_sleep, notify_log):
@@ -187,8 +187,8 @@ def test_margin_shrinks_the_size_and_leverage_stays_ten(monkeypatch, fast_sleep,
     e = _env(monkeypatch)
     e.ex.free_margin = 300.0
     run(_enter(e))
-    assert e.ex.positions[BNB]['contracts'] == 3.16
-    assert all(i['leverage'] == 10 for _m, i in e.ex.calls('set_leverage'))
+    assert e.ex.positions[BNB]['contracts'] == 2.53
+    assert all(i['leverage'] == 8 for _m, i in e.ex.calls('set_leverage'))
 
 
 def test_no_margin_skips_with_hold_margin_skip(monkeypatch, fast_sleep, notify_log):
@@ -1215,9 +1215,9 @@ def test_a_different_leader_trade_is_not_blocked_by_the_same_leader_check(monkey
 def test_the_leverage_follows_the_stop_distance_and_is_stored_on_the_row(monkeypatch, fast_sleep, notify_log):
     e = _env(monkeypatch)
     run(_enter(e, stop=528.0, r_b=0.05))                                   # 12% stop -> 6x
-    assert [i['leverage'] for _m, i in e.ex.calls('set_leverage')] == [6]
+    assert [i['leverage'] for _m, i in e.ex.calls('set_leverage')] == [4]
     row, = _hold_rows(e)
-    assert row['leverage'] == 6.0 and row['status'] == 'open'
+    assert row['leverage'] == 4.0 and row['status'] == 'open'
 
 
 def test_a_stop_so_wide_that_even_1x_is_liquidated_first_is_refused(monkeypatch, fast_sleep, notify_log):
