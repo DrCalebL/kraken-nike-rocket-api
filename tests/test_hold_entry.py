@@ -1423,3 +1423,115 @@ def test_ada_leverage_cap_follows_the_effective_hold_switch(monkeypatch, fast_sl
     sig = dict(_ada_item(e), **_ada_signal_for_leverage())
     run(e.loop.execute_trade(dict(e.user, hold_enabled=True), sig))
     assert e.ex.leverage == 16
+
+
+# ---------------- verification round: no live SL without a row, never-filled rows do not block ----------------
+
+def _live_orders_unreferenced(e):
+    ids = {str(r.get('sl_order_id')) for r in e.db.rows if r.get('sl_order_id')}
+    return [oid for oid in e.ex.orders if oid not in ids]
+
+
+def test_the_stop_id_is_on_the_recovery_row_right_after_the_stop_is_placed(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    seen = []
+    real = e.loop._hold_exec
+
+    async def spy(sql, *args, **kw):
+        if sql == htl.SQL_PROMOTE_HOLD_ROW:
+            seen.append([(r['status'], r['sl_order_id'] in e.ex.orders) for r in e.db.rows])
+        return await real(sql, *args, **kw)
+
+    monkeypatch.setattr(e.loop, '_hold_exec', spy)
+    run(_enter(e))
+    assert seen == [[('needs_recovery', True)]]                           # before the promotion: row -> live stop
+
+
+def test_a_crash_between_the_stop_and_the_promotion_leaves_the_stop_referenced(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    real = e.loop._hold_exec
+
+    async def crash_on_promote(sql, *args, **kw):
+        if sql == htl.SQL_PROMOTE_HOLD_ROW:
+            raise Crash()
+        return await real(sql, *args, **kw)
+
+    monkeypatch.setattr(e.loop, '_hold_exec', crash_on_promote)
+    with pytest.raises(Crash):
+        run(e.loop._execute_hold_for_user(e.hold.add_delivery(e.user)))
+    row, = _hold_rows(e)
+    assert row['status'] == 'needs_recovery' and e.ex.orders and _live_orders_unreferenced(e) == []
+
+
+def test_a_stop_that_cannot_be_cancelled_after_the_forced_close_keeps_the_row_needs_recovery(monkeypatch, fast_sleep,
+                                                                                            notify_log):
+    e = _env(monkeypatch)
+    e.hold.fail_promote = 10
+
+    async def never(*a, **k):
+        return False
+
+    monkeypatch.setattr(e.loop, '_cancel_order_verified', never)
+    run(_enter(e))
+    row, = _hold_rows(e)
+    assert e.ex.positions == {} and row['status'] == 'needs_recovery'      # not closed_manual
+    assert _live_orders_unreferenced(e) == [] and row['sl_order_id'] in e.ex.orders
+
+
+def test_a_post_entry_exception_with_a_live_stop_keeps_it_on_the_row(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    run(_enter(e))                                                         # a live position + stop + row
+    row, = _hold_rows(e)
+    sl = row['sl_order_id']
+    e.db.row(row['id']).update(status='needs_recovery', sl_order_id=None)  # as if the row had never learned the stop
+    run(e.loop._post_entry_exception(RuntimeError('x'), e.ex, e.user, {'symbol': 'BNB/USDT', 'action': 'BUY',
+                                     'entry_price': 600.0, 'stop_loss': 570.0, 'take_profit': None},
+                                     'PF_BNBUSD', {'id': 'E1'}, 6.66, 10, 88, {'id': sl}, None, kind='hold',
+                                     pre_row_id=row['id']))
+    assert e.db.row(row['id'])['sl_order_id'] == sl and _live_orders_unreferenced(e) == []
+
+
+def test_a_failed_entry_does_not_block_a_later_reoffer(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    real = htl.place_entry_order_with_retry
+
+    async def none(**kw):
+        return None
+
+    monkeypatch.setattr(htl, 'place_entry_order_with_retry', none)
+    run(_enter(e))
+    assert [r['status'] for r in _hold_rows(e)] == ['closed_manual'] and 'HOLD_DELIVERY_ACKED_NO_ENTRY' in e.db.error_types()
+    monkeypatch.setattr(htl, 'place_entry_order_with_retry', real)
+    run(_enter(e, delivery_id=8400))                                       # the daily re-offer
+    assert len(_entries(e.ex)) == 1 and sorted(r['status'] for r in _hold_rows(e)) == ['closed_manual', 'open']
+
+
+def test_a_hold_that_actually_traded_and_closed_still_blocks_a_reoffer(monkeypatch, fast_sleep, notify_log):
+    e = _env(monkeypatch)
+    e.ex.fault('create_order', ccxt.ExchangeError('rejected'), times=50, when=_is_sl)
+    run(_enter(e))                                                         # entered, SL failed, closed_manual
+    assert [r['status'] for r in _hold_rows(e)] == ['closed_manual'] and e.db.rows[0]['entry_order_id'] != 'pending-hold-entry'
+    run(_enter(e, delivery_id=8401))
+    assert len(_entries(e.ex)) == 1
+
+
+def test_the_endpoint_offers_again_to_a_user_whose_only_row_never_traded(monkeypatch, tmp_path):
+    a = _api(monkeypatch, tmp_path)
+    _post_hold(a, _hold_payload())
+    s = a.Session()
+    fm = a.fm
+    sig = s.query(fm.Signal).one()
+    uid = s.query(fm.User).filter_by(api_key='nk_hold_user_1').one().id
+    s.add(fm.OpenPosition(user_id=uid, signal_id=sig.id, entry_order_id='pending-hold-entry', symbol='BNB/USDT',
+                          kraken_symbol='PF_BNBUSD', side='BUY', quantity=1.0, target_tp=None, target_sl=570.0,
+                          kind='hold', status='closed_manual'))
+    s.add(fm.OpenPosition(user_id=uid + 1, signal_id=sig.id, entry_order_id='E-real', symbol='BNB/USDT',
+                          kraken_symbol='PF_BNBUSD', side='BUY', quantity=1.0, target_tp=None, target_sl=570.0,
+                          kind='hold', status='closed_manual'))
+    for d in s.query(fm.SignalDelivery).all():
+        d.acknowledged = True
+    s.commit()
+    import follower_endpoints as fe
+    eligible = {u.api_key for u in fe._hold_eligible_users(s, sig.id, MTID, 'L-1')}
+    s.close()
+    assert 'nk_hold_user_1' in eligible and 'nk_hold_user_2' not in eligible

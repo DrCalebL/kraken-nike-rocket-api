@@ -20,6 +20,8 @@ class HoldDB:
         p = self.pool
         p.on(htl.SQL_OTHER_KIND_ROWS, self._other_kind_rows)
         p.on(htl.SQL_PROMOTE_HOLD_ROW, self._promote)
+        p.on(htl.SQL_HOLD_SIGNAL_ROWS, self._signal_rows)
+        p.on(htl.SQL_HOLD_ROW_SL, self._row_sl)
         p.on(htl.SQL_HOLD_ROW_ENTRY, self._row_entry)
         p.on(htl.SQL_HOLD_ROW_CLOSE, self._row_close)
         self.fail_promote = 0           # the next N promotions raise (a DB blip)
@@ -67,6 +69,18 @@ class HoldDB:
             return 'UPDATE 0'
         r.update(status='open', entry_order_id=entry_id, sl_order_id=sl_id, quantity=qty, entry_fill_price=fill,
                  target_sl=sl, leverage=lev)
+        return 'UPDATE 1'
+
+    def _signal_rows(self, method, sql, args):
+        user_id, signal_id = args
+        return sum(1 for r in self.db.rows if r['user_id'] == user_id and r.get('signal_id') == signal_id
+                   and not (r['status'] == 'closed_manual' and r.get('entry_order_id') == 'pending-hold-entry'))
+
+    def _row_sl(self, method, sql, args):
+        r = self._guard_row(args[0])
+        if r is None:
+            return 'UPDATE 0'
+        r['sl_order_id'] = args[1]
         return 'UPDATE 1'
 
     def _row_entry(self, method, sql, args):

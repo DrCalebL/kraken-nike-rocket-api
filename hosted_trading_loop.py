@@ -284,6 +284,16 @@ SQL_PROMOTE_HOLD_ROW = """
            entry_fill_price = $5, target_sl = $6, leverage = $7
     WHERE id = $1 AND status = 'needs_recovery'
 """
+# CHECK 0 for a hold: any row of this signal blocks, EXCEPT a pre-entry row that never got an entry order (a failed or
+# crashed attempt that never traded): that must not block a later re-offer.
+SQL_HOLD_SIGNAL_ROWS = """
+    SELECT COUNT(*) FROM open_positions
+    WHERE user_id = $1 AND signal_id = $2
+      AND NOT (status = 'closed_manual' AND entry_order_id = 'pending-hold-entry')
+"""
+SQL_HOLD_ROW_SL = """
+    UPDATE open_positions SET sl_order_id = $2 WHERE id = $1 AND status = 'needs_recovery'
+"""
 SQL_HOLD_ROW_ENTRY = """
     UPDATE open_positions SET entry_order_id = $2, quantity = $3, entry_fill_price = $4
     WHERE id = $1 AND status = 'needs_recovery'
@@ -774,7 +784,8 @@ class HostedTradingLoop:
                     if signal_int_id:
                         # Check if we already have a position for this signal (open or closed)
                         # Cast to handle any type mismatches between model and actual DB
-                        existing_position = await conn.fetchval("""
+                        existing_position = await conn.fetchval(
+                            SQL_HOLD_SIGNAL_ROWS if strategy == 'hold' else """
                             SELECT COUNT(*) FROM open_positions 
                             WHERE user_id = $1 AND signal_id = $2
                         """, user_id, int(signal_int_id))
@@ -1681,6 +1692,10 @@ class HostedTradingLoop:
                 user_api_key=user_api_key, confirm_position_fn=lambda: self._position_is_open(exchange, kraken_symbol))
             if not entry_order:
                 await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)       # nothing was entered
+                await log_error_to_db(self.db_pool, user_api_key, "HOLD_DELIVERY_ACKED_NO_ENTRY",
+                                      "the hold delivery was acknowledged and no entry order was accepted; "
+                                      "the never-filled recovery row does not block a re-offer",
+                                      {"master_trade_id": mtid, "delivery_id": delivery_id})
                 await notify_entry_failed(user_email=user_email, user_api_key=user_api_key, symbol=kraken_symbol,
                                           side='buy', quantity=quantity, error="All retry attempts exhausted (hold)")
                 await log_error_to_db(self.db_pool, user_api_key, "ENTRY_ORDER_FAILED",
@@ -1720,6 +1735,9 @@ class HostedTradingLoop:
                 stage = 'done'
                 return False
             self.logger.info(f"   ✅ Hold SL @ ${sl_price}: {sl_order['id']}")
+            # the live stop is referenced by the recovery row IMMEDIATELY (a crash / failed promotion must never leave
+            # a stop no row knows about: the recovery lane then cancels it with the row)
+            await self._hold_exec_quiet(SQL_HOLD_ROW_SL, pre_row_id, str(sl_order['id']))
 
             opened_at = datetime.utcnow()
             try:
@@ -1745,8 +1763,9 @@ class HostedTradingLoop:
                     target_tp=None, target_sl=stop_loss, sl_order_id=str(sl_order['id']), outcome=outcome,
                     kind='hold', skip_record=True)
                 if closed and outcome.get('sent') and await self._verified_flat(exchange, kraken_symbol):
-                    await self._cancel_order_verified(exchange, str(sl_order['id']), kraken_symbol)
-                    await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)
+                    if await self._cancel_order_verified(exchange, str(sl_order['id']), kraken_symbol):
+                        await self._hold_exec_quiet(SQL_HOLD_ROW_CLOSE, pre_row_id)
+                    # else: the row stays needs_recovery WITH the stop's id; the guardian cancels it with the row
                 stage = 'done'
                 return False
             await self._late_close_check(user, signal_db_id, user_api_key)
@@ -1839,6 +1858,8 @@ class HostedTradingLoop:
                     await self._hold_exec_quiet(SQL_HOLD_ROW_ENTRY, pre_row_id,
                                                 str(entry_order['id']) if entry_order else 'unknown', quantity,
                                                 float(signal['entry_price']))
+                    if sl_oid:
+                        await self._hold_exec_quiet(SQL_HOLD_ROW_SL, pre_row_id, sl_oid)
                     return
                 await self._record_unprotected_position(**record, reason=reason, sl_order_id=sl_oid, tp_order_id=tp_oid)
                 return
@@ -1846,6 +1867,8 @@ class HostedTradingLoop:
             leftover_tp = tp_oid if (tp_oid and not await self._cancel_order_verified(exchange, tp_oid, kraken_symbol)) else None
             if leftover_sl or leftover_tp:
                 if pre_row_id:
+                    if leftover_sl:                  # the stop we could not cancel is referenced by the row
+                        await self._hold_exec_quiet(SQL_HOLD_ROW_SL, pre_row_id, leftover_sl)
                     return                           # stays needs_recovery; the guardian cancels / closes
                 await self._record_unprotected_position(**record, reason='POST_ENTRY_EXCEPTION_LEFTOVER',
                                                         sl_order_id=leftover_sl, tp_order_id=leftover_tp)

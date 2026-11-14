@@ -622,7 +622,10 @@ def _hold_eligible_users(db: Session, signal_db_id: int, mtid: str, leader_trade
         or_(User.hold_enabled.is_(None), User.hold_enabled == True),
     ).all()
     have_row = {r[0] for r in db.query(OpenPosition.user_id).join(Signal, OpenPosition.signal_id == Signal.id)
-                .filter(Signal.master_trade_id == mtid).all()}
+                .filter(Signal.master_trade_id == mtid)
+                # a pre-entry row that never got an entry order (failed / crashed attempt, never traded) does not block
+                .filter(~((OpenPosition.status == 'closed_manual') & (OpenPosition.entry_order_id == 'pending-hold-entry')))
+                .all()}
     sat_out = {r[0] for r in db.query(HoldSitout.user_id).filter(HoldSitout.master_trade_id == mtid).all()}
     # the SAME Binance hold under another master_trade_id (a master that lost its state): never a second position
     same_leader = set()
